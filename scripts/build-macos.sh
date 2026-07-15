@@ -28,7 +28,7 @@ fi
 command -v cmake >/dev/null || { echo "cmake is required." >&2; exit 1; }
 command -v ninja >/dev/null || { echo "ninja is required." >&2; exit 1; }
 
-cmake_args=(--preset "$preset")
+cmake_args=(--preset "$preset" "-DCMAKE_MAKE_PROGRAM=$(command -v ninja)")
 if [[ -n "${TMC_OSX_ARCHITECTURES:-}" ]]; then
   cmake_args+=("-DCMAKE_OSX_ARCHITECTURES=$TMC_OSX_ARCHITECTURES")
 fi

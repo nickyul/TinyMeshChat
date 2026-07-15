@@ -122,4 +122,4 @@ bash scripts/build-macos.sh
 
 На другом Mac распакуйте ZIP и запустите `TinyMeshChat.app`. Поскольку сборка не подписана сертификатом Apple Developer ID и не notarized, при первом запуске может потребоваться команда `Открыть` из контекстного меню Finder.
 
-Каждый push в ветку `main` также запускает workflow `macOS build`. Готовый `TinyMeshChat-macOS.zip` можно скачать на странице GitHub `Actions` из раздела `Artifacts` соответствующего запуска.
+Каждый push в ветку `main` запускает workflow `Desktop builds`. Он собирает `TinyMeshChat-macOS.zip` и portable `TinyMeshChat.zip` для Windows 10/11 x64. Оба архива можно скачать на странице GitHub `Actions` из раздела `Artifacts` соответствующего запуска.

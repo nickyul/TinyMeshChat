@@ -1,4 +1,4 @@
-name: macOS build
+name: Desktop builds
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
 
       - name: Bootstrap vcpkg
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+          git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
           "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
 
       - name: Build and package
@@ -32,6 +32,7 @@ jobs:
           VCPKG_ROOT: ${{ runner.temp }}/vcpkg
           QT_ROOT: /opt/homebrew/opt/qt@6
         run: |
+          export PATH="$(brew --prefix ninja)/bin:$PATH"
           if [[ ! -d "$QT_ROOT" ]]; then
             export QT_ROOT="$(brew --prefix qt@6)"
           fi
@@ -42,4 +43,40 @@ jobs:
         with:
           name: TinyMeshChat-macOS
           path: dist/TinyMeshChat-macOS.zip
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$env:RUNNER_TEMP/vcpkg"
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Build and package
+        shell: pwsh
+        env:
+          VCPKG_ROOT: ${{ runner.temp }}/vcpkg
+        run: .\scripts\package-windows.ps1 windows-release
+
+      - name: Upload Windows portable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: TinyMeshChat-Windows-x64
+          path: dist/TinyMeshChat.zip
           if-no-files-found: error

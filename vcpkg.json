@@ -1,6 +1,6 @@
 {
   "name": "tiny-mesh-chat",
   "version-semver": "0.1.0",
-  "builtin-baseline": "8e8dfb4ba483886936ded5ca201b500b8d8b0096",
+  "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3",
   "dependencies": [{"name":"libdatachannel","default-features":false,"features":["ws"]}]
 }
