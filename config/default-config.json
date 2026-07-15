@@ -1,0 +1,10 @@
+{
+  "ice": {
+    "stun_servers": ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"],
+    "turn_enabled": false,
+    "ice_gathering_timeout_seconds": 20,
+    "connection_timeout_seconds": 30
+  },
+  "keepalive_seconds": 15,
+  "max_room_peers": 8
+}

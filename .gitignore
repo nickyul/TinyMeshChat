@@ -1,0 +1,11 @@
+/build/
+/dist/
+/.vs/
+/.vscode/
+.DS_Store
+CMakeUserPresets.json
+*.user
+*.db
+*.log
+*.tmcinvite
+*.tmcanswer

@@ -1,0 +1,93 @@
+cmake_minimum_required(VERSION 3.25)
+project(TinyMeshChat VERSION 0.1.0 LANGUAGES CXX)
+
+option(TMC_BUILD_GUI "Build the Qt Widgets application" ON)
+option(TMC_WITH_LIBDATACHANNEL "Enable the real WebRTC transport" ON)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+
+if(NOT Qt6_DIR)
+  if(DEFINED ENV{QT_ROOT} AND EXISTS "$ENV{QT_ROOT}")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_ROOT}")
+  elseif(WIN32 AND MSVC)
+    file(GLOB _tmc_qt_candidates LIST_DIRECTORIES true "C:/Qt/6.*/msvc2022_64")
+    list(SORT _tmc_qt_candidates COMPARE NATURAL ORDER DESCENDING)
+    if(_tmc_qt_candidates)
+      list(GET _tmc_qt_candidates 0 _tmc_qt_root)
+      list(APPEND CMAKE_PREFIX_PATH "${_tmc_qt_root}")
+      message(STATUS "TinyMesh Chat detected Qt at ${_tmc_qt_root}")
+    endif()
+  endif()
+endif()
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Sql)
+if(TMC_BUILD_GUI)
+  find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
+endif()
+if(TMC_WITH_LIBDATACHANNEL)
+  find_package(LibDataChannel CONFIG REQUIRED)
+endif()
+
+add_library(tmc_core
+  src/core/app_config.cpp src/core/logger.cpp
+  src/identity/peer_identity.cpp src/identity/identity_manager.cpp
+  src/signaling/invitation.cpp src/signaling/invitation_codec.cpp
+  src/protocol/packet.cpp src/protocol/packet_codec.cpp
+  src/messaging/chat_message.cpp src/messaging/delivery_tracker.cpp
+  src/messaging/sync_manager.cpp src/storage/database.cpp
+  src/storage/message_repository.cpp)
+target_include_directories(tmc_core PUBLIC src)
+target_link_libraries(tmc_core PUBLIC Qt6::Core Qt6::Sql)
+target_compile_definitions(tmc_core PUBLIC TMC_VERSION="${PROJECT_VERSION}")
+
+if(TMC_WITH_LIBDATACHANNEL)
+  target_sources(tmc_core PRIVATE src/network/peer_connection.cpp src/network/peer_connection.h)
+  target_link_libraries(tmc_core PUBLIC LibDataChannel::LibDataChannel)
+  target_compile_definitions(tmc_core PUBLIC TMC_WITH_LIBDATACHANNEL=1)
+endif()
+
+if(TMC_BUILD_GUI)
+  set(_tmc_app_sources src/main.cpp
+    src/app/application_controller.cpp src/app/application_controller.h
+    src/app/network_session.cpp src/app/network_session.h
+    src/ui/main_window.cpp src/ui/main_window.h
+    src/cli/console_controller.cpp src/cli/console_controller.h resources/resources.qrc)
+  if(APPLE)
+    add_executable(TinyMeshChat MACOSX_BUNDLE ${_tmc_app_sources})
+    set_target_properties(TinyMeshChat PROPERTIES
+      MACOSX_BUNDLE_BUNDLE_NAME "TinyMesh Chat"
+      MACOSX_BUNDLE_GUI_IDENTIFIER "chat.tinymesh.app"
+      MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+      MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+  else()
+    add_executable(TinyMeshChat ${_tmc_app_sources})
+  endif()
+  target_link_libraries(TinyMeshChat PRIVATE tmc_core Qt6::Widgets)
+
+  if(WIN32)
+    get_target_property(_tmc_qmake_executable Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_tmc_qt_bin_dir "${_tmc_qmake_executable}" DIRECTORY)
+    find_program(_tmc_windeployqt
+      NAMES windeployqt6 windeployqt
+      HINTS "${_tmc_qt_bin_dir}"
+      REQUIRED)
+
+    add_custom_command(TARGET TinyMeshChat POST_BUILD
+      COMMAND "${_tmc_windeployqt}"
+        --no-translations
+        --compiler-runtime
+        --dir "$<TARGET_FILE_DIR:TinyMeshChat>"
+        "$<TARGET_FILE:TinyMeshChat>"
+      COMMENT "Deploying the Qt runtime for direct IDE execution"
+      VERBATIM)
+  endif()
+endif()
+
+if(TMC_BUILD_GUI)
+  install(TARGETS TinyMeshChat BUNDLE DESTINATION . RUNTIME DESTINATION .)
+endif()

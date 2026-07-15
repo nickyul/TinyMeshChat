@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {"name":"windows-debug","inherits":"windows-base","cacheVariables":{"TMC_WITH_LIBDATACHANNEL":"ON"}},
+    {"name":"windows-release","inherits":"windows-base","cacheVariables":{"TMC_WITH_LIBDATACHANNEL":"ON"}},
+    {
+      "name": "macos-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": {"type":"equals","lhs":"${hostSystemName}","rhs":"Darwin"},
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
+        "TMC_WITH_LIBDATACHANNEL": "ON"
+      }
+    },
+    {"name":"macos-debug","inherits":"macos-base","cacheVariables":{"CMAKE_BUILD_TYPE":"Debug"}},
+    {"name":"macos-release","inherits":"macos-base","cacheVariables":{"CMAKE_BUILD_TYPE":"Release"}}
+  ],
+  "buildPresets": [
+    {"name":"windows-debug","configurePreset":"windows-debug","configuration":"Debug"},
+    {"name":"windows-release","configurePreset":"windows-release","configuration":"Release"},
+    {"name":"macos-debug","configurePreset":"macos-debug"},
+    {"name":"macos-release","configurePreset":"macos-release"}
+  ]
+}
