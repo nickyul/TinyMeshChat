@@ -118,7 +118,7 @@ TURN и relay не используются. Поэтому соединение
 
 ```bash
 export VCPKG_ROOT="$HOME/vcpkg"
-export QT_ROOT="$HOME/Qt/6.8.3/macos"
+export QT_ROOT="$HOME/Qt/6.9.3/macos"
 bash scripts/build-macos.sh
 ```
 
