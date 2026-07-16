@@ -29,7 +29,6 @@ class MainWindow final : public QMainWindow {
     void showAbout();
     void showStunSettings();
     void showNetworkDiagnostics();
-    void openLogs();
 
   private:
     void showSignaling(const QString& kind, const QString& text, const QByteArray& document,

@@ -6,13 +6,13 @@
 #include "signaling/invitation.h"
 #include <QHash>
 #include <QObject>
+#include <QQueue>
 #include <QSet>
 #include <QTimer>
 #include <memory>
 
 namespace tmc {
 class ApplicationController;
-class MessageRepository;
 class PeerConnection;
 
 class NetworkSession final : public QObject {
@@ -23,12 +23,10 @@ class NetworkSession final : public QObject {
     ~NetworkSession() override;
 
     Result<void> createRoom(const QString& name);
-    Result<bool> restoreLastRoom();
     Result<void> createInvitation();
     Result<void> importSignalingText(const QString& text);
     Result<void> importSignalingDocument(const QByteArray& document);
     Result<void> sendMessage(const QString& text);
-    Result<QList<ChatMessage>> history() const;
     Result<QPair<int, int>> deliveryCounts(const QString& messageId) const;
 
     QString roomId() const { return roomId_; }
@@ -52,8 +50,8 @@ class NetworkSession final : public QObject {
     struct Link;
 
     Result<Invitation> decodeSignaling(const QByteArray& document) const;
-    Result<void> ensureRoom(const QString& id, const QString& name, const QString& creator);
-    bool persistPeer(const PeerIdentity& peer);
+    bool rememberPeer(const PeerIdentity& peer);
+    bool rememberMessage(const QString& messageId);
     QList<PeerIdentity> knownPeers() const;
     std::shared_ptr<Link> makeLink(const QString& connectionId);
     void discardLink(const std::shared_ptr<Link>& link);
@@ -64,12 +62,6 @@ class NetworkSession final : public QObject {
     void handlePacket(const std::shared_ptr<Link>& link, const class Packet& packet);
     void handleMeshOffer(const std::shared_ptr<Link>& source, const class Packet& packet);
     void handleMeshAnswer(const std::shared_ptr<Link>& source, const class Packet& packet);
-    void sendSyncSummary(const std::shared_ptr<Link>& link);
-    void handleSyncSummary(const std::shared_ptr<Link>& link, const class Packet& packet);
-    void handleSyncRequest(const std::shared_ptr<Link>& link, const class Packet& packet);
-    void handleSyncMessages(const std::shared_ptr<Link>& link, const class Packet& packet);
-    void sendSyncMessages(const std::shared_ptr<Link>& link, const QList<ChatMessage>& messages);
-    void resendPending(const std::shared_ptr<Link>& link);
     void sendPacket(const std::shared_ptr<Link>& link, const class Packet& packet);
     class Packet basePacket(const QString& type, const QJsonObject& payload) const;
     void sendHello(const std::shared_ptr<Link>& link);
@@ -84,14 +76,16 @@ class NetworkSession final : public QObject {
     void updateMesh();
 
     ApplicationController& app_;
-    std::unique_ptr<MessageRepository> messages_;
     QHash<QString, std::shared_ptr<Link>> links_;
+    QHash<QString, PeerIdentity> peers_;
     DeliveryTracker delivery_;
     QString roomId_;
     QString roomName_;
     qint64 logicalClock_{0};
     QTimer* keepalive_{};
     QSet<QString> seenRoutes_;
+    QSet<QString> seenMessageIds_;
+    QQueue<QString> seenMessageOrder_;
 };
 } // namespace tmc
 

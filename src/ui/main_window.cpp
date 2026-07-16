@@ -7,7 +7,6 @@
 #include <QClipboard>
 #include <QColor>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -22,7 +21,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStatusBar>
-#include <QUrl>
 #include <QVBoxLayout>
 
 using namespace tmc;
@@ -105,7 +103,6 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
     auto* toolsMenu = menuBar()->addMenu("Инструменты");
     toolsMenu->addAction("Настройки STUN", this, &MainWindow::showStunSettings);
     toolsMenu->addAction("Диагностика сети", this, &MainWindow::showNetworkDiagnostics);
-    toolsMenu->addAction("Открыть лог", this, &MainWindow::openLogs);
     menuBar()->addAction("О программе", this, &MainWindow::showAbout);
 
     connect(send, &QPushButton::clicked, this, &MainWindow::sendMessage);
@@ -135,20 +132,10 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
                 messageItems_.clear();
                 peerStates_.clear();
                 rebuildPeerLabel();
-                const auto history = session_->history();
-                if (!history) {
-                    showError(history.error());
-                    return;
-                }
-                for (const auto& message : history.value())
-                    appendMessage(message, message.senderId == controller_.identity().peerId);
             });
 
     rebuildPeerLabel();
     statusBar()->showMessage("Создайте комнату или импортируйте приглашение.");
-    const auto restored = session_->restoreLastRoom();
-    if (!restored)
-        showError("Не удалось восстановить последнюю комнату: " + restored.error());
 }
 
 MainWindow::~MainWindow() = default;
@@ -277,6 +264,12 @@ void MainWindow::appendMessage(const ChatMessage& message, bool local) {
             updateDeliveryIndicator(item, acknowledged, expected);
         }
     }
+    constexpr int MaxVisibleMessages = 2000;
+    if (messages_->count() > MaxVisibleMessages) {
+        auto* oldest = messages_->takeItem(0);
+        messageItems_.remove(oldest->data(Qt::UserRole).toString());
+        delete oldest;
+    }
     messages_->scrollToBottom();
 }
 
@@ -338,12 +331,6 @@ void MainWindow::showNetworkDiagnostics() {
                                  "\n\nЛокальный Peer ID: " + controller_.identity().peerId +
                                  "\nSTUN:\n  " + controller_.config().stunServers.join("\n  ") +
                                  "\n\nКаталог данных:\n" + controller_.dataDirectory());
-}
-
-void MainWindow::openLogs() {
-    const auto path = controller_.dataDirectory() + "/tiny-mesh.log";
-    if (!QFile::exists(path) || !QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
-        showError("Не удалось открыть лог: " + path);
 }
 
 void MainWindow::showAbout() {

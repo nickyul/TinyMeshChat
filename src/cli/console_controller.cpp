@@ -57,14 +57,12 @@ int ConsoleController::run() {
             break;
         if (line == "/help")
             out << "/identity /create-room /create-invite /import <path> /peers /status "
-                   "/send <text> /history /logs /p2p-offer <file> /p2p-answer <offer> <answer> "
+                   "/send <text> /p2p-offer <file> /p2p-answer <offer> <answer> "
                    "/p2p-import-answer <file> /p2p-send <text> /quit\n";
         else if (line == "/identity")
             out << app_.identity().displayName << " " << app_.identity().peerId << "\n";
         else if (line == "/status")
             out << "Dynamic P2P mesh; relay not used\n";
-        else if (line == "/logs")
-            out << app_.dataDirectory() << "/tiny-mesh.log\n";
 #ifdef TMC_WITH_LIBDATACHANNEL
         else if (line.startsWith("/p2p-offer ")) {
             auto path = line.sliced(11).trimmed();

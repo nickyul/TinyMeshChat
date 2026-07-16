@@ -8,6 +8,7 @@ class DeliveryTracker {
     void track(const QString&, const QSet<QString>&);
     bool acknowledge(const QString&, const QString&);
     int deliveredCount(const QString&) const;
+    int expectedCount(const QString&) const;
     bool fullyDelivered(const QString&) const;
 
   private:

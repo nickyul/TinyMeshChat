@@ -25,7 +25,7 @@ if(NOT Qt6_DIR)
   endif()
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Sql)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 if(TMC_BUILD_GUI)
   find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 endif()
@@ -38,11 +38,9 @@ add_library(tmc_core
   src/identity/peer_identity.cpp src/identity/identity_manager.cpp
   src/signaling/invitation.cpp src/signaling/invitation_codec.cpp
   src/protocol/packet.cpp src/protocol/packet_codec.cpp
-  src/messaging/chat_message.cpp src/messaging/delivery_tracker.cpp
-  src/messaging/sync_manager.cpp src/storage/database.cpp
-  src/storage/message_repository.cpp)
+  src/messaging/chat_message.cpp src/messaging/delivery_tracker.cpp)
 target_include_directories(tmc_core PUBLIC src)
-target_link_libraries(tmc_core PUBLIC Qt6::Core Qt6::Sql)
+target_link_libraries(tmc_core PUBLIC Qt6::Core)
 target_compile_definitions(tmc_core PUBLIC TMC_VERSION="${PROJECT_VERSION}")
 
 if(TMC_WITH_LIBDATACHANNEL)

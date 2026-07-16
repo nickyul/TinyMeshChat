@@ -4,4 +4,4 @@ Offers create a reliable ordered DataChannel, begin ICE gathering, and are expor
 
 Any member may create the manual invitation. Once its DataChannel opens, both sides exchange the bounded room roster. Every peer compares IDs and the lexicographically smaller ID creates an offer for each missing pair. Service offer/answer packets are flooded through the connected graph using route IDs and hop limits. Ordinary `chat.message` packets are never relayed.
 
-After a restart or total channel failure, any reachable member generates a fresh invitation. Stale closed transport state is discarded while the room, peer records, local history, and pending delivery rows remain intact. Once one new channel opens, the roster, remaining mesh, recent history, and pending messages recover automatically.
+After a connection failure, a member whose process still has the room in memory can generate a fresh invitation; the roster then rebuilds missing direct links. After an application restart all room state is gone, so the user creates a new room or imports an invitation from a still-running member. Earlier messages and pending deliveries are never recovered or replayed.

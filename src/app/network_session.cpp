@@ -6,13 +6,10 @@
 #include "protocol/packet.h"
 #include "protocol/packet_codec.h"
 #include "signaling/invitation_codec.h"
-#include "storage/message_repository.h"
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QRandomGenerator>
-#include <QSqlError>
-#include <QSqlQuery>
 #include <QTimer>
 #include <QUuid>
 
@@ -48,16 +45,8 @@ static PeerIdentity identityFromJson(const QJsonObject& object) {
             QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
 }
 
-static QJsonObject messageJson(const ChatMessage& message) {
-    return {{"message_id", message.messageId},
-            {"sender_id", message.senderId},
-            {"logical_clock", message.logicalClock},
-            {"created_at", message.createdAt.toUTC().toString(Qt::ISODateWithMs)},
-            {"text", message.text}};
-}
-
 NetworkSession::NetworkSession(ApplicationController& app, QObject* parent)
-    : QObject(parent), app_(app), messages_(std::make_unique<MessageRepository>(app.database())) {
+    : QObject(parent), app_(app) {
     qRegisterMetaType<ChatMessage>();
     keepalive_ = new QTimer(this);
     keepalive_->setInterval(app_.config().keepaliveSeconds * 1000);
@@ -73,40 +62,6 @@ NetworkSession::NetworkSession(ApplicationController& app, QObject* parent)
 
 NetworkSession::~NetworkSession() = default;
 
-Result<bool> NetworkSession::restoreLastRoom() {
-    if (!roomId_.isEmpty())
-        return Result<bool>::success(false);
-    QSqlQuery roomQuery(app_.database());
-    if (!roomQuery.exec("SELECT room_id,room_name,created_by FROM rooms "
-                        "ORDER BY created_at DESC LIMIT 1"))
-        return Result<bool>::failure(roomQuery.lastError().text());
-    if (!roomQuery.next())
-        return Result<bool>::success(false);
-
-    roomId_ = roomQuery.value(0).toString();
-    roomName_ = roomQuery.value(1).toString();
-
-    QSqlQuery clockQuery(app_.database());
-    clockQuery.prepare("SELECT COALESCE(MAX(logical_clock),0) FROM messages WHERE room_id=?");
-    clockQuery.addBindValue(roomId_);
-    if (clockQuery.exec() && clockQuery.next())
-        logicalClock_ = clockQuery.value(0).toLongLong();
-
-    emit roomChanged(roomId_, roomName_);
-
-    QSqlQuery peersQuery(app_.database());
-    peersQuery.prepare("SELECT peer_id,display_name FROM peers WHERE room_id=? AND peer_id<>?");
-    peersQuery.addBindValue(roomId_);
-    peersQuery.addBindValue(app_.identity().peerId);
-    if (peersQuery.exec()) {
-        while (peersQuery.next())
-            emit peerChanged(peersQuery.value(0).toString(), peersQuery.value(1).toString(), false);
-    }
-
-    emit statusChanged("Последняя комната восстановлена. Создайте новые приглашения для связи.");
-    return Result<bool>::success(true);
-}
-
 Result<void> NetworkSession::createRoom(const QString& name) {
     const auto normalized = name.trimmed();
     if (normalized.isEmpty())
@@ -117,13 +72,12 @@ Result<void> NetworkSession::createRoom(const QString& name) {
 
     roomId_ = uuid();
     roomName_ = normalized;
-    auto result = ensureRoom(roomId_, roomName_, app_.identity().peerId);
-    if (!result) {
-        roomId_.clear();
-        roomName_.clear();
-        return result;
-    }
-    persistPeer(app_.identity());
+    logicalClock_ = 0;
+    peers_.clear();
+    seenMessageIds_.clear();
+    seenMessageOrder_.clear();
+    delivery_ = {};
+    rememberPeer(app_.identity());
 
     emit roomChanged(roomId_, roomName_);
     emit statusChanged("Комната создана. Приглашение может создать любой её участник.");
@@ -186,16 +140,21 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         }
         discardStaleLinks(invitation.fromPeer.peerId);
 
+        const bool joiningRoom = roomId_.isEmpty();
         roomId_ = invitation.roomId;
         roomName_ = invitation.roomName;
-        auto room = ensureRoom(roomId_, roomName_, invitation.fromPeer.peerId);
-        if (!room)
-            return room;
+        if (joiningRoom) {
+            logicalClock_ = 0;
+            peers_.clear();
+            seenMessageIds_.clear();
+            seenMessageOrder_.clear();
+            delivery_ = {};
+        }
 
         auto link = makeLink(invitation.connectionId);
         link->remote = invitation.fromPeer;
-        persistPeer(link->remote);
-        persistPeer(app_.identity());
+        rememberPeer(link->remote);
+        rememberPeer(app_.identity());
         emit roomChanged(roomId_, roomName_);
         emit peerChanged(link->remote.peerId, link->remote.displayName, false);
         emit statusChanged("Offer импортирован. Создаётся answer…");
@@ -217,7 +176,7 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         return Result<void>::failure("Этот answer уже импортирован.");
 
     link->remote = invitation.fromPeer;
-    persistPeer(link->remote);
+    rememberPeer(link->remote);
     link->answerApplied = true;
     emit peerChanged(link->remote.peerId, link->remote.displayName, false);
     emit statusChanged("Answer импортирован. Устанавливается прямое P2P-соединение…");
@@ -236,57 +195,34 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
     return Result<void>::success();
 }
 
-Result<void> NetworkSession::ensureRoom(const QString& id, const QString& name,
-                                        const QString& creator) {
-    QSqlQuery query(app_.database());
-    query.prepare("INSERT OR IGNORE INTO rooms(room_id,room_name,created_by,created_at) "
-                  "VALUES(?,?,?,?)");
-    query.addBindValue(id);
-    query.addBindValue(name);
-    query.addBindValue(creator);
-    query.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
-    if (!query.exec())
-        return Result<void>::failure("Ошибка SQLite: " + query.lastError().text());
-    return Result<void>::success();
-}
-
-bool NetworkSession::persistPeer(const PeerIdentity& peer) {
+bool NetworkSession::rememberPeer(const PeerIdentity& peer) {
     if (peer.peerId.isEmpty() || roomId_.isEmpty())
         return false;
-    QSqlQuery existing(app_.database());
-    existing.prepare("SELECT 1 FROM peers WHERE room_id=? AND peer_id=?");
-    existing.addBindValue(roomId_);
-    existing.addBindValue(peer.peerId);
-    const bool known = existing.exec() && existing.next();
-    QSqlQuery query(app_.database());
-    query.prepare("INSERT INTO peers(peer_id,room_id,display_name,device_id,added_at) "
-                  "VALUES(?,?,?,?,?) ON CONFLICT(room_id,peer_id) DO UPDATE SET "
-                  "display_name=excluded.display_name,device_id=excluded.device_id");
-    query.addBindValue(peer.peerId);
-    query.addBindValue(roomId_);
-    query.addBindValue(peer.displayName.isEmpty() ? peer.peerId.left(8) : peer.displayName);
-    query.addBindValue(peer.deviceId.isEmpty() ? "unknown" : peer.deviceId);
-    query.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
-    if (!query.exec()) {
-        Logger::instance().log(QtWarningMsg, "storage",
-                               "Could not persist peer: " + query.lastError().text());
-        return false;
-    }
+    const bool known = peers_.contains(peer.peerId);
+    auto current = peer;
+    if (current.displayName.isEmpty())
+        current.displayName = peer.peerId.left(8);
+    if (current.deviceId.isEmpty())
+        current.deviceId = "unknown";
+    peers_.insert(peer.peerId, current);
     return !known;
 }
 
 QList<PeerIdentity> NetworkSession::knownPeers() const {
-    QList<PeerIdentity> peers;
-    QSqlQuery query(app_.database());
-    query.prepare("SELECT peer_id,display_name,device_id,added_at FROM peers WHERE room_id=?");
-    query.addBindValue(roomId_);
-    if (!query.exec())
-        return peers;
-    while (query.next())
-        peers.append({query.value(0).toString(), query.value(1).toString(),
-                      query.value(2).toString(),
-                      QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs)});
-    return peers;
+    return peers_.values();
+}
+
+bool NetworkSession::rememberMessage(const QString& messageId) {
+    if (seenMessageIds_.contains(messageId))
+        return false;
+    constexpr qsizetype MaxSeenMessages = 4096;
+    if (seenMessageOrder_.size() >= MaxSeenMessages) {
+        const auto oldest = seenMessageOrder_.dequeue();
+        seenMessageIds_.remove(oldest);
+    }
+    seenMessageIds_.insert(messageId);
+    seenMessageOrder_.enqueue(messageId);
+    return true;
 }
 
 std::shared_ptr<NetworkSession::Link> NetworkSession::makeLink(const QString& connectionId) {
@@ -350,8 +286,6 @@ void NetworkSession::configureLink(const std::shared_ptr<Link>& link) {
         updateMesh();
         sendHello(link);
         sendPeerList(link);
-        sendSyncSummary(link);
-        resendPending(link);
         broadcastPeerList(link->connectionId);
         ensureDynamicMesh();
     });
@@ -427,28 +361,6 @@ void NetworkSession::sendHello(const std::shared_ptr<Link>& link) {
                                                {"device_id", app_.identity().deviceId}}));
 }
 
-void NetworkSession::resendPending(const std::shared_ptr<Link>& link) {
-    if (link->remote.peerId.isEmpty())
-        return;
-    const auto pending = messages_->pendingForPeer(roomId_, link->remote.peerId);
-    if (!pending) {
-        emit errorOccurred("Не удалось загрузить неподтверждённые сообщения: " + pending.error());
-        return;
-    }
-    if (pending.value().isEmpty())
-        return;
-
-    for (const auto& message : pending.value()) {
-        delivery_.track(message.messageId, {link->remote.peerId});
-        messages_->setDelivery(message.messageId, link->remote.peerId, "pending");
-        sendPacket(link, basePacket("chat.message", {{"message_id", message.messageId},
-                                                     {"text", message.text},
-                                                     {"logical_clock", message.logicalClock}}));
-    }
-    emit statusChanged(
-        QString("Повторно отправлено неподтверждённых сообщений: %1").arg(pending.value().size()));
-}
-
 void NetworkSession::handleIncoming(const std::shared_ptr<Link>& link, const QString& text) {
     QSet<QString> senders;
     if (!link->remote.peerId.isEmpty())
@@ -469,7 +381,7 @@ void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packe
         const auto name = packet.payload.value("display_name").toString();
         if (!name.isEmpty())
             link->remote.displayName = name;
-        const bool joined = persistPeer(link->remote);
+        const bool joined = rememberPeer(link->remote);
         emit peerChanged(link->remote.peerId, link->remote.displayName, true);
         sendPacket(link, basePacket("peer.hello_ack", {}));
         sendPeerList(link);
@@ -495,12 +407,11 @@ void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packe
                             remoteClock,
                             packet.createdAt,
                             now};
-        auto inserted = messages_->insert(message);
-        if (!inserted) {
-            emit errorOccurred(inserted.error());
+        if (!message.isValid()) {
+            emit errorOccurred("Получено некорректное сообщение.");
             return;
         }
-        if (inserted.value())
+        if (rememberMessage(message.messageId))
             emit messageReceived(message, false);
         sendPacket(link, basePacket("chat.ack", {{"message_id", message.messageId}}));
         return;
@@ -508,11 +419,9 @@ void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packe
 
     if (packet.type == "chat.ack") {
         const auto messageId = packet.payload.value("message_id").toString();
-        messages_->setDelivery(messageId, packet.senderId, "delivered");
-        delivery_.acknowledge(messageId, packet.senderId);
-        const auto counts = messages_->deliveryCounts(messageId);
-        if (counts)
-            emit deliveryChanged(messageId, counts.value().first, counts.value().second);
+        if (delivery_.acknowledge(messageId, packet.senderId))
+            emit deliveryChanged(messageId, delivery_.deliveredCount(messageId),
+                                 delivery_.expectedCount(messageId));
         return;
     }
 
@@ -526,152 +435,8 @@ void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packe
         return;
     }
 
-    if (packet.type == "sync.summary") {
-        handleSyncSummary(link, packet);
-        return;
-    }
-
-    if (packet.type == "sync.request") {
-        handleSyncRequest(link, packet);
-        return;
-    }
-
-    if (packet.type == "sync.messages") {
-        handleSyncMessages(link, packet);
-        return;
-    }
-
     if (packet.type == "ping")
         sendPacket(link, basePacket("pong", packet.payload));
-}
-
-void NetworkSession::sendSyncSummary(const std::shared_ptr<Link>& link) {
-    const auto recent = messages_->recent(roomId_, 500);
-    const auto total = messages_->count(roomId_);
-    if (!recent || !total) {
-        emit errorOccurred("Не удалось подготовить сводку истории для синхронизации.");
-        return;
-    }
-    QJsonArray ids;
-    for (const auto& message : recent.value())
-        ids.append(message.messageId);
-    sendPacket(link,
-               basePacket("sync.summary", {{"message_count", total.value()}, {"recent_ids", ids}}));
-}
-
-void NetworkSession::handleSyncSummary(const std::shared_ptr<Link>& link, const Packet& packet) {
-    const auto remoteIds = packet.payload.value("recent_ids").toArray();
-    if (remoteIds.size() > 500) {
-        emit errorOccurred("Сводка истории содержит слишком много идентификаторов.");
-        return;
-    }
-    const auto local = messages_->recent(roomId_, 500);
-    if (!local) {
-        emit errorOccurred(local.error());
-        return;
-    }
-    QSet<QString> localIds;
-    for (const auto& message : local.value())
-        localIds.insert(message.messageId);
-
-    QStringList missing;
-    for (const auto& value : remoteIds) {
-        const auto id = value.toString();
-        if (QUuid::fromString(id).isNull()) {
-            emit errorOccurred("Сводка истории содержит некорректный UUID.");
-            return;
-        }
-        if (!localIds.contains(id))
-            missing.append(id);
-    }
-    for (qsizetype offset = 0; offset < missing.size(); offset += 200) {
-        QJsonArray requested;
-        const auto end = qMin(offset + 200, missing.size());
-        for (qsizetype i = offset; i < end; ++i)
-            requested.append(missing[i]);
-        sendPacket(link, basePacket("sync.request", {{"message_ids", requested}}));
-    }
-    if (missing.isEmpty())
-        emit statusChanged("История с участником синхронизирована.");
-    else
-        emit statusChanged(QString("Запрошено пропущенных сообщений: %1").arg(missing.size()));
-}
-
-void NetworkSession::handleSyncRequest(const std::shared_ptr<Link>& link, const Packet& packet) {
-    const auto requested = packet.payload.value("message_ids").toArray();
-    if (requested.isEmpty() || requested.size() > 200) {
-        emit errorOccurred("Некорректный запрос синхронизации истории.");
-        return;
-    }
-    QStringList ids;
-    for (const auto& value : requested) {
-        const auto id = value.toString();
-        if (QUuid::fromString(id).isNull()) {
-            emit errorOccurred("Запрос истории содержит некорректный UUID.");
-            return;
-        }
-        ids.append(id);
-    }
-    const auto found = messages_->byIds(roomId_, ids);
-    if (!found) {
-        emit errorOccurred(found.error());
-        return;
-    }
-    sendSyncMessages(link, found.value());
-}
-
-void NetworkSession::sendSyncMessages(const std::shared_ptr<Link>& link,
-                                      const QList<ChatMessage>& messages) {
-    QJsonArray batch;
-    for (const auto& message : messages) {
-        batch.append(messageJson(message));
-        auto candidate = basePacket("sync.messages", {{"messages", batch}});
-        if (PacketCodec::encode(candidate).size() < PacketCodec::MaxBytes - 1024)
-            continue;
-        batch.removeLast();
-        if (!batch.isEmpty())
-            sendPacket(link, basePacket("sync.messages", {{"messages", batch}}));
-        batch = QJsonArray{messageJson(message)};
-    }
-    if (!batch.isEmpty())
-        sendPacket(link, basePacket("sync.messages", {{"messages", batch}}));
-}
-
-void NetworkSession::handleSyncMessages(const std::shared_ptr<Link>&, const Packet& packet) {
-    const auto values = packet.payload.value("messages").toArray();
-    if (values.isEmpty() || values.size() > 200) {
-        emit errorOccurred("Получен некорректный пакет истории.");
-        return;
-    }
-    int insertedCount = 0;
-    for (const auto& value : values) {
-        const auto object = value.toObject();
-        const auto now = QDateTime::currentDateTimeUtc();
-        ChatMessage message{
-            object.value("message_id").toString(),
-            roomId_,
-            object.value("sender_id").toString(),
-            object.value("text").toString(),
-            object.value("logical_clock").toInteger(),
-            QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs),
-            now};
-        if (!message.isValid()) {
-            emit errorOccurred("Пакет истории содержит некорректное сообщение.");
-            return;
-        }
-        const auto inserted = messages_->insert(message);
-        if (!inserted) {
-            emit errorOccurred(inserted.error());
-            return;
-        }
-        logicalClock_ = qMax(logicalClock_, message.logicalClock) + 1;
-        if (inserted.value()) {
-            ++insertedCount;
-            emit messageReceived(message, message.senderId == app_.identity().peerId);
-        }
-    }
-    emit statusChanged(
-        QString("Синхронизация истории: получено новых сообщений %1").arg(insertedCount));
 }
 
 std::shared_ptr<NetworkSession::Link> NetworkSession::linkForPeer(const QString& peerId) const {
@@ -711,7 +476,7 @@ void NetworkSession::handlePeerList(const std::shared_ptr<Link>& source, const P
             continue;
         if (!knownIds.contains(peer.peerId) && knownIds.size() >= app_.config().maxRoomPeers)
             continue;
-        if (persistPeer(peer)) {
+        if (rememberPeer(peer)) {
             changed = true;
             knownIds.insert(peer.peerId);
         }
@@ -809,7 +574,7 @@ void NetworkSession::handleMeshOffer(const std::shared_ptr<Link>& source, const 
     auto mesh = makeLink(connectionId);
     mesh->remote = origin;
     mesh->meshManaged = true;
-    persistPeer(origin);
+    rememberPeer(origin);
     emit peerChanged(origin.peerId, origin.displayName, false);
     emit statusChanged("Получен автоматический offer от " + origin.displayName + "…");
     try {
@@ -870,26 +635,14 @@ Result<void> NetworkSession::sendMessage(const QString& text) {
     const auto now = QDateTime::currentDateTimeUtc();
     ChatMessage message{uuid(), roomId_, app_.identity().peerId, normalized, ++logicalClock_,
                         now,    now};
-    auto inserted = messages_->insert(message);
-    if (!inserted)
-        return Result<void>::failure(inserted.error());
+    rememberMessage(message.messageId);
 
     QSet<QString> targets;
-    QSqlQuery peerQuery(app_.database());
-    peerQuery.prepare("SELECT peer_id FROM peers WHERE room_id=? AND peer_id<>?");
-    peerQuery.addBindValue(roomId_);
-    peerQuery.addBindValue(app_.identity().peerId);
-    if (!peerQuery.exec())
-        return Result<void>::failure(peerQuery.lastError().text());
-    while (peerQuery.next())
-        targets.insert(peerQuery.value(0).toString());
     for (const auto& link : links_) {
-        if (link->remote.peerId.isEmpty())
+        if (!link->open || link->remote.peerId.isEmpty())
             continue;
         targets.insert(link->remote.peerId);
     }
-    for (const auto& target : targets)
-        messages_->setDelivery(message.messageId, target, "pending");
     delivery_.track(message.messageId, targets);
     emit messageReceived(message, true);
     emit deliveryChanged(message.messageId, 0, targets.size());
@@ -898,18 +651,14 @@ Result<void> NetworkSession::sendMessage(const QString& text) {
                                                     {"text", message.text},
                                                     {"logical_clock", message.logicalClock}});
     for (const auto& link : links_)
-        sendPacket(link, packet);
+        if (link->open)
+            sendPacket(link, packet);
     return Result<void>::success();
 }
 
-Result<QList<ChatMessage>> NetworkSession::history() const {
-    if (roomId_.isEmpty())
-        return Result<QList<ChatMessage>>::success({});
-    return messages_->history(roomId_);
-}
-
 Result<QPair<int, int>> NetworkSession::deliveryCounts(const QString& messageId) const {
-    return messages_->deliveryCounts(messageId);
+    return Result<QPair<int, int>>::success(
+        {delivery_.deliveredCount(messageId), delivery_.expectedCount(messageId)});
 }
 
 int NetworkSession::connectedPeerCount() const {
@@ -945,12 +694,9 @@ QString NetworkSession::diagnostics() const {
 }
 
 QString NetworkSession::peerDisplayName(const QString& peerId) const {
-    QSqlQuery query(app_.database());
-    query.prepare("SELECT display_name FROM peers WHERE room_id=? AND peer_id=?");
-    query.addBindValue(roomId_);
-    query.addBindValue(peerId);
-    if (query.exec() && query.next())
-        return query.value(0).toString();
+    const auto peer = peers_.value(peerId);
+    if (!peer.displayName.isEmpty())
+        return peer.displayName;
     return peerId.left(8);
 }
 

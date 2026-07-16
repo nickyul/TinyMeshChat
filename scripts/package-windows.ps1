@@ -12,24 +12,27 @@ $exe = Get-ChildItem -LiteralPath $build -Recurse -Filter TinyMeshChat.exe | Sel
 if (-not $exe) { throw 'TinyMeshChat.exe was not produced' }
 Copy-Item -LiteralPath $exe.FullName -Destination $dist
 Copy-Item -LiteralPath (Join-Path $root 'config/default-config.json') -Destination $dist
-$deploy = Get-Command windeployqt -ErrorAction SilentlyContinue
-if (-not $deploy -and $env:QT_ROOT) {
+$deployPath = $null
+$deployCommand = Get-Command windeployqt.exe -CommandType Application -ErrorAction SilentlyContinue |
+  Select-Object -First 1
+if ($deployCommand) { $deployPath = $deployCommand.Source }
+if (-not $deployPath -and $env:QT_ROOT) {
   $candidate = Join-Path $env:QT_ROOT 'bin/windeployqt.exe'
-  if (Test-Path -LiteralPath $candidate) { $deploy = Get-Item -LiteralPath $candidate }
+  if (Test-Path -LiteralPath $candidate -PathType Leaf) { $deployPath = $candidate }
 }
-if (-not $deploy) {
+if (-not $deployPath) {
   $candidate = Get-ChildItem -Path 'C:\Qt' -Recurse -Filter windeployqt.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match 'msvc2022_64[\\/]bin' } |
     Sort-Object FullName -Descending | Select-Object -First 1
-  if ($candidate) { $deploy = $candidate }
+  if ($candidate) { $deployPath = $candidate.FullName }
 }
-if (-not $deploy) { throw 'windeployqt.exe was not found; set QT_ROOT or add Qt bin to PATH' }
-& $deploy.FullName --release --no-translations --compiler-runtime (Join-Path $dist 'TinyMeshChat.exe')
+if (-not $deployPath -or -not (Test-Path -LiteralPath $deployPath -PathType Leaf)) {
+  throw 'windeployqt.exe was not found; set QT_ROOT or add Qt bin to PATH'
+}
+& $deployPath --release --no-translations --compiler-runtime (Join-Path $dist 'TinyMeshChat.exe')
 
 Get-ChildItem -LiteralPath $exe.DirectoryName -Filter *.dll -File |
   ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dist -Force }
-$sqlite = Join-Path $dist 'sqldrivers/qsqlite.dll'
-if (-not (Test-Path -LiteralPath $sqlite)) { throw 'Qt SQLite plugin is missing from the package' }
 $dataChannel = Join-Path $dist 'datachannel.dll'
 if (-not (Test-Path -LiteralPath $dataChannel)) { throw 'libdatachannel runtime is missing from the package' }
 $zip = Join-Path $distRoot 'TinyMeshChat.zip'

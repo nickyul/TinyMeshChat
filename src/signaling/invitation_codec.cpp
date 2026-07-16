@@ -11,7 +11,7 @@ QByteArray InvitationCodec::encode(const Invitation& i) {
                   {"display_name", i.fromPeer.displayName},
                   {"device_id", i.fromPeer.deviceId}};
     QJsonObject o{{"format", "tiny-mesh-signaling"},
-                  {"format_version", 2},
+                  {"format_version", 3},
                   {"kind", kindName(i.kind)},
                   {"room_id", i.roomId},
                   {"room_name", i.roomName},
@@ -37,7 +37,7 @@ Result<Invitation> InvitationCodec::decode(const QByteArray& b, const QDateTime&
     auto o = d.object();
     if (o["format"].toString() != "tiny-mesh-signaling")
         return Result<Invitation>::failure("Unknown signaling format");
-    if (o["format_version"].toInt() != 2)
+    if (o["format_version"].toInt() != 3)
         return Result<Invitation>::failure("Unsupported signaling version");
     const auto k = o["kind"].toString();
     if (k != "offer" && k != "answer")

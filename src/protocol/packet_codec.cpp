@@ -23,31 +23,6 @@ bool validIdentity(const QJsonValue& value) {
            name.toString().size() <= 128 && validTimestamp(identity.value("created_at"));
 }
 
-bool validMessage(const QJsonObject& payload) {
-    const auto text = payload.value("text");
-    return validUuid(payload.value("message_id")) && validUuid(payload.value("sender_id")) &&
-           text.isString() && !text.toString().trimmed().isEmpty() &&
-           text.toString().size() <= PacketCodec::MaxTextChars &&
-           payload.value("logical_clock").isDouble() &&
-           payload.value("logical_clock").toInteger() > 0 &&
-           validTimestamp(payload.value("created_at"));
-}
-
-bool validIdArray(const QJsonValue& value, qsizetype maximum, bool allowEmpty) {
-    if (!value.isArray())
-        return false;
-    const auto array = value.toArray();
-    if ((!allowEmpty && array.isEmpty()) || array.size() > maximum)
-        return false;
-    QSet<QString> unique;
-    for (const auto& item : array) {
-        if (!validUuid(item) || unique.contains(item.toString()))
-            return false;
-        unique.insert(item.toString());
-    }
-    return true;
-}
-
 bool validMeshPayload(const QString& type, const QJsonObject& payload) {
     const auto phase = payload.value("phase").toString();
     const auto expectedPhase = type == "mesh.offer" ? "offer" : "answer";
@@ -96,29 +71,6 @@ bool validPayload(const Packet& packet) {
     }
     if (packet.type == "chat.ack")
         return validUuid(payload.value("message_id"));
-    if (packet.type == "sync.summary")
-        return payload.value("message_count").isDouble() &&
-               payload.value("message_count").toInteger() >= 0 &&
-               validIdArray(payload.value("recent_ids"), 500, true);
-    if (packet.type == "sync.request")
-        return validIdArray(payload.value("message_ids"), 200, false);
-    if (packet.type == "sync.messages") {
-        if (!payload.value("messages").isArray())
-            return false;
-        const auto messages = payload.value("messages").toArray();
-        if (messages.isEmpty() || messages.size() > 200)
-            return false;
-        QSet<QString> unique;
-        for (const auto& value : messages) {
-            if (!value.isObject() || !validMessage(value.toObject()))
-                return false;
-            const auto id = value.toObject().value("message_id").toString();
-            if (unique.contains(id))
-                return false;
-            unique.insert(id);
-        }
-        return true;
-    }
     if (packet.type == "mesh.offer" || packet.type == "mesh.answer")
         return validMeshPayload(packet.type, payload);
     if (packet.type == "ping" || packet.type == "pong")
@@ -128,14 +80,13 @@ bool validPayload(const Packet& packet) {
 } // namespace
 
 const QSet<QString>& PacketCodec::knownTypes() {
-    static const QSet<QString> s{"peer.hello", "peer.hello_ack", "peer.list",    "chat.message",
-                                 "chat.ack",   "sync.summary",   "sync.request", "sync.messages",
-                                 "mesh.offer", "mesh.answer",    "ping",         "pong"};
+    static const QSet<QString> s{"peer.hello", "peer.hello_ack", "peer.list", "chat.message",
+                                 "chat.ack",   "mesh.offer",     "mesh.answer", "ping", "pong"};
     return s;
 }
 QByteArray PacketCodec::encode(const Packet& p) {
     return QJsonDocument(
-               QJsonObject{{"protocol_version", 1},
+               QJsonObject{{"protocol_version", 2},
                            {"packet_type", p.type},
                            {"packet_id", p.packetId},
                            {"room_id", p.roomId},
@@ -153,7 +104,7 @@ Result<Packet> PacketCodec::decode(const QByteArray& b, const QString& room,
     if (e.error != QJsonParseError::NoError || !d.isObject())
         return Result<Packet>::failure("Invalid packet JSON");
     auto o = d.object();
-    if (o["protocol_version"].toInt() != 1)
+    if (o["protocol_version"].toInt() != 2)
         return Result<Packet>::failure("Unsupported protocol version");
     Packet p{o["packet_type"].toString(),
              o["packet_id"].toString(),
