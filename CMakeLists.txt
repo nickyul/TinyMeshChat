@@ -29,6 +29,8 @@ endif()
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 if(TMC_BUILD_GUI)
   find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
+  find_package(Opus CONFIG REQUIRED)
+  find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
 endif()
 if(TMC_WITH_LIBDATACHANNEL)
   find_package(LibDataChannel CONFIG REQUIRED)
@@ -54,11 +56,14 @@ if(TMC_BUILD_GUI)
   set(_tmc_app_sources src/main.cpp
     src/app/application_controller.cpp src/app/application_controller.h
     src/app/network_session.cpp src/app/network_session.h
+    src/audio/audio_engine.cpp src/audio/audio_engine.h
     src/ui/main_window.cpp src/ui/main_window.h
     src/cli/console_controller.cpp src/cli/console_controller.h resources/resources.qrc)
   if(APPLE)
+    configure_file(resources/Info.plist.in "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
     add_executable(TinyMeshChat MACOSX_BUNDLE ${_tmc_app_sources})
     set_target_properties(TinyMeshChat PROPERTIES
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist"
       MACOSX_BUNDLE_BUNDLE_NAME "TinyMesh Chat"
       MACOSX_BUNDLE_GUI_IDENTIFIER "chat.tinymesh.app"
       MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
@@ -66,7 +71,8 @@ if(TMC_BUILD_GUI)
   else()
     add_executable(TinyMeshChat ${_tmc_app_sources})
   endif()
-  target_link_libraries(TinyMeshChat PRIVATE tmc_core Qt6::Widgets)
+  target_include_directories(TinyMeshChat PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
+  target_link_libraries(TinyMeshChat PRIVATE tmc_core Qt6::Widgets Opus::opus)
 
   if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
     get_target_property(_tmc_qmake_executable Qt6::qmake IMPORTED_LOCATION)

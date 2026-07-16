@@ -1,11 +1,19 @@
 #include "network/peer_connection.h"
 #include <QPointer>
+#include <QtEndian>
+#include <cstring>
 #include <rtc/rtc.hpp>
 using namespace tmc;
 struct PeerConnection::State {
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
+    std::shared_ptr<rtc::DataChannel> voiceDc;
 };
+namespace {
+constexpr char VoiceMagic[] = {'T', 'M', 'V', '1'};
+constexpr qsizetype VoiceHeaderSize = 8;
+constexpr qsizetype MaxVoicePayload = 4000;
+} // namespace
 static ConnectionState mapState(rtc::PeerConnection::State s) {
     switch (s) {
     case rtc::PeerConnection::State::Connected:
@@ -76,7 +84,11 @@ PeerConnection::PeerConnection(const AppConfig& c, QObject* p)
             QMetaObject::invokeMethod(
                 self,
                 [self, dc] {
-                    if (self)
+                    if (!self)
+                        return;
+                    if (dc->label() == "tiny-mesh-voice")
+                        self->configureVoiceChannel(dc);
+                    else if (dc->label() == "tiny-mesh-chat")
                         self->configureChannel(dc);
                 },
                 Qt::QueuedConnection);
@@ -85,6 +97,8 @@ PeerConnection::PeerConnection(const AppConfig& c, QObject* p)
 PeerConnection::~PeerConnection() {
     auto s = std::move(state_);
     if (s) {
+        if (s->voiceDc)
+            s->voiceDc->close();
         if (s->dc)
             s->dc->close();
         if (s->pc)
@@ -139,9 +153,51 @@ void PeerConnection::configureChannel(const std::shared_ptr<rtc::DataChannel>& d
             Qt::QueuedConnection);
     });
 }
+void PeerConnection::configureVoiceChannel(const std::shared_ptr<rtc::DataChannel>& dc) {
+    state_->voiceDc = dc;
+    QPointer<PeerConnection> self(this);
+    dc->onError([self](const std::string& error) {
+        if (!self)
+            return;
+        const auto message = QString::fromStdString(error);
+        QMetaObject::invokeMethod(
+            self,
+            [self, message] {
+                if (self)
+                    emit self->errorOccurred("Voice channel: " + message);
+            },
+            Qt::QueuedConnection);
+    });
+    dc->onMessage([self](std::variant<rtc::binary, rtc::string> message) {
+        if (!self || !std::holds_alternative<rtc::binary>(message))
+            return;
+        const auto& bytes = std::get<rtc::binary>(message);
+        if (bytes.size() <= VoiceHeaderSize || bytes.size() > VoiceHeaderSize + MaxVoicePayload)
+            return;
+        const auto* data = reinterpret_cast<const char*>(bytes.data());
+        if (std::memcmp(data, VoiceMagic, sizeof(VoiceMagic)) != 0)
+            return;
+        quint32 encodedSequence{};
+        std::memcpy(&encodedSequence, data + sizeof(VoiceMagic), sizeof(encodedSequence));
+        const auto sequence = qFromBigEndian(encodedSequence);
+        const QByteArray payload(data + VoiceHeaderSize,
+                                 static_cast<qsizetype>(bytes.size()) - VoiceHeaderSize);
+        QMetaObject::invokeMethod(
+            self,
+            [self, sequence, payload] {
+                if (self)
+                    emit self->voiceFrameReceived(sequence, payload);
+            },
+            Qt::QueuedConnection);
+    });
+}
 void PeerConnection::createOffer() {
     emit stateChanged(ConnectionState::Gathering);
     configureChannel(state_->pc->createDataChannel("tiny-mesh-chat"));
+    rtc::DataChannelInit voiceInit;
+    voiceInit.reliability.unordered = true;
+    voiceInit.reliability.maxRetransmits = 0;
+    configureVoiceChannel(state_->pc->createDataChannel("tiny-mesh-voice", voiceInit));
     state_->pc->setLocalDescription(rtc::Description::Type::Offer);
 }
 void PeerConnection::acceptOffer(const QString& s) {
@@ -155,4 +211,16 @@ void PeerConnection::acceptAnswer(const QString& s) {
 }
 bool PeerConnection::sendText(const QString& s) {
     return state_->dc && state_->dc->isOpen() && state_->dc->send(s.toUtf8().toStdString());
+}
+bool PeerConnection::sendVoiceFrame(quint32 sequence, const QByteArray& opusPayload) {
+    if (!state_->voiceDc || !state_->voiceDc->isOpen() || opusPayload.isEmpty() ||
+        opusPayload.size() > MaxVoicePayload)
+        return false;
+    QByteArray packet(VoiceHeaderSize + opusPayload.size(), Qt::Uninitialized);
+    std::memcpy(packet.data(), VoiceMagic, sizeof(VoiceMagic));
+    const auto encodedSequence = qToBigEndian(sequence);
+    std::memcpy(packet.data() + sizeof(VoiceMagic), &encodedSequence, sizeof(encodedSequence));
+    std::memcpy(packet.data() + VoiceHeaderSize, opusPayload.constData(), opusPayload.size());
+    return state_->voiceDc->send(reinterpret_cast<const rtc::byte*>(packet.constData()),
+                                 static_cast<size_t>(packet.size()));
 }

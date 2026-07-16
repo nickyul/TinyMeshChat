@@ -71,6 +71,8 @@ bool validPayload(const Packet& packet) {
     }
     if (packet.type == "chat.ack")
         return validUuid(payload.value("message_id"));
+    if (packet.type == "voice.state")
+        return payload.value("joined").isBool() && payload.value("muted").isBool();
     if (packet.type == "mesh.offer" || packet.type == "mesh.answer")
         return validMeshPayload(packet.type, payload);
     if (packet.type == "ping" || packet.type == "pong")
@@ -80,13 +82,14 @@ bool validPayload(const Packet& packet) {
 } // namespace
 
 const QSet<QString>& PacketCodec::knownTypes() {
-    static const QSet<QString> s{"peer.hello", "peer.hello_ack", "peer.list", "chat.message",
-                                 "chat.ack",   "mesh.offer",     "mesh.answer", "ping", "pong"};
+    static const QSet<QString> s{"peer.hello", "peer.hello_ack", "peer.list",   "chat.message",
+                                 "chat.ack",   "voice.state",    "mesh.offer",  "mesh.answer",
+                                 "ping",       "pong"};
     return s;
 }
 QByteArray PacketCodec::encode(const Packet& p) {
     return QJsonDocument(
-               QJsonObject{{"protocol_version", 2},
+               QJsonObject{{"protocol_version", 3},
                            {"packet_type", p.type},
                            {"packet_id", p.packetId},
                            {"room_id", p.roomId},
@@ -104,7 +107,7 @@ Result<Packet> PacketCodec::decode(const QByteArray& b, const QString& room,
     if (e.error != QJsonParseError::NoError || !d.isObject())
         return Result<Packet>::failure("Invalid packet JSON");
     auto o = d.object();
-    if (o["protocol_version"].toInt() != 2)
+    if (o["protocol_version"].toInt() != 3)
         return Result<Packet>::failure("Unsupported protocol version");
     Packet p{o["packet_type"].toString(),
              o["packet_id"].toString(),

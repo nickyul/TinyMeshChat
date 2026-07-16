@@ -8,6 +8,7 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QLineEdit;
+class QPushButton;
 
 namespace tmc {
 class ApplicationController;
@@ -26,6 +27,8 @@ class MainWindow final : public QMainWindow {
     void importSignalingText();
     void importSignalingFile();
     void sendMessage();
+    void toggleCall();
+    void toggleMute();
     void showAbout();
     void showStunSettings();
     void showNetworkDiagnostics();
@@ -36,6 +39,7 @@ class MainWindow final : public QMainWindow {
     void appendMessage(const class ChatMessage& message, bool local);
     void updatePeer(const QString& peerId, const QString& displayName, bool connected);
     void updateDeliveryIndicator(QListWidgetItem* item, int acknowledged, int expected);
+    void updateCallControls();
     void rebuildPeerLabel();
     void showError(const QString& error);
 
@@ -45,7 +49,10 @@ class MainWindow final : public QMainWindow {
     QLabel* peers_{};
     QListWidget* messages_{};
     QLineEdit* input_{};
+    QPushButton* call_{};
+    QPushButton* mute_{};
     QHash<QString, QPair<QString, bool>> peerStates_;
+    QHash<QString, QPair<bool, bool>> peerVoiceStates_;
     QHash<QString, QListWidgetItem*> messageItems_;
 };
 } // namespace tmc

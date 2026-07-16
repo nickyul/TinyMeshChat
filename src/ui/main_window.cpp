@@ -65,12 +65,22 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
     header->addStretch();
     auto* quickImport = new QPushButton("Вставить код");
     auto* quickInvite = new QPushButton("Пригласить");
+    call_ = new QPushButton("Начать звонок");
+    mute_ = new QPushButton("Выключить микрофон");
+    mute_->setEnabled(false);
     header->addWidget(quickImport);
     header->addWidget(quickInvite);
     mesh_ = new QLabel("Прямые связи: 0/0");
     mesh_->setObjectName("meshBadge");
     header->addWidget(mesh_);
     outer->addLayout(header);
+
+    auto* voiceBar = new QHBoxLayout;
+    voiceBar->addWidget(new QLabel("Голосовой звонок: звук идёт напрямую участникам mesh"));
+    voiceBar->addStretch();
+    voiceBar->addWidget(call_);
+    voiceBar->addWidget(mute_);
+    outer->addLayout(voiceBar);
 
     auto* body = new QHBoxLayout;
     messages_ = new QListWidget;
@@ -108,6 +118,8 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
     connect(send, &QPushButton::clicked, this, &MainWindow::sendMessage);
     connect(quickImport, &QPushButton::clicked, this, &MainWindow::importSignalingText);
     connect(quickInvite, &QPushButton::clicked, this, &MainWindow::createInvitation);
+    connect(call_, &QPushButton::clicked, this, &MainWindow::toggleCall);
+    connect(mute_, &QPushButton::clicked, this, &MainWindow::toggleMute);
     connect(input_, &QLineEdit::returnPressed, this, &MainWindow::sendMessage);
     connect(session_.get(), &NetworkSession::statusChanged, this,
             [this](const QString& status) { statusBar()->showMessage(status); });
@@ -116,6 +128,19 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
         mesh_->setText(QString("Прямые связи: %1/%2").arg(connected).arg(total));
     });
     connect(session_.get(), &NetworkSession::peerChanged, this, &MainWindow::updatePeer);
+    connect(session_.get(), &NetworkSession::peerVoiceChanged, this,
+            [this](const QString& peerId, bool joined, bool muted) {
+                if (peerId.isEmpty())
+                    return;
+                peerVoiceStates_[peerId] = {joined, muted};
+                updateCallControls();
+                rebuildPeerLabel();
+            });
+    connect(session_.get(), &NetworkSession::callStateChanged, this,
+            [this](bool, bool) {
+                updateCallControls();
+                rebuildPeerLabel();
+            });
     connect(session_.get(), &NetworkSession::signalingReady, this, &MainWindow::showSignaling);
     connect(session_.get(), &NetworkSession::messageReceived, this, &MainWindow::appendMessage);
     connect(session_.get(), &NetworkSession::deliveryChanged, this,
@@ -131,6 +156,8 @@ MainWindow::MainWindow(ApplicationController& controller, QWidget* parent)
                 messages_->clear();
                 messageItems_.clear();
                 peerStates_.clear();
+                peerVoiceStates_.clear();
+                updateCallControls();
                 rebuildPeerLabel();
             });
 
@@ -226,6 +253,20 @@ void MainWindow::sendMessage() {
     input_->clear();
 }
 
+void MainWindow::toggleCall() {
+    if (session_->callActive()) {
+        session_->leaveCall();
+        return;
+    }
+    const auto result = session_->startCall();
+    if (!result)
+        showError(result.error());
+}
+
+void MainWindow::toggleMute() {
+    session_->setMuted(!session_->muted());
+}
+
 void MainWindow::appendMessage(const ChatMessage& message, bool local) {
     const auto author =
         local ? controller_.identity().displayName
@@ -292,15 +333,37 @@ void MainWindow::updateDeliveryIndicator(QListWidgetItem* item, int acknowledged
                                   : QString("Сохранено локально"));
 }
 
+void MainWindow::updateCallControls() {
+    const bool active = session_->callActive();
+    bool someoneJoined = false;
+    for (auto it = peerVoiceStates_.cbegin(); it != peerVoiceStates_.cend(); ++it)
+        someoneJoined = someoneJoined || it.value().first;
+    call_->setText(active ? "Выйти из звонка"
+                          : (someoneJoined ? "Присоединиться к звонку" : "Начать звонок"));
+    mute_->setEnabled(active);
+    mute_->setText(session_->muted() ? "Включить микрофон" : "Выключить микрофон");
+}
+
 void MainWindow::rebuildPeerLabel() {
     QString html = "<span style='font-size:16px;font-weight:700'>Участники</span><br><br>"
                    "<span style='color:#729985'>●</span> " +
                    controller_.identity().displayName +
-                   " <span style='color:#8292a6'>(вы)</span><br>";
-    for (auto it = peerStates_.cbegin(); it != peerStates_.cend(); ++it)
-        html +=
-            QString("<span style='color:%1'>●</span> %2<br>")
-                .arg(it.value().second ? "#729985" : "#a0a8ae", it.value().first.toHtmlEscaped());
+                   " <span style='color:#8292a6'>(вы)</span>" +
+                   (session_->callActive()
+                        ? (session_->muted() ? " <span style='color:#a0a8ae'>🔇</span>"
+                                             : " <span style='color:#68879b'>🎙</span>")
+                        : QString()) +
+                   "<br>";
+    for (auto it = peerStates_.cbegin(); it != peerStates_.cend(); ++it) {
+        const auto voice = peerVoiceStates_.value(it.key(), {false, false});
+        const auto voiceMarker =
+            voice.first ? (voice.second ? " <span style='color:#a0a8ae'>🔇</span>"
+                                        : " <span style='color:#68879b'>🎙</span>")
+                        : QString();
+        html += QString("<span style='color:%1'>●</span> %2%3<br>")
+                    .arg(it.value().second ? "#729985" : "#a0a8ae",
+                         it.value().first.toHtmlEscaped(), voiceMarker);
+    }
     html += QString("<br><span style='color:#8292a6'>%1 из %2 мест занято</span>")
                 .arg(peerStates_.size() + 1)
                 .arg(controller_.config().maxRoomPeers);

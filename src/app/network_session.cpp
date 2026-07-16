@@ -1,6 +1,7 @@
 #include "app/network_session.h"
 
 #include "app/application_controller.h"
+#include "audio/audio_engine.h"
 #include "core/logger.h"
 #include "network/peer_connection.h"
 #include "protocol/packet.h"
@@ -46,7 +47,7 @@ static PeerIdentity identityFromJson(const QJsonObject& object) {
 }
 
 NetworkSession::NetworkSession(ApplicationController& app, QObject* parent)
-    : QObject(parent), app_(app) {
+    : QObject(parent), app_(app), audio_(std::make_unique<AudioEngine>()) {
     qRegisterMetaType<ChatMessage>();
     keepalive_ = new QTimer(this);
     keepalive_->setInterval(app_.config().keepaliveSeconds * 1000);
@@ -58,6 +59,16 @@ NetworkSession::NetworkSession(ApplicationController& app, QObject* parent)
                                                            Qt::ISODateWithMs)}}));
     });
     keepalive_->start();
+    connect(audio_.get(), &AudioEngine::encodedFrameReady, this,
+            [this](quint32 sequence, const QByteArray& payload) {
+                if (!callActive_ || muted_)
+                    return;
+                for (const auto& link : links_)
+                    if (link->open)
+                        link->transport->sendVoiceFrame(sequence, payload);
+            });
+    connect(audio_.get(), &AudioEngine::errorOccurred, this,
+            [this](const QString& error) { emit errorOccurred(error); });
 }
 
 NetworkSession::~NetworkSession() = default;
@@ -77,6 +88,8 @@ Result<void> NetworkSession::createRoom(const QString& name) {
     seenMessageIds_.clear();
     seenMessageOrder_.clear();
     delivery_ = {};
+    peerVoiceStates_.clear();
+    leaveCall();
     rememberPeer(app_.identity());
 
     emit roomChanged(roomId_, roomName_);
@@ -149,6 +162,8 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
             seenMessageIds_.clear();
             seenMessageOrder_.clear();
             delivery_ = {};
+            peerVoiceStates_.clear();
+            leaveCall();
         }
 
         auto link = makeLink(invitation.connectionId);
@@ -248,6 +263,11 @@ void NetworkSession::discardLink(const std::shared_ptr<Link>& link) {
     const auto replacement = linkForPeer(peerId);
     if (!peerId.isEmpty() && (!replacement || !replacement->open))
         emit peerChanged(peerId, peerName, false);
+    if (!peerId.isEmpty() && (!replacement || !replacement->open)) {
+        audio_->removePeer(peerId);
+        peerVoiceStates_.remove(peerId);
+        emit peerVoiceChanged(peerId, false, false);
+    }
     updateMesh();
 }
 
@@ -286,6 +306,7 @@ void NetworkSession::configureLink(const std::shared_ptr<Link>& link) {
         updateMesh();
         sendHello(link);
         sendPeerList(link);
+        sendVoiceState(link);
         broadcastPeerList(link->connectionId);
         ensureDynamicMesh();
     });
@@ -293,10 +314,18 @@ void NetworkSession::configureLink(const std::shared_ptr<Link>& link) {
         link->open = false;
         emit peerChanged(link->remote.peerId, link->remote.displayName, false);
         emit statusChanged("Друг отключён.");
+        audio_->removePeer(link->remote.peerId);
+        peerVoiceStates_.remove(link->remote.peerId);
+        emit peerVoiceChanged(link->remote.peerId, false, false);
         updateMesh();
     });
     connect(link->transport.get(), &PeerConnection::textReceived, this,
             [this, link](const QString& text) { handleIncoming(link, text); });
+    connect(link->transport.get(), &PeerConnection::voiceFrameReceived, this,
+            [this, link](quint32 sequence, const QByteArray& payload) {
+                if (callActive_ && !link->remote.peerId.isEmpty())
+                    audio_->receiveFrame(link->remote.peerId, sequence, payload);
+            });
     connect(link->transport.get(), &PeerConnection::errorOccurred, this,
             [this](const QString& error) { emit errorOccurred(error); });
 }
@@ -425,6 +454,16 @@ void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packe
         return;
     }
 
+    if (packet.type == "voice.state") {
+        const bool joined = packet.payload.value("joined").toBool();
+        const bool muted = packet.payload.value("muted").toBool();
+        peerVoiceStates_[packet.senderId] = {joined, muted};
+        if (!joined)
+            audio_->removePeer(packet.senderId);
+        emit peerVoiceChanged(packet.senderId, joined, muted);
+        return;
+    }
+
     if (packet.type == "mesh.offer") {
         handleMeshOffer(link, packet);
         return;
@@ -457,6 +496,16 @@ void NetworkSession::sendPeerList(const std::shared_ptr<Link>& link) {
     for (const auto& peer : knownPeers())
         peers.append(identityJson(peer));
     sendPacket(link, basePacket("peer.list", {{"peers", peers}}));
+}
+
+void NetworkSession::sendVoiceState(const std::shared_ptr<Link>& link) {
+    sendPacket(link, basePacket("voice.state", {{"joined", callActive_}, {"muted", muted_}}));
+}
+
+void NetworkSession::broadcastVoiceState() {
+    for (const auto& link : links_)
+        if (link->open)
+            sendVoiceState(link);
 }
 
 void NetworkSession::broadcastPeerList(const QString& excludedConnection) {
@@ -654,6 +703,47 @@ Result<void> NetworkSession::sendMessage(const QString& text) {
         if (link->open)
             sendPacket(link, packet);
     return Result<void>::success();
+}
+
+Result<void> NetworkSession::startCall() {
+    if (callActive_)
+        return Result<void>::success();
+    if (roomId_.isEmpty())
+        return Result<void>::failure("Сначала создайте комнату или присоединитесь к ней.");
+    if (connectedPeerCount() == 0)
+        return Result<void>::failure("Для звонка нужен хотя бы один подключённый участник.");
+
+    const auto started = audio_->start();
+    if (!started)
+        return started;
+    muted_ = false;
+    callActive_ = true;
+    audio_->setMuted(false);
+    broadcastVoiceState();
+    emit callStateChanged(true, false);
+    emit statusChanged("Вы присоединились к голосовому звонку.");
+    return Result<void>::success();
+}
+
+void NetworkSession::leaveCall() {
+    if (!callActive_ && !audio_->isRunning())
+        return;
+    callActive_ = false;
+    muted_ = false;
+    broadcastVoiceState();
+    audio_->stop();
+    emit callStateChanged(false, false);
+    emit statusChanged("Вы вышли из голосового звонка.");
+}
+
+void NetworkSession::setMuted(bool muted) {
+    if (!callActive_ || muted_ == muted)
+        return;
+    muted_ = muted;
+    audio_->setMuted(muted);
+    broadcastVoiceState();
+    emit callStateChanged(true, muted_);
+    emit statusChanged(muted_ ? "Микрофон выключен." : "Микрофон включён.");
 }
 
 Result<QPair<int, int>> NetworkSession::deliveryCounts(const QString& messageId) const {

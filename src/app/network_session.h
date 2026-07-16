@@ -13,6 +13,7 @@
 
 namespace tmc {
 class ApplicationController;
+class AudioEngine;
 class PeerConnection;
 
 class NetworkSession final : public QObject {
@@ -27,6 +28,11 @@ class NetworkSession final : public QObject {
     Result<void> importSignalingText(const QString& text);
     Result<void> importSignalingDocument(const QByteArray& document);
     Result<void> sendMessage(const QString& text);
+    Result<void> startCall();
+    void leaveCall();
+    void setMuted(bool muted);
+    bool callActive() const { return callActive_; }
+    bool muted() const { return muted_; }
     Result<QPair<int, int>> deliveryCounts(const QString& messageId) const;
 
     QString roomId() const { return roomId_; }
@@ -44,6 +50,8 @@ class NetworkSession final : public QObject {
     void peerChanged(QString peerId, QString displayName, bool connected);
     void messageReceived(tmc::ChatMessage message, bool local);
     void deliveryChanged(QString messageId, int acknowledged, int expected);
+    void callStateChanged(bool active, bool muted);
+    void peerVoiceChanged(QString peerId, bool joined, bool muted);
     void errorOccurred(QString message);
 
   private:
@@ -66,6 +74,8 @@ class NetworkSession final : public QObject {
     class Packet basePacket(const QString& type, const QJsonObject& payload) const;
     void sendHello(const std::shared_ptr<Link>& link);
     void sendPeerList(const std::shared_ptr<Link>& link);
+    void sendVoiceState(const std::shared_ptr<Link>& link);
+    void broadcastVoiceState();
     void broadcastPeerList(const QString& excludedConnection = {});
     void handlePeerList(const std::shared_ptr<Link>& source, const class Packet& packet);
     void ensureDynamicMesh();
@@ -76,6 +86,7 @@ class NetworkSession final : public QObject {
     void updateMesh();
 
     ApplicationController& app_;
+    std::unique_ptr<AudioEngine> audio_;
     QHash<QString, std::shared_ptr<Link>> links_;
     QHash<QString, PeerIdentity> peers_;
     DeliveryTracker delivery_;
@@ -86,6 +97,9 @@ class NetworkSession final : public QObject {
     QSet<QString> seenRoutes_;
     QSet<QString> seenMessageIds_;
     QQueue<QString> seenMessageOrder_;
+    QHash<QString, QPair<bool, bool>> peerVoiceStates_;
+    bool callActive_{false};
+    bool muted_{false};
 };
 } // namespace tmc
 
