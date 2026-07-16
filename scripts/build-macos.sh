@@ -22,13 +22,17 @@ if [[ -z "${VCPKG_ROOT:-}" || ! -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
   exit 1
 fi
 if [[ -z "${QT_ROOT:-}" || ! -x "$QT_ROOT/bin/macdeployqt" ]]; then
-  echo "Set QT_ROOT to the Qt macOS kit, for example $HOME/Qt/6.8.3/macos." >&2
+  echo "Set QT_ROOT to the Qt macOS kit, for example $HOME/Qt/6.9.3/macos." >&2
   exit 1
 fi
 command -v cmake >/dev/null || { echo "cmake is required." >&2; exit 1; }
 command -v ninja >/dev/null || { echo "ninja is required." >&2; exit 1; }
 
 cmake_args=(--preset "$preset" "-DCMAKE_MAKE_PROGRAM=$(command -v ninja)")
+if [[ -n "${TMC_VCPKG_TRIPLET:-}" ]]; then
+  cmake_args+=("-DVCPKG_OVERLAY_TRIPLETS=$root/cmake/triplets"
+              "-DVCPKG_TARGET_TRIPLET=$TMC_VCPKG_TRIPLET")
+fi
 if [[ -n "${TMC_OSX_ARCHITECTURES:-}" ]]; then
   cmake_args+=("-DCMAKE_OSX_ARCHITECTURES=$TMC_OSX_ARCHITECTURES")
 fi
@@ -46,7 +50,7 @@ rm -rf "$dist"
 mkdir -p "$dist"
 ditto "$app" "$dist/TinyMeshChat.app"
 
-deploy_args=(-always-overwrite -verbose=1 -no-codesign)
+deploy_args=(-always-overwrite -verbose=1)
 while IFS= read -r libdir; do
   deploy_args+=("-libpath=$libdir")
 done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*' 2>/dev/null)
