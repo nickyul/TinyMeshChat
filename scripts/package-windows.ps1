@@ -2,7 +2,9 @@ param([string]$Preset = 'windows-release')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 cmake --preset $Preset
+if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
 cmake --build --preset $Preset
+if ($LASTEXITCODE -ne 0) { throw "CMake build failed with exit code $LASTEXITCODE" }
 $build = Join-Path $root "build/$Preset"
 $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'TinyMeshChat'
