@@ -13,7 +13,7 @@
       }
     },
     {"name":"windows-debug","inherits":"windows-base","cacheVariables":{"TMC_WITH_LIBDATACHANNEL":"ON"}},
-    {"name":"windows-release","inherits":"windows-base","cacheVariables":{"TMC_WITH_LIBDATACHANNEL":"ON"}},
+    {"name":"windows-release","inherits":"windows-base","cacheVariables":{"TMC_WITH_LIBDATACHANNEL":"ON","TMC_DEPLOY_QT_AFTER_BUILD":"OFF"}},
     {
       "name": "macos-base",
       "hidden": true,

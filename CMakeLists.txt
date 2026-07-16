@@ -3,6 +3,7 @@ project(TinyMeshChat VERSION 0.1.0 LANGUAGES CXX)
 
 option(TMC_BUILD_GUI "Build the Qt Widgets application" ON)
 option(TMC_WITH_LIBDATACHANNEL "Enable the real WebRTC transport" ON)
+option(TMC_DEPLOY_QT_AFTER_BUILD "Deploy Qt beside the executable after every Windows build" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,7 +68,7 @@ if(TMC_BUILD_GUI)
   endif()
   target_link_libraries(TinyMeshChat PRIVATE tmc_core Qt6::Widgets)
 
-  if(WIN32)
+  if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
     get_target_property(_tmc_qmake_executable Qt6::qmake IMPORTED_LOCATION)
     get_filename_component(_tmc_qt_bin_dir "${_tmc_qmake_executable}" DIRECTORY)
     find_program(_tmc_windeployqt

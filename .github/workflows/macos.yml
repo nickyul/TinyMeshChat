@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-builds-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -19,23 +23,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install build tools and Qt
-        run: brew install ninja qt@6
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: mac
+          target: desktop
+          cache: true
+
+      - name: Cache vcpkg tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg
+          key: vcpkg-tool-${{ runner.os }}-${{ runner.arch }}-2026.06.24
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-
 
       - name: Bootstrap vcpkg
         run: |
-          git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
-          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          if [[ ! -x "$RUNNER_TEMP/vcpkg/vcpkg" ]]; then
+            rm -rf "$RUNNER_TEMP/vcpkg"
+            git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          fi
 
       - name: Build and package
         env:
           VCPKG_ROOT: ${{ runner.temp }}/vcpkg
-          QT_ROOT: /opt/homebrew/opt/qt@6
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-binary-cache
+          QT_ROOT: ${{ env.QT_ROOT_DIR }}
         run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           export PATH="$(brew --prefix ninja)/bin:$PATH"
-          if [[ ! -d "$QT_ROOT" ]]; then
-            export QT_ROOT="$(brew --prefix qt@6)"
-          fi
           bash scripts/build-macos.sh macos-release
 
       - name: Upload macOS app
@@ -62,16 +90,36 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
 
+      - name: Cache vcpkg tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg
+          key: vcpkg-tool-${{ runner.os }}-${{ runner.arch }}-2026.06.24
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-
+
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$env:RUNNER_TEMP/vcpkg"
-          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          if (-not (Test-Path -LiteralPath "$env:RUNNER_TEMP/vcpkg/vcpkg.exe")) {
+            if (Test-Path -LiteralPath "$env:RUNNER_TEMP/vcpkg") {
+              Remove-Item -LiteralPath "$env:RUNNER_TEMP/vcpkg" -Recurse -Force
+            }
+            git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$env:RUNNER_TEMP/vcpkg"
+            & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          }
 
       - name: Build and package
         shell: pwsh
         env:
           VCPKG_ROOT: ${{ runner.temp }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-binary-cache
         run: .\scripts\package-windows.ps1 windows-release
 
       - name: Upload Windows portable app

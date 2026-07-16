@@ -46,7 +46,7 @@ rm -rf "$dist"
 mkdir -p "$dist"
 ditto "$app" "$dist/TinyMeshChat.app"
 
-deploy_args=(-always-overwrite -verbose=1)
+deploy_args=(-always-overwrite -verbose=1 -no-codesign)
 while IFS= read -r libdir; do
   deploy_args+=("-libpath=$libdir")
 done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*' 2>/dev/null)
@@ -54,6 +54,11 @@ done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*'
 
 codesign --force --deep --sign - "$dist/TinyMeshChat.app"
 codesign --verify --deep --strict "$dist/TinyMeshChat.app"
+
+smoke_data="$(mktemp -d)"
+TMC_DATA_DIR="$smoke_data" "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --console \
+  <<< "/quit"
+rm -rf "$smoke_data"
 
 rm -f "$archive"
 ditto -c -k --sequesterRsrc --keepParent "$dist/TinyMeshChat.app" "$archive"
