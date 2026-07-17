@@ -1,22 +1,25 @@
-#include "cli/console_controller.h"
-#include "app/application_controller.h"
-#include "core/app_config.h"
+#include "tmc/cli/console_controller.h"
+
+#include "tmc/app/application_controller.h"
 #ifdef TMC_WITH_LIBDATACHANNEL
-#include "network/peer_connection.h"
+#include "tmc/network/peer_connection.h"
+
 #include <QEventLoop>
 #include <QFile>
 #include <QTimer>
 #endif
 #include <QTextStream>
-using namespace tmc;
+
+namespace tmc {
+
 ConsoleController::ConsoleController(ApplicationController& a, QObject* p) : QObject(p), app_(a) {
 }
+
 int ConsoleController::run() {
     QTextStream in(stdin), out(stdout);
     out << "TinyMesh Chat console. /help for commands\n";
 #ifdef TMC_WITH_LIBDATACHANNEL
-    AppConfig cfg;
-    peer_ = std::make_shared<PeerConnection>(cfg);
+    peer_ = std::make_shared<PeerConnection>(app_.config().stunServers);
     connect(peer_.get(), &PeerConnection::stateChanged, this, [&out](auto s) {
         out << "state: " << toString(s) << "\n" << Qt::flush;
     });
@@ -44,25 +47,35 @@ int ConsoleController::run() {
             return;
         }
         QFile f(path);
-        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate) || f.write(sdp.toUtf8()) < 0)
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate) || f.write(sdp.toUtf8()) < 0) {
             out << "Cannot write " << path << "\n";
-        else
+        } else {
             out << type << " saved to " << path << "\n";
+        }
     };
 #endif
     for (;;) {
         out << "> " << Qt::flush;
         auto line = in.readLine();
-        if (line.isNull() || line == "/quit")
+        if (line.isNull() || line == "/quit") {
             break;
-        if (line == "/help")
-            out << "/identity /create-room /create-invite /import <path> /peers /status "
+        }
+        if (line == "/help") {
+            out << "/identity /set-name <name> /status "
                    "/send <text> /p2p-offer <file> /p2p-answer <offer> <answer> "
                    "/p2p-import-answer <file> /p2p-send <text> /quit\n";
-        else if (line == "/identity")
+        } else if (line == "/identity") {
             out << app_.identity().displayName << " " << app_.identity().peerId << "\n";
-        else if (line == "/status")
+        } else if (line.startsWith("/set-name ")) {
+            const auto updated = app_.updateDisplayName(line.sliced(10));
+            if (!updated) {
+                out << "Cannot update display name: " << updated.error() << "\n";
+            } else {
+                out << "Display name updated to " << app_.identity().displayName << "\n";
+            }
+        } else if (line == "/status") {
             out << "Dynamic P2P mesh; relay not used\n";
+        }
 #ifdef TMC_WITH_LIBDATACHANNEL
         else if (line.startsWith("/p2p-offer ")) {
             auto path = line.sliced(11).trimmed();
@@ -82,20 +95,26 @@ int ConsoleController::run() {
             gather(args[1], [this, sdp] { peer_->acceptOffer(sdp); });
         } else if (line.startsWith("/p2p-import-answer ")) {
             QFile f(line.sliced(19).trimmed());
-            if (!f.open(QIODevice::ReadOnly))
+            if (!f.open(QIODevice::ReadOnly)) {
                 out << "Cannot read answer\n";
-            else
+            } else {
                 peer_->acceptAnswer(QString::fromUtf8(f.readAll()));
+            }
         } else if (line.startsWith("/p2p-send ")) {
-            if (!peer_->sendText(line.sliced(10)))
+            if (!peer_->sendText(line.sliced(10))) {
                 out << "DataChannel is not open\n";
+            }
         }
 #else
-        else if (line.startsWith("/p2p-"))
+        else if (line.startsWith("/p2p-")) {
             out << "This build was compiled without libdatachannel\n";
+        }
 #endif
-        else
-            out << "Command is unavailable until a room is active\n";
+        else {
+            out << "Unknown command. Use /help\n";
+        }
     }
     return 0;
 }
+
+} // namespace tmc

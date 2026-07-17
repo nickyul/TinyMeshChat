@@ -1,6 +1,7 @@
-#include "audio/audio_engine.h"
+#include "tmc/audio/audio_engine.h"
 
 #include <QMetaObject>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -8,11 +9,10 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <opus/opus.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <opus/opus.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,9 +20,10 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
-using namespace tmc;
+namespace tmc {
 
 namespace {
+
 constexpr int SampleRate = 48000;
 constexpr int Channels = 1;
 constexpr int FrameSamples = 960; // 20 ms at 48 kHz
@@ -40,15 +41,20 @@ struct RemoteAudio {
     RemoteAudio() = default;
     RemoteAudio(const RemoteAudio&) = delete;
     RemoteAudio& operator=(const RemoteAudio&) = delete;
+
     RemoteAudio(RemoteAudio&& other) noexcept
         : decoder(std::exchange(other.decoder, nullptr)), samples(std::move(other.samples)),
           lastSequence(other.lastSequence), hasSequence(other.hasSequence),
-          playbackStarted(other.playbackStarted) {}
+          playbackStarted(other.playbackStarted) {
+    }
+
     RemoteAudio& operator=(RemoteAudio&& other) noexcept {
-        if (this == &other)
+        if (this == &other) {
             return *this;
-        if (decoder)
+        }
+        if (decoder) {
             opus_decoder_destroy(decoder);
+        }
         decoder = std::exchange(other.decoder, nullptr);
         samples = std::move(other.samples);
         lastSequence = other.lastSequence;
@@ -56,18 +62,24 @@ struct RemoteAudio {
         playbackStarted = other.playbackStarted;
         return *this;
     }
+
     ~RemoteAudio() {
-        if (decoder)
+        if (decoder) {
             opus_decoder_destroy(decoder);
+        }
     }
 };
+
 } // namespace
 
 struct AudioEngine::State {
-    explicit State(AudioEngine* owner) : owner(owner) {}
+    explicit State(AudioEngine* owner) : owner(owner) {
+    }
+
     ~State() {
-        if (encoder)
+        if (encoder) {
             opus_encoder_destroy(encoder);
+        }
     }
 
     AudioEngine* owner{};
@@ -81,8 +93,7 @@ struct AudioEngine::State {
     std::mutex playbackMutex;
     std::unordered_map<std::string, RemoteAudio> remotes;
 
-    static void callback(ma_device* device, void* output, const void* input,
-                         ma_uint32 frameCount);
+    static void callback(ma_device* device, void* output, const void* input, ma_uint32 frameCount);
 };
 
 void AudioEngine::State::callback(ma_device* device, void* output, const void* input,
@@ -96,8 +107,9 @@ void AudioEngine::State::callback(ma_device* device, void* output, const void* i
         for (auto& [peerId, remote] : state->remotes) {
             Q_UNUSED(peerId)
             if (!remote.playbackStarted) {
-                if (remote.samples.size() < InitialPlaybackSamples)
+                if (remote.samples.size() < InitialPlaybackSamples) {
                     continue;
+                }
                 remote.playbackStarted = true;
             }
             for (ma_uint32 i = 0; i < frameCount; ++i) {
@@ -107,9 +119,9 @@ void AudioEngine::State::callback(ma_device* device, void* output, const void* i
                 }
                 const int mixed = static_cast<int>(outputSamples[i]) + remote.samples.front();
                 remote.samples.pop_front();
-                outputSamples[i] = static_cast<opus_int16>(std::clamp(
-                    mixed, static_cast<int>((std::numeric_limits<opus_int16>::min)()),
-                    static_cast<int>((std::numeric_limits<opus_int16>::max)())));
+                outputSamples[i] = static_cast<opus_int16>(
+                    std::clamp(mixed, static_cast<int>((std::numeric_limits<opus_int16>::min)()),
+                               static_cast<int>((std::numeric_limits<opus_int16>::max)())));
             }
         }
     }
@@ -128,30 +140,34 @@ void AudioEngine::State::callback(ma_device* device, void* output, const void* i
                                              FrameSamples, encoded.data(), encoded.size());
         state->captureSamples.erase(state->captureSamples.begin(),
                                     state->captureSamples.begin() + FrameSamples);
-        if (encodedSize <= 0)
+        if (encodedSize <= 0) {
             continue;
+        }
         const QByteArray packet(reinterpret_cast<const char*>(encoded.data()), encodedSize);
         emit state->owner->encodedFrameReady(state->nextSequence++, packet);
     }
 }
 
-AudioEngine::AudioEngine(QObject* parent) : QObject(parent), state_(std::make_unique<State>(this)) {}
+AudioEngine::AudioEngine(QObject* parent) : QObject(parent), state_(std::make_unique<State>(this)) {
+}
 
 AudioEngine::~AudioEngine() {
     stop();
 }
 
 Result<void> AudioEngine::start() {
-    if (state_->running)
+    if (state_->running) {
         return Result<void>::success();
+    }
 
     int opusError = OPUS_OK;
     if (!state_->encoder) {
-        state_->encoder = opus_encoder_create(SampleRate, Channels, OPUS_APPLICATION_VOIP,
-                                              &opusError);
-        if (!state_->encoder || opusError != OPUS_OK)
+        state_->encoder =
+            opus_encoder_create(SampleRate, Channels, OPUS_APPLICATION_VOIP, &opusError);
+        if (!state_->encoder || opusError != OPUS_OK) {
             return Result<void>::failure(
                 QString("Не удалось запустить Opus encoder: %1").arg(opus_strerror(opusError)));
+        }
         opus_encoder_ctl(state_->encoder, OPUS_SET_BITRATE(32000));
         opus_encoder_ctl(state_->encoder, OPUS_SET_COMPLEXITY(5));
         opus_encoder_ctl(state_->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
@@ -169,10 +185,11 @@ Result<void> AudioEngine::start() {
     config.pUserData = state_.get();
 
     const auto initResult = ma_device_init(nullptr, &config, &state_->device);
-    if (initResult != MA_SUCCESS)
+    if (initResult != MA_SUCCESS) {
         return Result<void>::failure(
             QString("Не удалось открыть микрофон или динамики: %1")
                 .arg(QString::fromUtf8(ma_result_description(initResult))));
+    }
     state_->deviceInitialized = true;
 
     const auto startResult = ma_device_start(&state_->device);
@@ -211,8 +228,9 @@ bool AudioEngine::isRunning() const {
 void AudioEngine::receiveFrame(const QString& peerId, quint32 sequence,
                                const QByteArray& opusPayload) {
     if (!state_->running || peerId.isEmpty() || opusPayload.isEmpty() ||
-        opusPayload.size() > MaxOpusPacketBytes)
+        opusPayload.size() > MaxOpusPacketBytes) {
         return;
+    }
 
     std::lock_guard lock(state_->playbackMutex);
     auto& remote = state_->remotes[peerId.toStdString()];
@@ -221,37 +239,41 @@ void AudioEngine::receiveFrame(const QString& peerId, quint32 sequence,
         remote.decoder = opus_decoder_create(SampleRate, Channels, &error);
         if (!remote.decoder || error != OPUS_OK) {
             state_->remotes.erase(peerId.toStdString());
-            emit errorOccurred(QString("Не удалось запустить Opus decoder: %1")
-                                   .arg(opus_strerror(error)));
+            emit errorOccurred(
+                QString("Не удалось запустить Opus decoder: %1").arg(opus_strerror(error)));
             return;
         }
     }
 
     if (remote.hasSequence) {
         const auto delta = static_cast<qint32>(sequence - remote.lastSequence);
-        if (delta <= 0)
+        if (delta <= 0) {
             return;
+        }
         const int missing = (std::min)(delta - 1, 3);
         for (int i = 0; i < missing; ++i) {
             std::array<opus_int16, FrameSamples> concealed{};
-            const int decoded = opus_decode(remote.decoder, nullptr, 0, concealed.data(),
-                                            FrameSamples, 0);
-            if (decoded > 0)
+            const int decoded =
+                opus_decode(remote.decoder, nullptr, 0, concealed.data(), FrameSamples, 0);
+            if (decoded > 0) {
                 remote.samples.insert(remote.samples.end(), concealed.begin(),
                                       concealed.begin() + decoded);
+            }
         }
     }
 
     std::array<opus_int16, FrameSamples> decodedSamples{};
-    const int decoded = opus_decode(
-        remote.decoder, reinterpret_cast<const unsigned char*>(opusPayload.constData()),
-        opusPayload.size(), decodedSamples.data(), FrameSamples, 0);
-    if (decoded < 0)
+    const int decoded =
+        opus_decode(remote.decoder, reinterpret_cast<const unsigned char*>(opusPayload.constData()),
+                    opusPayload.size(), decodedSamples.data(), FrameSamples, 0);
+    if (decoded < 0) {
         return;
+    }
     remote.samples.insert(remote.samples.end(), decodedSamples.begin(),
                           decodedSamples.begin() + decoded);
-    while (remote.samples.size() > MaxQueuedSamples)
+    while (remote.samples.size() > MaxQueuedSamples) {
         remote.samples.pop_front();
+    }
     remote.lastSequence = sequence;
     remote.hasSequence = true;
 }
@@ -260,3 +282,5 @@ void AudioEngine::removePeer(const QString& peerId) {
     std::lock_guard lock(state_->playbackMutex);
     state_->remotes.erase(peerId.toStdString());
 }
+
+} // namespace tmc

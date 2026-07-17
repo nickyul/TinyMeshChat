@@ -1,34 +1,112 @@
-#include "identity/identity_manager.h"
+#include "tmc/identity/identity_manager.h"
+
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QUuid>
-using namespace tmc;
-Result<PeerIdentity> IdentityManager::loadOrCreate(const QString& path, const QString& name) {
-    QFile f(path);
-    PeerIdentity i;
-    if (f.exists()) {
-        if (!f.open(QIODevice::ReadOnly))
-            return Result<PeerIdentity>::failure(f.errorString());
-        auto o = QJsonDocument::fromJson(f.readAll()).object();
-        i = {o["peer_id"].toString(), o["display_name"].toString(), o["device_id"].toString(),
-             QDateTime::fromString(o["created_at"].toString(), Qt::ISODateWithMs)};
-        if (!i.isValid())
-            return Result<PeerIdentity>::failure("Stored identity is invalid");
-        return Result<PeerIdentity>::success(i);
+
+namespace tmc {
+
+namespace {
+
+Result<QString> normalizeDisplayName(const QString& name) {
+    const auto normalized = name.trimmed();
+    if (normalized.isEmpty()) {
+        return Result<QString>::failure("Display name is required");
     }
-    i = {QUuid::createUuid().toString(QUuid::WithoutBraces), name.trimmed(),
-         QUuid::createUuid().toString(QUuid::WithoutBraces), QDateTime::currentDateTimeUtc()};
-    if (!i.isValid())
-        return Result<PeerIdentity>::failure("Display name is required");
-    QJsonObject o{{"peer_id", i.peerId},
-                  {"display_name", i.displayName},
-                  {"device_id", i.deviceId},
-                  {"created_at", i.createdAt.toString(Qt::ISODateWithMs)}};
-    QSaveFile out(path);
-    if (!out.open(QIODevice::WriteOnly) || out.write(QJsonDocument(o).toJson()) < 0 ||
-        !out.commit())
-        return Result<PeerIdentity>::failure("Cannot persist identity");
-    return Result<PeerIdentity>::success(i);
+    if (normalized.size() > 128) {
+        return Result<QString>::failure("Display name must not exceed 128 characters");
+    }
+    for (const auto ch : normalized) {
+        if (!ch.isPrint()) {
+            return Result<QString>::failure("Display name contains a control character");
+        }
+    }
+    return Result<QString>::success(normalized);
 }
+
+Result<void> saveIdentity(const QString& path, const PeerIdentity& identity) {
+    const QJsonObject object{
+        {"peer_id", identity.peerId},
+        {"display_name", identity.displayName},
+        {"device_id", identity.deviceId},
+        {"created_at", identity.createdAt.toUTC().toString(Qt::ISODateWithMs)}};
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly) || out.write(QJsonDocument(object).toJson()) < 0 ||
+        !out.commit()) {
+        return Result<void>::failure("Cannot persist identity: " + out.errorString());
+    }
+    return Result<void>::success();
+}
+
+} // namespace
+
+Result<PeerIdentity> IdentityManager::load(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return Result<PeerIdentity>::failure("Cannot load identity: " + file.errorString());
+    }
+
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        return Result<PeerIdentity>::failure("Stored identity is invalid");
+    }
+
+    const auto object = document.object();
+    PeerIdentity identity{
+        object.value("peer_id").toString(), object.value("display_name").toString(),
+        object.value("device_id").toString(),
+        QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
+    const auto displayName = normalizeDisplayName(identity.displayName);
+    if (!identity.isValid() || !displayName) {
+        return Result<PeerIdentity>::failure("Stored identity is invalid");
+    }
+    identity.displayName = displayName.value();
+    return Result<PeerIdentity>::success(identity);
+}
+
+Result<PeerIdentity> IdentityManager::create(const QString& path, const QString& displayName) {
+    if (QFile::exists(path)) {
+        return Result<PeerIdentity>::failure("Identity already exists");
+    }
+    const auto normalized = normalizeDisplayName(displayName);
+    if (!normalized) {
+        return Result<PeerIdentity>::failure(normalized.error());
+    }
+
+    PeerIdentity identity{QUuid::createUuid().toString(QUuid::WithoutBraces), normalized.value(),
+                          QUuid::createUuid().toString(QUuid::WithoutBraces),
+                          QDateTime::currentDateTimeUtc()};
+    const auto saved = saveIdentity(path, identity);
+    if (!saved) {
+        return Result<PeerIdentity>::failure(saved.error());
+    }
+    return Result<PeerIdentity>::success(identity);
+}
+
+Result<PeerIdentity> IdentityManager::updateDisplayName(const QString& path,
+                                                        const PeerIdentity& identity,
+                                                        const QString& displayName) {
+    if (!identity.isValid()) {
+        return Result<PeerIdentity>::failure("Identity is not initialized");
+    }
+    const auto normalized = normalizeDisplayName(displayName);
+    if (!normalized) {
+        return Result<PeerIdentity>::failure(normalized.error());
+    }
+    if (identity.displayName == normalized.value()) {
+        return Result<PeerIdentity>::success(identity);
+    }
+
+    auto updated = identity;
+    updated.displayName = normalized.value();
+    const auto saved = saveIdentity(path, updated);
+    if (!saved) {
+        return Result<PeerIdentity>::failure(saved.error());
+    }
+    return Result<PeerIdentity>::success(updated);
+}
+
+} // namespace tmc

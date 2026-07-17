@@ -1,132 +1,207 @@
-#include "app/network_session.h"
+#include "tmc/app/network_session.h"
 
-#include "app/application_controller.h"
-#include "audio/audio_engine.h"
-#include "core/logger.h"
-#include "network/peer_connection.h"
-#include "protocol/packet.h"
-#include "protocol/packet_codec.h"
-#include "signaling/invitation_codec.h"
+#include "tmc/app/application_controller.h"
+#include "tmc/app/voice_session.h"
+#include "tmc/core/logger.h"
+#include "tmc/protocol/packet.h"
+#include "tmc/protocol/packet_codec.h"
+#include "tmc/signaling/invitation_codec.h"
+
 #include <QDateTime>
-#include <QJsonArray>
 #include <QJsonObject>
-#include <QRandomGenerator>
-#include <QTimer>
+#include <QSet>
 #include <QUuid>
 
-using namespace tmc;
+namespace tmc {
 
-struct NetworkSession::Link {
-    QString connectionId;
-    PeerIdentity remote;
-    std::shared_ptr<PeerConnection> transport;
-    bool open{false};
-    bool everOpened{false};
-    bool localOffer{false};
-    bool answerApplied{false};
-    bool signalingProduced{false};
-    bool meshManaged{false};
-    ConnectionState state{ConnectionState::Disconnected};
-};
+namespace {
 
-static QString uuid() {
+QString uuid() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
-static QJsonObject identityJson(const PeerIdentity& identity) {
+QJsonObject identityJson(const PeerIdentity& identity) {
     return {{"peer_id", identity.peerId},
             {"display_name", identity.displayName},
             {"device_id", identity.deviceId},
             {"created_at", identity.createdAt.toUTC().toString(Qt::ISODateWithMs)}};
 }
 
-static PeerIdentity identityFromJson(const QJsonObject& object) {
+PeerIdentity identityFromJson(const QJsonObject& object) {
     return {object.value("peer_id").toString(), object.value("display_name").toString(),
             object.value("device_id").toString(),
             QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
 }
 
-NetworkSession::NetworkSession(ApplicationController& app, QObject* parent)
-    : QObject(parent), app_(app), audio_(std::make_unique<AudioEngine>()) {
+} // namespace
+
+NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy policy, QObject* parent)
+    : QObject(parent), app_(app), policy_(policy),
+      connections_(std::make_unique<ConnectionManager>(app.config().stunServers, policy)),
+      mesh_(policy), voice_(std::make_unique<VoiceSession>()) {
+    Q_ASSERT(policy_.isValid());
     qRegisterMetaType<ChatMessage>();
+    qRegisterMetaType<ConnectionAttemptState>();
+    qRegisterMetaType<MeshSessionState>();
+
+    connect(connections_.get(), &ConnectionManager::localDescriptionReady, this,
+            &NetworkSession::emitSignaling);
+    connect(connections_.get(), &ConnectionManager::statusChanged, this,
+            &NetworkSession::statusChanged);
+    connect(connections_.get(), &ConnectionManager::attemptChanged, this,
+            &NetworkSession::connectionAttemptChanged);
+    connect(connections_.get(), &ConnectionManager::attemptFailed, this,
+            [this](const PeerIdentity& peer, bool meshManaged, bool localOffer, const QString&) {
+                if (meshManaged && localOffer) {
+                    mesh_.scheduleRetry(peer);
+                }
+                updateMesh();
+            });
+    connect(connections_.get(), &ConnectionManager::linkOpened, this,
+            [this](const QString& connectionId, const PeerIdentity& remote) {
+                mesh_.connectionOpened(remote);
+                Logger::instance().log(QtInfoMsg, "network",
+                                       "Direct DataChannel opened for " + connectionId.left(8));
+                emit peerChanged(remote.peerId, remote.displayName, true);
+                emit statusChanged("Прямое P2P-соединение установлено. Relay не используется.");
+                updateMesh();
+                sendHello(connectionId);
+                sendPeerList(connectionId);
+                sendVoiceState(connectionId);
+                broadcastPeerList(connectionId);
+                ensureDynamicMesh();
+            });
+    connect(connections_.get(), &ConnectionManager::linkRemoved, this,
+            [this](const QString&, const PeerIdentity& remote, bool wasOpen) {
+                const auto replacement = connections_->infoForPeer(remote.peerId);
+                if (!remote.peerId.isEmpty() && (!replacement || !replacement->open)) {
+                    emit peerChanged(remote.peerId, remote.displayName, false);
+                    voice_->removePeer(remote.peerId);
+                }
+                if (wasOpen) {
+                    emit statusChanged("Участник отключился от прямого P2P-канала.");
+                }
+                updateMesh();
+            });
+    connect(connections_.get(), &ConnectionManager::textReceived, this,
+            &NetworkSession::handleIncoming);
+    connect(connections_.get(), &ConnectionManager::voiceFrameReceived, this,
+            [this](const QString& connectionId, quint32 sequence, const QByteArray& payload) {
+                const auto connection = connections_->info(connectionId);
+                if (connection) {
+                    voice_->receiveFrame(connection->remote.peerId, sequence, payload);
+                }
+            });
+
+    connect(&mesh_, &MeshCoordinator::stateChanged, this, &NetworkSession::meshStateChanged);
+    connect(&mesh_, &MeshCoordinator::statusChanged, this, &NetworkSession::statusChanged);
+    connect(&mesh_, &MeshCoordinator::retryRequested, this, &NetworkSession::startMeshOffer);
+
+    connect(voice_.get(), &VoiceSession::encodedFrameReady, this,
+            [this](quint32 sequence, const QByteArray& payload) {
+                if (voice_->active() && !voice_->muted()) {
+                    connections_->sendVoiceFrameToOpen(sequence, payload);
+                }
+            });
+    connect(voice_.get(), &VoiceSession::stateChanged, this, [this](bool active, bool muted) {
+        broadcastVoiceState();
+        emit callStateChanged(active, muted);
+    });
+    connect(voice_.get(), &VoiceSession::peerChanged, this, &NetworkSession::peerVoiceChanged);
+    connect(voice_.get(), &VoiceSession::errorOccurred, this, &NetworkSession::errorOccurred);
+
     keepalive_ = new QTimer(this);
-    keepalive_->setInterval(app_.config().keepaliveSeconds * 1000);
+    keepalive_->setInterval(policy_.heartbeatIntervalSeconds * 1000);
     connect(keepalive_, &QTimer::timeout, this, [this] {
-        for (const auto& link : links_)
-            sendPacket(link,
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        const auto inactive =
+            connections_->inactiveConnectionIds(now, policy_.livenessTimeoutSeconds * 1000LL);
+        for (const auto& connectionId : inactive) {
+            const auto connection = connections_->info(connectionId);
+            if (connection) {
+                emit statusChanged("Соединение с участником потеряно: " +
+                                   peerDisplayName(connection->remote.peerId));
+            }
+            connections_->discard(connectionId);
+        }
+        for (const auto& connectionId : connections_->openConnectionIds()) {
+            sendPacket(connectionId,
                        basePacket("ping", {{"nonce", uuid()},
                                            {"sent_at", QDateTime::currentDateTimeUtc().toString(
                                                            Qt::ISODateWithMs)}}));
+        }
     });
     keepalive_->start();
-    connect(audio_.get(), &AudioEngine::encodedFrameReady, this,
-            [this](quint32 sequence, const QByteArray& payload) {
-                if (!callActive_ || muted_)
-                    return;
-                for (const auto& link : links_)
-                    if (link->open)
-                        link->transport->sendVoiceFrame(sequence, payload);
-            });
-    connect(audio_.get(), &AudioEngine::errorOccurred, this,
-            [this](const QString& error) { emit errorOccurred(error); });
+
+    connect(&app_, &ApplicationController::displayNameChanged, this, [this] {
+        if (mesh_.meshId().isEmpty()) {
+            return;
+        }
+        mesh_.rememberPeer(app_.identity());
+        for (const auto& connectionId : connections_->openConnectionIds()) {
+            sendHello(connectionId);
+        }
+        broadcastPeerList();
+    });
+    connect(&app_, &ApplicationController::stunServersChanged, connections_.get(),
+            &ConnectionManager::setStunServers);
 }
 
 NetworkSession::~NetworkSession() = default;
 
-Result<void> NetworkSession::createRoom(const QString& name) {
-    const auto normalized = name.trimmed();
-    if (normalized.isEmpty())
-        return Result<void>::failure("Введите название комнаты.");
-    if (!links_.isEmpty())
-        return Result<void>::failure(
-            "Сначала завершите текущие соединения перезапуском приложения.");
+MeshSessionState NetworkSession::meshState() const {
+    return mesh_.state();
+}
 
-    roomId_ = uuid();
-    roomName_ = normalized;
-    logicalClock_ = 0;
-    peers_.clear();
-    seenMessageIds_.clear();
-    seenMessageOrder_.clear();
-    delivery_ = {};
-    peerVoiceStates_.clear();
-    leaveCall();
-    rememberPeer(app_.identity());
-
-    emit roomChanged(roomId_, roomName_);
-    emit statusChanged("Комната создана. Приглашение может создать любой её участник.");
+Result<void> NetworkSession::createMesh() {
+    if (!connections_->connections().isEmpty() || !mesh_.meshId().isEmpty()) {
+        return Result<void>::failure("Сначала покиньте текущую mesh-сессию.");
+    }
+    clearSessionData();
+    mesh_.create(app_.identity(), uuid());
+    emit statusChanged("Mesh создан. Теперь можно пригласить участника.");
+    updateMesh();
     return Result<void>::success();
 }
 
-Result<void> NetworkSession::createInvitation() {
-    if (roomId_.isEmpty())
-        return Result<void>::failure("Сначала создайте комнату.");
-    if (knownPeerCount() >= app_.config().maxRoomPeers)
-        return Result<void>::failure("Достигнут лимит участников комнаты.");
-
-    auto link = makeLink(uuid());
-    link->localOffer = true;
-    emit statusChanged("Создаётся приглашение для нового участника…");
-    try {
-        link->transport->createOffer();
-    } catch (const std::exception& e) {
-        discardLink(link);
-        return Result<void>::failure(QString::fromUtf8(e.what()));
+void NetworkSession::leaveMesh() {
+    if (mesh_.meshId().isEmpty() && connections_->connections().isEmpty()) {
+        return;
     }
-    std::weak_ptr<Link> weak = link;
-    QTimer::singleShot(app_.config().iceGatheringTimeoutSeconds * 1000, this, [this, weak] {
-        const auto pending = weak.lock();
-        if (pending && !pending->signalingProduced)
-            emit errorOccurred("Истёк таймаут сбора ICE-кандидатов. Проверьте STUN и сеть.");
-    });
-    return Result<void>::success();
+    voice_->leave();
+    const auto connections = connections_->connections();
+    for (const auto& connection : connections) {
+        connections_->discard(connection.connectionId);
+    }
+    mesh_.leave();
+    clearSessionData();
+    emit statusChanged("Вы вышли из mesh.");
+    updateMesh();
+}
+
+Result<void> NetworkSession::createInvitation() {
+    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+        return Result<void>::failure("Сначала создайте mesh или завершите подключение.");
+    }
+    if (knownPeerCount() >= policy_.maxPeers) {
+        return Result<void>::failure("Достигнут лимит участников mesh.");
+    }
+
+    const auto connectionId = uuid();
+    auto created = connections_->create(connectionId, {}, true, false);
+    if (!created) {
+        return created;
+    }
+    emit statusChanged("Создаётся приглашение для нового участника…");
+    return connections_->startOffer(connectionId);
 }
 
 Result<void> NetworkSession::importSignalingText(const QString& text) {
     auto decoded = InvitationCodec::decodeText(text.trimmed());
-    if (!decoded)
+    if (!decoded) {
         return Result<void>::failure(decoded.error());
-    const auto document = InvitationCodec::encode(decoded.value());
-    return importSignalingDocument(document);
+    }
+    return importSignalingDocument(InvitationCodec::encode(decoded.value()));
 }
 
 Result<Invitation> NetworkSession::decodeSignaling(const QByteArray& document) const {
@@ -135,229 +210,101 @@ Result<Invitation> NetworkSession::decodeSignaling(const QByteArray& document) c
 
 Result<void> NetworkSession::importSignalingDocument(const QByteArray& document) {
     auto decoded = decodeSignaling(document);
-    if (!decoded)
+    if (!decoded) {
         return Result<void>::failure(decoded.error());
+    }
     const auto invitation = decoded.value();
 
     if (invitation.kind == Invitation::Kind::Offer) {
-        if (!roomId_.isEmpty() && roomId_ != invitation.roomId)
-            return Result<void>::failure("Приглашение относится к другой комнате.");
-        if (links_.contains(invitation.connectionId))
+        if (!mesh_.meshId().isEmpty() && mesh_.meshId() != invitation.meshId) {
+            return Result<void>::failure(
+                "Приглашение относится к другому mesh. Сначала выйдите из текущего.");
+        }
+        if (connections_->contains(invitation.connectionId)) {
             return Result<void>::failure(
                 "Повторно получен offer для уже известного соединения. Убедитесь, что друг "
                 "отправил строку из окна «Answer готов», а не исходное приглашение.");
-
-        for (const auto& existing : links_) {
-            if (existing->remote.peerId == invitation.fromPeer.peerId && existing->open)
-                return Result<void>::failure("Этот участник уже подключён к комнате.");
         }
-        discardStaleLinks(invitation.fromPeer.peerId);
+        const auto existing = connections_->infoForPeer(invitation.fromPeer.peerId);
+        if (existing && existing->open) {
+            return Result<void>::failure("Этот участник уже подключён к mesh.");
+        }
+        connections_->discardStale(invitation.fromPeer.peerId);
 
-        const bool joiningRoom = roomId_.isEmpty();
-        roomId_ = invitation.roomId;
-        roomName_ = invitation.roomName;
-        if (joiningRoom) {
-            logicalClock_ = 0;
-            peers_.clear();
-            seenMessageIds_.clear();
-            seenMessageOrder_.clear();
-            delivery_ = {};
-            peerVoiceStates_.clear();
-            leaveCall();
+        const bool joiningMesh = mesh_.meshId().isEmpty();
+        if (joiningMesh) {
+            clearSessionData();
+            mesh_.beginJoin(app_.identity(), invitation.fromPeer, invitation.meshId);
+        } else {
+            mesh_.rememberPeer(invitation.fromPeer);
         }
 
-        auto link = makeLink(invitation.connectionId);
-        link->remote = invitation.fromPeer;
-        rememberPeer(link->remote);
-        rememberPeer(app_.identity());
-        emit roomChanged(roomId_, roomName_);
-        emit peerChanged(link->remote.peerId, link->remote.displayName, false);
+        auto created =
+            connections_->create(invitation.connectionId, invitation.fromPeer, false, false);
+        if (!created) {
+            if (joiningMesh) {
+                mesh_.leave();
+            }
+            return created;
+        }
+        emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
         emit statusChanged("Offer импортирован. Создаётся answer…");
-        try {
-            link->transport->acceptOffer(invitation.sdp);
-        } catch (const std::exception& e) {
-            discardLink(link);
-            return Result<void>::failure(QString::fromUtf8(e.what()));
+        const auto accepted = connections_->acceptOffer(invitation.connectionId, invitation.sdp);
+        if (!accepted && joiningMesh) {
+            mesh_.leave();
+            clearSessionData();
         }
-        return Result<void>::success();
+        return accepted;
     }
 
-    if (roomId_ != invitation.roomId)
-        return Result<void>::failure("Answer относится к другой комнате.");
-    auto link = links_.value(invitation.connectionId);
-    if (!link)
+    if (mesh_.meshId() != invitation.meshId) {
+        return Result<void>::failure("Answer относится к другому mesh.");
+    }
+    const auto connection = connections_->info(invitation.connectionId);
+    if (!connection) {
         return Result<void>::failure("Не найдено исходное приглашение для этого answer.");
-    if (link->answerApplied)
+    }
+    if (connection->answerApplied) {
         return Result<void>::failure("Этот answer уже импортирован.");
+    }
 
-    link->remote = invitation.fromPeer;
-    rememberPeer(link->remote);
-    link->answerApplied = true;
-    emit peerChanged(link->remote.peerId, link->remote.displayName, false);
+    connections_->setRemote(invitation.connectionId, invitation.fromPeer);
+    mesh_.rememberPeer(invitation.fromPeer);
+    emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
     emit statusChanged("Answer импортирован. Устанавливается прямое P2P-соединение…");
-    try {
-        link->transport->acceptAnswer(invitation.sdp);
-    } catch (const std::exception& e) {
-        link->answerApplied = false;
-        return Result<void>::failure(QString::fromUtf8(e.what()));
-    }
-    std::weak_ptr<Link> weak = link;
-    QTimer::singleShot(app_.config().connectionTimeoutSeconds * 1000, this, [this, weak] {
-        const auto pending = weak.lock();
-        if (pending && !pending->open)
-            emit errorOccurred("Не удалось установить прямое соединение за отведённое время.");
-    });
-    return Result<void>::success();
+    return connections_->acceptAnswer(invitation.connectionId, invitation.sdp);
 }
 
-bool NetworkSession::rememberPeer(const PeerIdentity& peer) {
-    if (peer.peerId.isEmpty() || roomId_.isEmpty())
-        return false;
-    const bool known = peers_.contains(peer.peerId);
-    auto current = peer;
-    if (current.displayName.isEmpty())
-        current.displayName = peer.peerId.left(8);
-    if (current.deviceId.isEmpty())
-        current.deviceId = "unknown";
-    peers_.insert(peer.peerId, current);
-    return !known;
-}
-
-QList<PeerIdentity> NetworkSession::knownPeers() const {
-    return peers_.values();
-}
-
-bool NetworkSession::rememberMessage(const QString& messageId) {
-    if (seenMessageIds_.contains(messageId))
-        return false;
-    constexpr qsizetype MaxSeenMessages = 4096;
-    if (seenMessageOrder_.size() >= MaxSeenMessages) {
-        const auto oldest = seenMessageOrder_.dequeue();
-        seenMessageIds_.remove(oldest);
-    }
-    seenMessageIds_.insert(messageId);
-    seenMessageOrder_.enqueue(messageId);
-    return true;
-}
-
-std::shared_ptr<NetworkSession::Link> NetworkSession::makeLink(const QString& connectionId) {
-    auto link = std::make_shared<Link>();
-    link->connectionId = connectionId;
-    link->transport = std::make_shared<PeerConnection>(app_.config());
-    links_.insert(connectionId, link);
-    configureLink(link);
-    updateMesh();
-    return link;
-}
-
-void NetworkSession::discardLink(const std::shared_ptr<Link>& link) {
-    if (!link)
-        return;
-    const auto peerId = link->remote.peerId;
-    const auto peerName = link->remote.displayName;
-    links_.remove(link->connectionId);
-    if (link->transport) {
-        QObject::disconnect(link->transport.get(), nullptr, this, nullptr);
-        link->transport.reset();
-    }
-    const auto replacement = linkForPeer(peerId);
-    if (!peerId.isEmpty() && (!replacement || !replacement->open))
-        emit peerChanged(peerId, peerName, false);
-    if (!peerId.isEmpty() && (!replacement || !replacement->open)) {
-        audio_->removePeer(peerId);
-        peerVoiceStates_.remove(peerId);
-        emit peerVoiceChanged(peerId, false, false);
-    }
-    updateMesh();
-}
-
-void NetworkSession::discardStaleLinks(const QString& peerId) {
-    const auto snapshot = links_.values();
-    for (const auto& link : snapshot) {
-        const bool samePeer = !peerId.isEmpty() && link->remote.peerId == peerId;
-        if (!link->open && (peerId.isEmpty() || samePeer))
-            discardLink(link);
-    }
-    updateMesh();
-}
-
-void NetworkSession::configureLink(const std::shared_ptr<Link>& link) {
-    connect(
-        link->transport.get(), &PeerConnection::localDescriptionReady, this,
-        [this, link](const QString& type, const QString& sdp) { emitSignaling(link, type, sdp); });
-    connect(link->transport.get(), &PeerConnection::stateChanged, this,
-            [this, link](ConnectionState state) {
-                link->state = state;
-                if (state == ConnectionState::Failed && link->open) {
-                    link->open = false;
-                    emit peerChanged(link->remote.peerId, link->remote.displayName, false);
-                    updateMesh();
-                }
-                emit statusChanged("Соединение " + link->connectionId.left(8) + ": " +
-                                   toString(state));
-            });
-    connect(link->transport.get(), &PeerConnection::channelOpened, this, [this, link] {
-        link->open = true;
-        link->everOpened = true;
-        Logger::instance().log(QtInfoMsg, "network",
-                               "Direct DataChannel opened for " + link->connectionId.left(8));
-        emit peerChanged(link->remote.peerId, link->remote.displayName, true);
-        emit statusChanged("Прямое P2P-соединение установлено. Relay не используется.");
-        updateMesh();
-        sendHello(link);
-        sendPeerList(link);
-        sendVoiceState(link);
-        broadcastPeerList(link->connectionId);
-        ensureDynamicMesh();
-    });
-    connect(link->transport.get(), &PeerConnection::channelClosed, this, [this, link] {
-        link->open = false;
-        emit peerChanged(link->remote.peerId, link->remote.displayName, false);
-        emit statusChanged("Друг отключён.");
-        audio_->removePeer(link->remote.peerId);
-        peerVoiceStates_.remove(link->remote.peerId);
-        emit peerVoiceChanged(link->remote.peerId, false, false);
-        updateMesh();
-    });
-    connect(link->transport.get(), &PeerConnection::textReceived, this,
-            [this, link](const QString& text) { handleIncoming(link, text); });
-    connect(link->transport.get(), &PeerConnection::voiceFrameReceived, this,
-            [this, link](quint32 sequence, const QByteArray& payload) {
-                if (callActive_ && !link->remote.peerId.isEmpty())
-                    audio_->receiveFrame(link->remote.peerId, sequence, payload);
-            });
-    connect(link->transport.get(), &PeerConnection::errorOccurred, this,
-            [this](const QString& error) { emit errorOccurred(error); });
-}
-
-void NetworkSession::emitSignaling(const std::shared_ptr<Link>& link, const QString& type,
+void NetworkSession::emitSignaling(const QString& connectionId, const QString& type,
                                    const QString& sdp) {
     Q_UNUSED(type)
-    link->signalingProduced = true;
+    const auto connection = connections_->info(connectionId);
+    if (!connection) {
+        return;
+    }
     const auto now = QDateTime::currentDateTimeUtc();
     Invitation invitation;
-    invitation.kind = link->localOffer ? Invitation::Kind::Offer : Invitation::Kind::Answer;
-    invitation.roomId = roomId_;
-    invitation.roomName = roomName_;
-    invitation.connectionId = link->connectionId;
+    invitation.kind = connection->localOffer ? Invitation::Kind::Offer : Invitation::Kind::Answer;
+    invitation.meshId = mesh_.meshId();
+    invitation.connectionId = connectionId;
     invitation.sdp = sdp;
     invitation.nonce = uuid();
     invitation.fromPeer = app_.identity();
     invitation.createdAt = now;
-    invitation.expiresAt = now.addSecs(10 * 60);
+    invitation.expiresAt = now.addSecs(policy_.manualSignalingTimeoutSeconds);
 
-    if (link->meshManaged) {
-        const auto packetType = link->localOffer ? "mesh.offer" : "mesh.answer";
-        const auto phase = link->localOffer ? "offer" : "answer";
-        broadcastService(packetType, {{"phase", phase},
+    if (connection->meshManaged) {
+        const auto packetType = connection->localOffer ? "mesh.offer" : "mesh.answer";
+        broadcastService(packetType, {{"phase", connection->localOffer ? "offer" : "answer"},
                                       {"route_id", uuid()},
                                       {"hop_count", 0},
-                                      {"connection_id", link->connectionId},
+                                      {"connection_id", connectionId},
                                       {"from_peer", identityJson(app_.identity())},
-                                      {"target_peer_id", link->remote.peerId},
+                                      {"target_peer_id", connection->remote.peerId},
                                       {"sdp", sdp}});
-        emit statusChanged(link->localOffer ? "Mesh offer отправлен через доступные P2P-каналы."
-                                            : "Mesh answer отправлен через доступные P2P-каналы.");
+        emit statusChanged(connection->localOffer
+                               ? "Mesh offer отправлен через доступные P2P-каналы."
+                               : "Mesh answer отправлен через доступные P2P-каналы.");
         return;
     }
 
@@ -365,431 +312,385 @@ void NetworkSession::emitSignaling(const std::shared_ptr<Link>& link, const QStr
     const auto text = InvitationCodec::encodeText(invitation);
     const auto kind = invitation.kind == Invitation::Kind::Offer ? "offer" : "answer";
     const auto extension = invitation.kind == Invitation::Kind::Offer ? ".tmcinvite" : ".tmcanswer";
-    emit signalingReady(kind, text, document,
-                        "tiny-mesh-" + link->connectionId.left(8) + extension);
+    emit signalingReady(kind, text, document, "tiny-mesh-" + connectionId.left(8) + extension);
     emit statusChanged(invitation.kind == Invitation::Kind::Offer
                            ? "Приглашение готово. Ожидание answer."
-                           : "Answer готов. Отправьте его создателю комнаты.");
+                           : "Answer готов. Отправьте его пригласившему участнику.");
 }
 
 Packet NetworkSession::basePacket(const QString& type, const QJsonObject& payload) const {
-    return {type,   uuid(), roomId_, app_.identity().peerId, QDateTime::currentDateTimeUtc(),
+    return {type,   uuid(), mesh_.meshId(), app_.identity().peerId, QDateTime::currentDateTimeUtc(),
             payload};
 }
 
-void NetworkSession::sendPacket(const std::shared_ptr<Link>& link, const Packet& packet) {
-    if (!link->open)
-        return;
+void NetworkSession::sendPacket(const QString& connectionId, const Packet& packet) {
     const auto bytes = PacketCodec::encode(packet);
-    if (!link->transport->sendText(QString::fromUtf8(bytes)))
-        emit errorOccurred("Не удалось отправить пакет другу.");
+    if (!connections_->sendText(connectionId, QString::fromUtf8(bytes))) {
+        emit errorOccurred("Не удалось отправить пакет участнику.");
+    }
 }
 
-void NetworkSession::sendHello(const std::shared_ptr<Link>& link) {
-    sendPacket(link, basePacket("peer.hello", {{"display_name", app_.identity().displayName},
-                                               {"device_id", app_.identity().deviceId}}));
+void NetworkSession::sendHello(const QString& connectionId) {
+    sendPacket(connectionId,
+               basePacket("peer.hello", {{"display_name", app_.identity().displayName},
+                                         {"device_id", app_.identity().deviceId}}));
 }
 
-void NetworkSession::handleIncoming(const std::shared_ptr<Link>& link, const QString& text) {
+void NetworkSession::handleIncoming(const QString& connectionId, const QString& text) {
     QSet<QString> senders;
-    if (!link->remote.peerId.isEmpty())
-        senders.insert(link->remote.peerId);
-    auto decoded = PacketCodec::decode(text.toUtf8(), roomId_, senders);
+    const auto connection = connections_->info(connectionId);
+    if (connection && !connection->remote.peerId.isEmpty()) {
+        senders.insert(connection->remote.peerId);
+    }
+    auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId(), senders);
     if (!decoded) {
         Logger::instance().log(QtWarningMsg, "protocol", decoded.error());
         emit errorOccurred("Получен некорректный сетевой пакет: " + decoded.error());
         return;
     }
-    handlePacket(link, decoded.value());
+    handlePacket(connectionId, decoded.value());
 }
 
-void NetworkSession::handlePacket(const std::shared_ptr<Link>& link, const Packet& packet) {
+void NetworkSession::handlePacket(const QString& connectionId, const Packet& packet) {
     if (packet.type == "peer.hello") {
-        if (link->remote.peerId.isEmpty())
-            link->remote.peerId = packet.senderId;
+        auto connection = connections_->info(connectionId);
+        if (!connection) {
+            return;
+        }
+        auto remote = connection->remote;
+        if (remote.peerId.isEmpty()) {
+            remote.peerId = packet.senderId;
+        }
         const auto name = packet.payload.value("display_name").toString();
-        if (!name.isEmpty())
-            link->remote.displayName = name;
-        const bool joined = rememberPeer(link->remote);
-        emit peerChanged(link->remote.peerId, link->remote.displayName, true);
-        sendPacket(link, basePacket("peer.hello_ack", {}));
-        sendPeerList(link);
-        if (joined)
-            broadcastPeerList(link->connectionId);
+        if (!name.isEmpty()) {
+            remote.displayName = name;
+        }
+        connections_->setRemote(connectionId, remote);
+        const bool joined = mesh_.rememberPeer(remote);
+        emit peerChanged(remote.peerId, remote.displayName, true);
+        sendPacket(connectionId, basePacket("peer.hello_ack", {}));
+        sendPeerList(connectionId);
+        if (joined) {
+            broadcastPeerList(connectionId);
+        }
         ensureDynamicMesh();
         return;
     }
-
     if (packet.type == "peer.list") {
-        handlePeerList(link, packet);
+        handlePeerList(connectionId, packet);
         return;
     }
-
     if (packet.type == "chat.message") {
-        const auto remoteClock = packet.payload.value("logical_clock").toInteger();
-        logicalClock_ = qMax(logicalClock_, remoteClock) + 1;
-        const auto now = QDateTime::currentDateTimeUtc();
-        ChatMessage message{packet.payload.value("message_id").toString(),
-                            roomId_,
-                            packet.senderId,
-                            packet.payload.value("text").toString(),
-                            remoteClock,
-                            packet.createdAt,
-                            now};
-        if (!message.isValid()) {
-            emit errorOccurred("Получено некорректное сообщение.");
+        const auto messageId = packet.payload.value("message_id").toString();
+        auto received = messaging_.receiveMessage(
+            packet, mesh_.meshId(), basePacket("chat.ack", {{"message_id", messageId}}));
+        if (!received) {
+            emit errorOccurred(received.error());
             return;
         }
-        if (rememberMessage(message.messageId))
-            emit messageReceived(message, false);
-        sendPacket(link, basePacket("chat.ack", {{"message_id", message.messageId}}));
+        if (received.value().message) {
+            emit messageReceived(*received.value().message, false);
+        }
+        sendPacket(connectionId, received.value().acknowledgement);
         return;
     }
-
     if (packet.type == "chat.ack") {
-        const auto messageId = packet.payload.value("message_id").toString();
-        if (delivery_.acknowledge(messageId, packet.senderId))
-            emit deliveryChanged(messageId, delivery_.deliveredCount(messageId),
-                                 delivery_.expectedCount(messageId));
+        if (messaging_.receiveAcknowledgement(packet)) {
+            const auto messageId = packet.payload.value("message_id").toString();
+            const auto counts = messaging_.deliveryCounts(messageId);
+            emit deliveryChanged(messageId, counts.first, counts.second);
+        }
         return;
     }
-
     if (packet.type == "voice.state") {
-        const bool joined = packet.payload.value("joined").toBool();
-        const bool muted = packet.payload.value("muted").toBool();
-        peerVoiceStates_[packet.senderId] = {joined, muted};
-        if (!joined)
-            audio_->removePeer(packet.senderId);
-        emit peerVoiceChanged(packet.senderId, joined, muted);
+        voice_->updatePeer(packet.senderId, packet.payload.value("joined").toBool(),
+                           packet.payload.value("muted").toBool());
         return;
     }
-
     if (packet.type == "mesh.offer") {
-        handleMeshOffer(link, packet);
+        handleMeshOffer(connectionId, packet);
         return;
     }
-
     if (packet.type == "mesh.answer") {
-        handleMeshAnswer(link, packet);
+        handleMeshAnswer(connectionId, packet);
         return;
     }
-
-    if (packet.type == "ping")
-        sendPacket(link, basePacket("pong", packet.payload));
-}
-
-std::shared_ptr<NetworkSession::Link> NetworkSession::linkForPeer(const QString& peerId) const {
-    std::shared_ptr<Link> fallback;
-    for (const auto& link : links_) {
-        if (link->remote.peerId != peerId)
-            continue;
-        if (link->open)
-            return link;
-        if (!fallback)
-            fallback = link;
+    if (packet.type == "ping") {
+        sendPacket(connectionId, basePacket("pong", packet.payload));
     }
-    return fallback;
 }
 
-void NetworkSession::sendPeerList(const std::shared_ptr<Link>& link) {
-    QJsonArray peers;
-    for (const auto& peer : knownPeers())
-        peers.append(identityJson(peer));
-    sendPacket(link, basePacket("peer.list", {{"peers", peers}}));
+void NetworkSession::sendPeerList(const QString& connectionId) {
+    sendPacket(connectionId, basePacket("peer.list", {{"peers", mesh_.peerList()}}));
 }
 
-void NetworkSession::sendVoiceState(const std::shared_ptr<Link>& link) {
-    sendPacket(link, basePacket("voice.state", {{"joined", callActive_}, {"muted", muted_}}));
+void NetworkSession::sendVoiceState(const QString& connectionId) {
+    sendPacket(connectionId, basePacket("voice.state", voice_->statePayload()));
 }
 
 void NetworkSession::broadcastVoiceState() {
-    for (const auto& link : links_)
-        if (link->open)
-            sendVoiceState(link);
+    for (const auto& connectionId : connections_->openConnectionIds()) {
+        sendVoiceState(connectionId);
+    }
 }
 
 void NetworkSession::broadcastPeerList(const QString& excludedConnection) {
-    for (const auto& link : links_)
-        if (link->open && link->connectionId != excludedConnection)
-            sendPeerList(link);
+    for (const auto& connectionId : connections_->openConnectionIds()) {
+        if (connectionId != excludedConnection) {
+            sendPeerList(connectionId);
+        }
+    }
 }
 
-void NetworkSession::handlePeerList(const std::shared_ptr<Link>& source, const Packet& packet) {
-    bool changed = false;
-    QSet<QString> knownIds;
-    for (const auto& known : knownPeers())
-        knownIds.insert(known.peerId);
-    for (const auto& value : packet.payload.value("peers").toArray()) {
-        const auto peer = identityFromJson(value.toObject());
-        if (peer.peerId == app_.identity().peerId)
+void NetworkSession::handlePeerList(const QString& sourceConnectionId, const Packet& packet) {
+    const bool changed =
+        mesh_.ingestPeerList(packet.payload.value("peers").toArray(), app_.identity().peerId);
+    for (const auto& peer : mesh_.peers()) {
+        if (peer.peerId == app_.identity().peerId) {
             continue;
-        if (!knownIds.contains(peer.peerId) && knownIds.size() >= app_.config().maxRoomPeers)
-            continue;
-        if (rememberPeer(peer)) {
-            changed = true;
-            knownIds.insert(peer.peerId);
         }
-        const auto direct = linkForPeer(peer.peerId);
+        const auto direct = connections_->infoForPeer(peer.peerId);
         emit peerChanged(peer.peerId, peer.displayName, direct && direct->open);
     }
-    if (changed)
-        broadcastPeerList(source->connectionId);
+    if (changed) {
+        broadcastPeerList(sourceConnectionId);
+    }
     ensureDynamicMesh();
     updateMesh();
 }
 
 void NetworkSession::ensureDynamicMesh() {
-    for (const auto& peer : knownPeers()) {
+    for (const auto& peer : mesh_.peers()) {
         if (peer.peerId == app_.identity().peerId ||
-            app_.identity().peerId.compare(peer.peerId, Qt::CaseSensitive) > 0)
+            !mesh_.shouldInitiateLink(app_.identity().peerId, peer.peerId) ||
+            !mesh_.canAttemptLink(peer.peerId)) {
             continue;
-        bool exists = false;
-        const auto snapshot = links_.values();
-        for (const auto& link : snapshot) {
-            if (link->remote.peerId != peer.peerId)
-                continue;
-            if (link->open || !link->everOpened)
-                exists = true;
-            else
-                discardLink(link);
         }
-        if (exists)
+        const auto existing = connections_->infoForPeer(peer.peerId);
+        if (existing && (existing->open || !existing->everOpened)) {
             continue;
-        auto mesh = makeLink(uuid());
-        mesh->remote = peer;
-        mesh->localOffer = true;
-        mesh->meshManaged = true;
-        emit statusChanged("Создаётся прямой канал с " + peer.displayName + "…");
-        try {
-            mesh->transport->createOffer();
-        } catch (const std::exception& e) {
-            discardLink(mesh);
-            emit errorOccurred(QString::fromUtf8(e.what()));
         }
-        std::weak_ptr<Link> weak = mesh;
-        QTimer::singleShot(
-            (app_.config().iceGatheringTimeoutSeconds + app_.config().connectionTimeoutSeconds) *
-                1000,
-            this, [this, weak] {
-                const auto pending = weak.lock();
-                if (pending && !pending->open && links_.contains(pending->connectionId)) {
-                    emit errorOccurred("Не удалось автоматически построить прямой канал с " +
-                                       pending->remote.displayName + ".");
-                    discardLink(pending);
-                }
-            });
+        if (existing) {
+            connections_->discard(existing->connectionId);
+        }
+        startMeshOffer(peer);
+    }
+}
+
+void NetworkSession::startMeshOffer(const PeerIdentity& peer) {
+    if (peer.peerId.isEmpty() || !mesh_.canAttemptLink(peer.peerId)) {
+        return;
+    }
+    const auto existing = connections_->infoForPeer(peer.peerId);
+    if (existing && (existing->open || !existing->everOpened)) {
+        return;
+    }
+    if (existing) {
+        connections_->discard(existing->connectionId);
+    }
+
+    const auto connectionId = uuid();
+    auto created = connections_->create(connectionId, peer, true, true);
+    if (!created) {
+        mesh_.scheduleRetry(peer);
+        return;
+    }
+    emit statusChanged("Создаётся прямой канал с " + peer.displayName + "…");
+    const auto started = connections_->startOffer(connectionId);
+    if (!started) {
+        mesh_.scheduleRetry(peer);
     }
 }
 
 void NetworkSession::broadcastService(const QString& type, QJsonObject payload,
                                       const QString& excludedConnection) {
-    const auto routeId = payload.value("route_id").toString();
-    rememberRoute(routeId);
-    for (const auto& link : links_)
-        if (link->open && link->connectionId != excludedConnection)
-            sendPacket(link, basePacket(type, payload));
+    mesh_.rememberRoute(payload.value("route_id").toString());
+    for (const auto& connectionId : connections_->openConnectionIds()) {
+        if (connectionId != excludedConnection) {
+            sendPacket(connectionId, basePacket(type, payload));
+        }
+    }
 }
 
-bool NetworkSession::rememberRoute(const QString& routeId) {
-    if (seenRoutes_.contains(routeId))
-        return false;
-    if (seenRoutes_.size() >= 1024)
-        seenRoutes_.clear();
-    seenRoutes_.insert(routeId);
-    return true;
-}
-
-void NetworkSession::handleMeshOffer(const std::shared_ptr<Link>& source, const Packet& packet) {
+void NetworkSession::handleMeshOffer(const QString& sourceConnectionId, const Packet& packet) {
     auto payload = packet.payload;
     const auto routeId = payload.value("route_id").toString();
-    if (!rememberRoute(routeId))
+    if (!mesh_.rememberRoute(routeId)) {
         return;
+    }
     if (payload.value("target_peer_id").toString() != app_.identity().peerId) {
         const auto hops = payload.value("hop_count").toInt();
-        if (hops < app_.config().maxRoomPeers) {
+        if (hops < policy_.maxPeers) {
             payload["hop_count"] = hops + 1;
-            broadcastService("mesh.offer", payload, source->connectionId);
+            broadcastService("mesh.offer", payload, sourceConnectionId);
         }
         return;
     }
 
     const auto connectionId = payload.value("connection_id").toString();
     const auto origin = identityFromJson(payload.value("from_peer").toObject());
-    const auto existing = linkForPeer(origin.peerId);
-    if (links_.contains(connectionId) || (existing && (existing->open || !existing->everOpened)))
+    const auto existing = connections_->infoForPeer(origin.peerId);
+    if (connections_->contains(connectionId) ||
+        (existing && (existing->open || !existing->everOpened))) {
         return;
-    if (existing)
-        discardLink(existing);
-    auto mesh = makeLink(connectionId);
-    mesh->remote = origin;
-    mesh->meshManaged = true;
-    rememberPeer(origin);
+    }
+    if (existing) {
+        connections_->discard(existing->connectionId);
+    }
+    mesh_.rememberPeer(origin);
+    auto created = connections_->create(connectionId, origin, false, true);
+    if (!created) {
+        return;
+    }
     emit peerChanged(origin.peerId, origin.displayName, false);
     emit statusChanged("Получен автоматический offer от " + origin.displayName + "…");
-    try {
-        mesh->transport->acceptOffer(payload.value("sdp").toString());
-    } catch (const std::exception& e) {
-        discardLink(mesh);
-        emit errorOccurred(QString::fromUtf8(e.what()));
+    const auto accepted = connections_->acceptOffer(connectionId, payload.value("sdp").toString());
+    if (!accepted) {
+        emit statusChanged("Не удалось принять автоматический offer: " + accepted.error());
     }
-    std::weak_ptr<Link> weak = mesh;
-    QTimer::singleShot(
-        (app_.config().iceGatheringTimeoutSeconds + app_.config().connectionTimeoutSeconds) * 1000,
-        this, [this, weak] {
-            const auto pending = weak.lock();
-            if (pending && !pending->open && links_.contains(pending->connectionId)) {
-                emit errorOccurred("Автоматический прямой канал не установился: " +
-                                   pending->remote.displayName);
-                discardLink(pending);
-            }
-        });
 }
 
-void NetworkSession::handleMeshAnswer(const std::shared_ptr<Link>& source, const Packet& packet) {
+void NetworkSession::handleMeshAnswer(const QString& sourceConnectionId, const Packet& packet) {
     auto payload = packet.payload;
     const auto routeId = payload.value("route_id").toString();
-    if (!rememberRoute(routeId))
+    if (!mesh_.rememberRoute(routeId)) {
         return;
+    }
     if (payload.value("target_peer_id").toString() != app_.identity().peerId) {
         const auto hops = payload.value("hop_count").toInt();
-        if (hops < app_.config().maxRoomPeers) {
+        if (hops < policy_.maxPeers) {
             payload["hop_count"] = hops + 1;
-            broadcastService("mesh.answer", payload, source->connectionId);
+            broadcastService("mesh.answer", payload, sourceConnectionId);
         }
         return;
     }
 
-    const auto mesh = links_.value(payload.value("connection_id").toString());
-    if (!mesh || !mesh->meshManaged || mesh->answerApplied)
+    const auto connectionId = payload.value("connection_id").toString();
+    const auto connection = connections_->info(connectionId);
+    if (!connection || !connection->meshManaged || connection->answerApplied) {
         return;
-    mesh->answerApplied = true;
-    emit statusChanged("Получен mesh answer от " + mesh->remote.displayName + "…");
-    try {
-        mesh->transport->acceptAnswer(payload.value("sdp").toString());
-    } catch (const std::exception& e) {
-        mesh->answerApplied = false;
-        emit errorOccurred(QString::fromUtf8(e.what()));
+    }
+    emit statusChanged("Получен mesh answer от " + connection->remote.displayName + "…");
+    const auto accepted = connections_->acceptAnswer(connectionId, payload.value("sdp").toString());
+    if (!accepted) {
+        emit statusChanged("Не удалось принять mesh answer: " + accepted.error());
+        if (connection->localOffer) {
+            mesh_.scheduleRetry(connection->remote);
+        }
     }
 }
 
 Result<void> NetworkSession::sendMessage(const QString& text) {
-    const auto normalized = text.trimmed();
-    if (roomId_.isEmpty())
-        return Result<void>::failure("Сначала создайте комнату или импортируйте приглашение.");
-    if (normalized.isEmpty())
-        return Result<void>::failure("Сообщение пустое.");
-    if (normalized.size() > PacketCodec::MaxTextChars)
-        return Result<void>::failure("Максимальная длина сообщения — 4096 символов.");
-
-    const auto now = QDateTime::currentDateTimeUtc();
-    ChatMessage message{uuid(), roomId_, app_.identity().peerId, normalized, ++logicalClock_,
-                        now,    now};
-    rememberMessage(message.messageId);
-
-    QSet<QString> targets;
-    for (const auto& link : links_) {
-        if (!link->open || link->remote.peerId.isEmpty())
-            continue;
-        targets.insert(link->remote.peerId);
+    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+        return Result<void>::failure("Сначала войдите в mesh.");
     }
-    delivery_.track(message.messageId, targets);
-    emit messageReceived(message, true);
-    emit deliveryChanged(message.messageId, 0, targets.size());
-
-    const auto packet = basePacket("chat.message", {{"message_id", message.messageId},
-                                                    {"text", message.text},
-                                                    {"logical_clock", message.logicalClock}});
-    for (const auto& link : links_)
-        if (link->open)
-            sendPacket(link, packet);
+    QSet<QString> targets;
+    for (const auto& connection : connections_->connections()) {
+        if (connection.open && !connection.remote.peerId.isEmpty()) {
+            targets.insert(connection.remote.peerId);
+        }
+    }
+    auto outgoing = messaging_.createMessage(text, mesh_.meshId(), app_.identity().peerId, targets);
+    if (!outgoing) {
+        return Result<void>::failure(outgoing.error());
+    }
+    emit messageReceived(outgoing.value().message, true);
+    emit deliveryChanged(outgoing.value().message.messageId, 0,
+                         outgoing.value().expectedDeliveries);
+    for (const auto& connectionId : connections_->openConnectionIds()) {
+        sendPacket(connectionId, outgoing.value().packet);
+    }
     return Result<void>::success();
 }
 
 Result<void> NetworkSession::startCall() {
-    if (callActive_)
+    if (voice_->active()) {
         return Result<void>::success();
-    if (roomId_.isEmpty())
-        return Result<void>::failure("Сначала создайте комнату или присоединитесь к ней.");
-    if (connectedPeerCount() == 0)
+    }
+    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+        return Result<void>::failure("Сначала войдите в mesh.");
+    }
+    if (connectedPeerCount() == 0) {
         return Result<void>::failure("Для звонка нужен хотя бы один подключённый участник.");
-
-    const auto started = audio_->start();
-    if (!started)
+    }
+    const auto started = voice_->start();
+    if (!started) {
         return started;
-    muted_ = false;
-    callActive_ = true;
-    audio_->setMuted(false);
-    broadcastVoiceState();
-    emit callStateChanged(true, false);
+    }
     emit statusChanged("Вы присоединились к голосовому звонку.");
     return Result<void>::success();
 }
 
 void NetworkSession::leaveCall() {
-    if (!callActive_ && !audio_->isRunning())
+    if (!voice_->active()) {
         return;
-    callActive_ = false;
-    muted_ = false;
-    broadcastVoiceState();
-    audio_->stop();
-    emit callStateChanged(false, false);
+    }
+    voice_->leave();
     emit statusChanged("Вы вышли из голосового звонка.");
 }
 
 void NetworkSession::setMuted(bool muted) {
-    if (!callActive_ || muted_ == muted)
+    if (!voice_->active() || voice_->muted() == muted) {
         return;
-    muted_ = muted;
-    audio_->setMuted(muted);
-    broadcastVoiceState();
-    emit callStateChanged(true, muted_);
-    emit statusChanged(muted_ ? "Микрофон выключен." : "Микрофон включён.");
+    }
+    voice_->setMuted(muted);
+    emit statusChanged(muted ? "Микрофон выключен." : "Микрофон включён.");
+}
+
+bool NetworkSession::callActive() const {
+    return voice_->active();
+}
+
+bool NetworkSession::muted() const {
+    return voice_->muted();
 }
 
 Result<QPair<int, int>> NetworkSession::deliveryCounts(const QString& messageId) const {
-    return Result<QPair<int, int>>::success(
-        {delivery_.deliveredCount(messageId), delivery_.expectedCount(messageId)});
+    return Result<QPair<int, int>>::success(messaging_.deliveryCounts(messageId));
 }
 
 int NetworkSession::connectedPeerCount() const {
-    QSet<QString> connected;
-    for (const auto& link : links_)
-        if (link->open && !link->remote.peerId.isEmpty())
-            connected.insert(link->remote.peerId);
-    return connected.size();
+    return connections_->connectedPeerCount();
 }
 
 int NetworkSession::knownPeerCount() const {
-    return knownPeers().size();
+    return mesh_.peerCount();
 }
 
 QString NetworkSession::diagnostics() const {
-    QStringList lines{"Комната: " + (roomId_.isEmpty() ? QString("не выбрана") : roomName_),
-                      "Room ID: " + (roomId_.isEmpty() ? QString("—") : roomId_),
+    QStringList lines{"Состояние mesh: " + toString(mesh_.state()),
                       QString("Прямых каналов: %1/%2")
                           .arg(connectedPeerCount())
                           .arg(qMax(0, knownPeerCount() - 1)),
                       "TURN/relay: отключён"};
-    if (links_.isEmpty())
+    const auto connections = connections_->connections();
+    if (connections.isEmpty()) {
         lines.append("Соединения: отсутствуют");
-    else
+    } else {
         lines.append("Соединения:");
-    for (const auto& link : links_) {
-        const auto peer =
-            link->remote.displayName.isEmpty() ? "не определён" : link->remote.displayName;
-        lines.append(
-            QString("  %1 · %2 · %3").arg(peer, toString(link->state), link->connectionId.left(8)));
+    }
+    for (const auto& connection : connections) {
+        const auto peer = connection.remote.displayName.isEmpty() ? "не определён"
+                                                                  : connection.remote.displayName;
+        lines.append(QString("  %1 · transport: %2 · attempt: %3 · %4")
+                         .arg(peer, toString(connection.transportState),
+                              toString(connection.attemptState), connection.connectionId.left(8)));
     }
     return lines.join('\n');
 }
 
 QString NetworkSession::peerDisplayName(const QString& peerId) const {
-    const auto peer = peers_.value(peerId);
-    if (!peer.displayName.isEmpty())
-        return peer.displayName;
-    return peerId.left(8);
+    const auto peer = mesh_.peer(peerId);
+    return peer.displayName.isEmpty() ? peerId.left(8) : peer.displayName;
 }
 
 void NetworkSession::updateMesh() {
     emit meshChanged(connectedPeerCount(), qMax(0, knownPeerCount() - 1));
 }
+
+void NetworkSession::clearSessionData() {
+    messaging_.clear();
+    voice_->clear();
+}
+
+} // namespace tmc

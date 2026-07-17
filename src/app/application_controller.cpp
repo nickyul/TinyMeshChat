@@ -1,31 +1,106 @@
-#include "app/application_controller.h"
-#include "core/logger.h"
-#include "identity/identity_manager.h"
+#include "tmc/app/application_controller.h"
+
+#include "tmc/core/logger.h"
+#include "tmc/identity/identity_manager.h"
+
 #include <QDir>
 #include <QFile>
 #include <QStandardPaths>
-using namespace tmc;
+
+namespace tmc {
+
 ApplicationController::ApplicationController(QObject* p) : QObject(p) {
 }
-Result<void> ApplicationController::initialize(const QString& name) {
+
+const PeerIdentity& ApplicationController::identity() const {
+    return identity_;
+}
+
+const AppConfig& ApplicationController::config() const {
+    return config_;
+}
+
+const ConnectionPolicy& ApplicationController::connectionPolicy() const {
+    return connectionPolicy_;
+}
+
+QString ApplicationController::dataDirectory() const {
+    return dataDir_;
+}
+
+Result<InitializationState> ApplicationController::initialize() {
     dataDir_ = qEnvironmentVariable("TMC_DATA_DIR");
-    if (dataDir_.isEmpty())
+    if (dataDir_.isEmpty()) {
         dataDir_ = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (!QDir().mkpath(dataDir_))
-        return Result<void>::failure("Cannot create application data directory: " + dataDir_);
+    }
+    if (!QDir().mkpath(dataDir_)) {
+        return Result<InitializationState>::failure("Cannot create application data directory: " +
+                                                    dataDir_);
+    }
     const auto configPath = dataDir_ + "/config.json";
-    if (!QFile::exists(configPath) && !QFile::copy(":/default-config.json", configPath))
-        return Result<void>::failure("Cannot create the user configuration: " + configPath);
+    if (!QFile::exists(configPath) && !QFile::copy(":/default-config.json", configPath)) {
+        return Result<InitializationState>::failure("Cannot create the user configuration: " +
+                                                    configPath);
+    }
+    const auto configPermissions = QFile::permissions(configPath);
+    if (!(configPermissions & QFileDevice::WriteOwner) &&
+        !QFile::setPermissions(configPath, configPermissions | QFileDevice::WriteOwner |
+                                               QFileDevice::WriteUser)) {
+        return Result<InitializationState>::failure(
+            "Cannot make the user configuration writable: " + configPath);
+    }
     auto config = AppConfig::load(configPath);
-    if (!config)
-        return Result<void>::failure(config.error());
+    if (!config) {
+        return Result<InitializationState>::failure(config.error());
+    }
     config_ = config.value();
-    auto i = IdentityManager::loadOrCreate(dataDir_ + "/identity.json", name);
-    if (!i)
-        return Result<void>::failure(i.error());
-    identity_ = i.value();
+    const auto normalizedConfig = config_.save(configPath);
+    if (!normalizedConfig) {
+        return Result<InitializationState>::failure(normalizedConfig.error());
+    }
+    identityPath_ = dataDir_ + "/identity.json";
+    if (!QFile::exists(identityPath_)) {
+        return Result<InitializationState>::success(InitializationState::DisplayNameRequired);
+    }
+
+    auto identity = IdentityManager::load(identityPath_);
+    if (!identity) {
+        return Result<InitializationState>::failure(identity.error());
+    }
+    identity_ = identity.value();
     Logger::instance().log(QtInfoMsg, "app",
                            "Application initialized for peer " + identity_.peerId.left(8));
+    return Result<InitializationState>::success(InitializationState::Ready);
+}
+
+Result<void> ApplicationController::createIdentity(const QString& displayName) {
+    if (identityPath_.isEmpty()) {
+        return Result<void>::failure("Application is not initialized");
+    }
+    auto identity = IdentityManager::create(identityPath_, displayName);
+    if (!identity) {
+        return Result<void>::failure(identity.error());
+    }
+    identity_ = identity.value();
+    Logger::instance().log(QtInfoMsg, "app",
+                           "Identity created for peer " + identity_.peerId.left(8));
+    return Result<void>::success();
+}
+
+Result<void> ApplicationController::updateDisplayName(const QString& displayName) {
+    if (identityPath_.isEmpty() || !identity_.isValid()) {
+        return Result<void>::failure("Identity is not initialized");
+    }
+    auto identity = IdentityManager::updateDisplayName(identityPath_, identity_, displayName);
+    if (!identity) {
+        return Result<void>::failure(identity.error());
+    }
+    if (identity_.displayName == identity.value().displayName) {
+        return Result<void>::success();
+    }
+    identity_ = identity.value();
+    emit displayNameChanged(identity_.displayName);
+    Logger::instance().log(QtInfoMsg, "identity", "Display name updated");
     return Result<void>::success();
 }
 
@@ -34,13 +109,18 @@ Result<void> ApplicationController::updateStunServers(const QStringList& servers
     updated.stunServers.clear();
     for (const auto& server : servers) {
         const auto normalized = server.trimmed();
-        if (!normalized.isEmpty() && !updated.stunServers.contains(normalized))
+        if (!normalized.isEmpty() && !updated.stunServers.contains(normalized)) {
             updated.stunServers.append(normalized);
+        }
     }
     const auto saved = updated.save(dataDir_ + "/config.json");
-    if (!saved)
+    if (!saved) {
         return saved;
+    }
     config_ = updated;
+    emit stunServersChanged(config_.stunServers);
     Logger::instance().log(QtInfoMsg, "config", "STUN server list updated");
     return Result<void>::success();
 }
+
+} // namespace tmc

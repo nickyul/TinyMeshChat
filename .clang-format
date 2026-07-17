@@ -2,14 +2,37 @@ BasedOnStyle: LLVM
 Language: Cpp
 Standard: c++20
 IndentWidth: 4
+ContinuationIndentWidth: 4
 TabWidth: 4
 UseTab: Never
 ColumnLimit: 100
 BreakBeforeBraces: Attach
-AllowShortFunctionsOnASingleLine: InlineOnly
+AccessModifierOffset: -4
+IndentAccessModifiers: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+InsertBraces: true
 PointerAlignment: Left
 ReferenceAlignment: Left
 SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"tmc/'
+    Priority: 1
+  - Regex: '^<Q'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+SeparateDefinitionBlocks: Always
+EmptyLineBeforeAccessModifier: Always
+EmptyLineAfterAccessModifier: Never
+NamespaceIndentation: None
+CompactNamespaces: false
+FixNamespaceComments: true
+WrapNamespaceBodyWithEmptyLines: Always
+MaxEmptyLinesToKeep: 1
 SpaceBeforeParens: ControlStatements

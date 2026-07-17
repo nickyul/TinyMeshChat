@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(TinyMeshChat VERSION 0.1.0 LANGUAGES CXX)
 
-option(TMC_BUILD_GUI "Build the Qt Widgets application" ON)
+option(TMC_BUILD_GUI "Build the Qt Quick application" ON)
 option(TMC_WITH_LIBDATACHANNEL "Enable the real WebRTC transport" ON)
 option(TMC_DEPLOY_QT_AFTER_BUILD "Deploy Qt beside the executable after every Windows build" ON)
 
@@ -11,6 +11,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+
+if(TMC_BUILD_GUI AND NOT TMC_WITH_LIBDATACHANNEL)
+  message(FATAL_ERROR
+    "TMC_BUILD_GUI requires TMC_WITH_LIBDATACHANNEL because NetworkSession uses the "
+    "WebRTC transport")
+endif()
 
 if(NOT Qt6_DIR)
   if(DEFINED ENV{QT_ROOT} AND EXISTS "$ENV{QT_ROOT}")
@@ -28,7 +34,7 @@ endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 if(TMC_BUILD_GUI)
-  find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
+  find_package(Qt6 6.5 REQUIRED COMPONENTS Gui Qml Quick QuickControls2)
   find_package(Opus CONFIG REQUIRED)
   find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
 endif()
@@ -36,29 +42,109 @@ if(TMC_WITH_LIBDATACHANNEL)
   find_package(LibDataChannel CONFIG REQUIRED)
 endif()
 
-add_library(tmc_core
-  src/core/app_config.cpp src/core/logger.cpp
-  src/identity/peer_identity.cpp src/identity/identity_manager.cpp
-  src/signaling/invitation.cpp src/signaling/invitation_codec.cpp
-  src/protocol/packet.cpp src/protocol/packet_codec.cpp
-  src/messaging/chat_message.cpp src/messaging/delivery_tracker.cpp)
-target_include_directories(tmc_core PUBLIC src)
+add_library(tmc_core)
+target_sources(tmc_core
+  PRIVATE
+    src/core/app_config.cpp
+    src/core/logger.cpp
+    src/identity/peer_identity.cpp
+    src/identity/identity_manager.cpp
+    src/signaling/invitation.cpp
+    src/signaling/invitation_codec.cpp
+    src/protocol/packet.cpp
+    src/protocol/packet_codec.cpp
+    src/messaging/chat_message.cpp
+    src/messaging/delivery_tracker.cpp
+  PUBLIC
+    FILE_SET HEADERS
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    FILES
+      include/tmc/core/app_config.h
+      include/tmc/core/logger.h
+      include/tmc/core/result.h
+      include/tmc/identity/identity_manager.h
+      include/tmc/identity/peer_identity.h
+      include/tmc/signaling/invitation.h
+      include/tmc/signaling/invitation_codec.h
+      include/tmc/protocol/packet.h
+      include/tmc/protocol/packet_codec.h
+      include/tmc/messaging/chat_message.h
+      include/tmc/messaging/delivery_tracker.h)
+target_include_directories(tmc_core PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(tmc_core PUBLIC Qt6::Core)
 target_compile_definitions(tmc_core PUBLIC TMC_VERSION="${PROJECT_VERSION}")
 
 if(TMC_WITH_LIBDATACHANNEL)
-  target_sources(tmc_core PRIVATE src/network/peer_connection.cpp src/network/peer_connection.h)
-  target_link_libraries(tmc_core PUBLIC LibDataChannel::LibDataChannel)
-  target_compile_definitions(tmc_core PUBLIC TMC_WITH_LIBDATACHANNEL=1)
+  add_library(tmc_transport)
+  target_sources(tmc_transport
+    PRIVATE
+      src/network/peer_connection.cpp
+    PUBLIC
+      FILE_SET HEADERS
+      BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      FILES
+        include/tmc/network/connection_attempt_state.h
+        include/tmc/network/connection_policy.h
+        include/tmc/network/connection_state.h
+        include/tmc/network/peer_connection.h)
+  target_include_directories(tmc_transport PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+  target_link_libraries(tmc_transport
+    PUBLIC tmc_core Qt6::Core
+    PRIVATE LibDataChannel::LibDataChannel)
+  target_compile_definitions(tmc_transport PUBLIC TMC_WITH_LIBDATACHANNEL=1)
 endif()
 
 if(TMC_BUILD_GUI)
-  set(_tmc_app_sources src/main.cpp
-    src/app/application_controller.cpp src/app/application_controller.h
-    src/app/network_session.cpp src/app/network_session.h
-    src/audio/audio_engine.cpp src/audio/audio_engine.h
-    src/ui/main_window.cpp src/ui/main_window.h
-    src/cli/console_controller.cpp src/cli/console_controller.h resources/resources.qrc)
+  add_library(tmc_audio)
+  target_sources(tmc_audio
+    PRIVATE
+      src/audio/audio_engine.cpp
+    PUBLIC
+      FILE_SET HEADERS
+      BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      FILES include/tmc/audio/audio_engine.h)
+  target_include_directories(tmc_audio
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
+  target_link_libraries(tmc_audio
+    PUBLIC tmc_core Qt6::Core
+    PRIVATE Opus::opus)
+
+  add_library(tmc_application)
+  target_sources(tmc_application
+    PRIVATE
+      src/app/application_controller.cpp
+      src/app/connection_manager.cpp
+      src/app/mesh_coordinator.cpp
+      src/app/messaging_service.cpp
+      src/app/network_session.cpp
+      src/app/peer_registry.cpp
+      src/app/voice_session.cpp
+      src/cli/console_controller.cpp
+    PUBLIC
+      FILE_SET HEADERS
+      BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      FILES
+        include/tmc/app/application_controller.h
+        include/tmc/app/connection_manager.h
+        include/tmc/app/mesh_session_state.h
+        include/tmc/app/mesh_coordinator.h
+        include/tmc/app/messaging_service.h
+        include/tmc/app/network_session.h
+        include/tmc/app/peer_registry.h
+        include/tmc/app/voice_session.h
+        include/tmc/cli/console_controller.h)
+  target_include_directories(tmc_application PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+  target_link_libraries(tmc_application
+    PUBLIC tmc_core tmc_transport tmc_audio Qt6::Core)
+
+  set(_tmc_app_sources
+    src/main.cpp
+    src/ui/app_view_model.cpp
+    resources/resources.qrc)
   if(APPLE)
     configure_file(resources/Info.plist.in "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
     add_executable(TinyMeshChat MACOSX_BUNDLE ${_tmc_app_sources})
@@ -68,11 +154,20 @@ if(TMC_BUILD_GUI)
       MACOSX_BUNDLE_GUI_IDENTIFIER "chat.tinymesh.app"
       MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
       MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+  elseif(WIN32)
+    add_executable(TinyMeshChat WIN32 ${_tmc_app_sources})
   else()
     add_executable(TinyMeshChat ${_tmc_app_sources})
   endif()
-  target_include_directories(TinyMeshChat PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
-  target_link_libraries(TinyMeshChat PRIVATE tmc_core Qt6::Widgets Opus::opus)
+  target_sources(TinyMeshChat
+    PRIVATE
+      FILE_SET HEADERS
+      BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      FILES include/tmc/ui/app_view_model.h)
+  target_include_directories(TinyMeshChat PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(TinyMeshChat PRIVATE
+    tmc_application Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
   if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
     get_target_property(_tmc_qmake_executable Qt6::qmake IMPORTED_LOCATION)
@@ -86,6 +181,7 @@ if(TMC_BUILD_GUI)
       COMMAND "${_tmc_windeployqt}"
         --no-translations
         --compiler-runtime
+        --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/qml"
         --dir "$<TARGET_FILE_DIR:TinyMeshChat>"
         "$<TARGET_FILE:TinyMeshChat>"
       COMMENT "Deploying the Qt runtime for direct IDE execution"

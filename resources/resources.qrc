@@ -1,1 +1,6 @@
-<RCC><qresource prefix="/"><file alias="default-config.json">../config/default-config.json</file></qresource></RCC>
+<RCC>
+  <qresource prefix="/">
+    <file alias="default-config.json">../config/default-config.json</file>
+    <file alias="qml/Main.qml">../qml/Main.qml</file>
+  </qresource>
+</RCC>

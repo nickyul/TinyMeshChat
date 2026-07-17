@@ -1,11 +1,14 @@
 #pragma once
+
 #include <QDateTime>
-#include <QJsonObject>
 #include <QString>
+
 namespace tmc {
-struct Packet {
-    QString type, packetId, roomId, senderId;
+
+struct PeerIdentity {
+    QString peerId, displayName, deviceId;
     QDateTime createdAt;
-    QJsonObject payload;
+    bool isValid() const;
 };
+
 } // namespace tmc

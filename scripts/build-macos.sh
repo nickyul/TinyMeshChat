@@ -54,13 +54,14 @@ deploy_args=(-always-overwrite -verbose=1)
 while IFS= read -r libdir; do
   deploy_args+=("-libpath=$libdir")
 done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*' 2>/dev/null)
-"$QT_ROOT/bin/macdeployqt" "$dist/TinyMeshChat.app" "${deploy_args[@]}"
+"$QT_ROOT/bin/macdeployqt" "$dist/TinyMeshChat.app" "-qmldir=$root/qml" "${deploy_args[@]}"
 
 codesign --force --deep --sign - "$dist/TinyMeshChat.app"
 codesign --verify --deep --strict "$dist/TinyMeshChat.app"
 
 smoke_data="$(mktemp -d)"
-TMC_DATA_DIR="$smoke_data" "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --console \
+TMC_DATA_DIR="$smoke_data" "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" \
+  --console --display-name "CI Smoke" \
   <<< "/quit"
 rm -rf "$smoke_data"
 

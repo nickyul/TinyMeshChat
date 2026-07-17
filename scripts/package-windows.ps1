@@ -31,7 +31,7 @@ if (-not $deployPath) {
 if (-not $deployPath -or -not (Test-Path -LiteralPath $deployPath -PathType Leaf)) {
   throw 'windeployqt.exe was not found; set QT_ROOT or add Qt bin to PATH'
 }
-& $deployPath --release --no-translations --compiler-runtime (Join-Path $dist 'TinyMeshChat.exe')
+& $deployPath --release --no-translations --compiler-runtime --qmldir (Join-Path $root 'qml') (Join-Path $dist 'TinyMeshChat.exe')
 
 Get-ChildItem -LiteralPath $exe.DirectoryName -Filter *.dll -File |
   ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dist -Force }

@@ -1,6 +1,9 @@
 #pragma once
+
 #include <QString>
+
 namespace tmc {
+
 enum class ConnectionState {
     Disconnected,
     Gathering,
@@ -10,6 +13,7 @@ enum class ConnectionState {
     Connected,
     Failed
 };
+
 inline QString toString(ConnectionState s) {
     switch (s) {
     case ConnectionState::Disconnected:
@@ -29,4 +33,5 @@ inline QString toString(ConnectionState s) {
     }
     return "Unknown";
 }
+
 } // namespace tmc
