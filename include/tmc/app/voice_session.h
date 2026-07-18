@@ -1,11 +1,13 @@
 #pragma once
 
+#include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
+#include "tmc/core/voice_frame_timing.h"
 
 #include <QByteArray>
 #include <QHash>
-#include <QJsonObject>
 #include <QObject>
+#include <QStringList>
 
 #include <memory>
 
@@ -17,34 +19,43 @@ class VoiceSession final : public QObject {
     Q_OBJECT
 
 public:
-    explicit VoiceSession(QObject* parent = nullptr);
+    explicit VoiceSession(AudioPreferences preferences = {}, QObject* parent = nullptr);
     ~VoiceSession() override;
 
     Result<void> start();
     void leave();
     void setMuted(bool muted);
+    void setDeafened(bool deafened);
+    void setMicrophoneTest(bool enabled);
+    void setPeerVolume(const QString& peerId, int percent);
+    Result<void> applyPreferences(const AudioPreferences& preferences);
+    QPair<QStringList, QStringList> refreshDevices();
     void clear();
 
-    void receiveFrame(const QString& peerId, quint32 sequence, const QByteArray& payload);
+    void receiveFrame(const QString& peerId, quint32 sequence, const QByteArray& payload,
+                      qint64 transportReceivedAtNs);
     void updatePeer(const QString& peerId, bool joined, bool muted);
     void removePeer(const QString& peerId);
 
-    QJsonObject statePayload() const;
-
     bool active() const;
     bool muted() const;
+    bool deafened() const;
+    bool microphoneTest() const;
 
 signals:
-    void encodedFrameReady(quint32 sequence, QByteArray payload);
+    void encodedFrameReady(quint32 sequence, QByteArray payload, tmc::VoiceFrameTiming timing);
     void stateChanged(bool active, bool muted);
     void peerChanged(QString peerId, bool joined, bool muted);
     void errorOccurred(QString message);
+    void microphoneLevelChanged(double level);
 
 private:
     std::unique_ptr<AudioEngine> audio_;
     QHash<QString, QPair<bool, bool>> peers_;
     bool active_{false};
     bool muted_{false};
+    bool deafened_{false};
+    bool microphoneTest_{false};
 };
 
 } // namespace tmc

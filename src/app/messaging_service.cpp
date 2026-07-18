@@ -39,14 +39,12 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
     ChatMessage message{uuid(), meshId, senderId, normalized, ++logicalClock_, now, now};
     rememberMessage(message.messageId);
     delivery_.track(message.messageId, targets);
-    Packet packet{"chat.message",
+    Packet packet{PacketType::ChatMessage,
                   uuid(),
                   meshId,
                   senderId,
                   now,
-                  {{"message_id", message.messageId},
-                   {"text", message.text},
-                   {"logical_clock", message.logicalClock}}};
+                  ChatMessagePayload{message.messageId, message.text, message.logicalClock}};
     return Result<OutgoingChatMessage>::success(
         {message, packet, static_cast<int>(targets.size())});
 }
@@ -54,16 +52,12 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
 Result<IncomingChatMessage> MessagingService::receiveMessage(const Packet& packet,
                                                              const QString& meshId,
                                                              const Packet& acknowledgement) {
-    const auto remoteClock = packet.payload.value("logical_clock").toInteger();
+    const auto& payload = std::get<ChatMessagePayload>(packet.payload);
+    const auto remoteClock = payload.logicalClock;
     logicalClock_ = qMax(logicalClock_, remoteClock) + 1;
     const auto now = QDateTime::currentDateTimeUtc();
-    ChatMessage message{packet.payload.value("message_id").toString(),
-                        meshId,
-                        packet.senderId,
-                        packet.payload.value("text").toString(),
-                        remoteClock,
-                        packet.createdAt,
-                        now};
+    ChatMessage message{payload.messageId, meshId, packet.senderId, payload.text, remoteClock,
+                        packet.createdAt,  now};
     if (!message.isValid()) {
         return Result<IncomingChatMessage>::failure("Получено некорректное сообщение.");
     }
@@ -76,7 +70,8 @@ Result<IncomingChatMessage> MessagingService::receiveMessage(const Packet& packe
 }
 
 bool MessagingService::receiveAcknowledgement(const Packet& packet) {
-    return delivery_.acknowledge(packet.payload.value("message_id").toString(), packet.senderId);
+    return delivery_.acknowledge(std::get<ChatAckPayload>(packet.payload).messageId,
+                                 packet.senderId);
 }
 
 QPair<int, int> MessagingService::deliveryCounts(const QString& messageId) const {

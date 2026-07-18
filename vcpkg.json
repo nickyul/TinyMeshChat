@@ -5,6 +5,7 @@
   "dependencies": [
     {"name":"libdatachannel","default-features":false,"features":["ws"]},
     "miniaudio",
-    "opus"
+    "opus",
+    "speexdsp"
   ]
 }

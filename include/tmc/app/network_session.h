@@ -4,13 +4,16 @@
 #include "tmc/app/mesh_coordinator.h"
 #include "tmc/app/mesh_session_state.h"
 #include "tmc/app/messaging_service.h"
+#include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
 #include "tmc/messaging/chat_message.h"
 #include "tmc/network/connection_policy.h"
+#include "tmc/protocol/packet.h"
 #include "tmc/signaling/invitation.h"
 
 #include <QHash>
 #include <QObject>
+#include <QStringList>
 #include <QTimer>
 
 #include <memory>
@@ -18,6 +21,8 @@
 namespace tmc {
 
 class ApplicationController;
+class PacketDispatcher;
+class SessionPacketHandlers;
 class VoiceSession;
 
 class NetworkSession final : public QObject {
@@ -31,6 +36,8 @@ public:
     void leaveMesh();
 
     Result<void> createInvitation();
+    void cancelInvitation();
+    Result<void> recreateInvitation();
     Result<void> importSignalingText(const QString& text);
     Result<void> importSignalingDocument(const QByteArray& document);
 
@@ -39,9 +46,18 @@ public:
     Result<void> startCall();
     void leaveCall();
     void setMuted(bool muted);
+    void setDeafened(bool deafened);
+    void setMicrophoneTest(bool enabled);
+    void setPeerVolume(const QString& peerId, int percent);
+    Result<void> applyAudioPreferences(const AudioPreferences& preferences);
+    QPair<QStringList, QStringList> refreshAudioDevices();
 
     bool callActive() const;
     bool muted() const;
+    bool deafened() const;
+    bool microphoneTest() const;
+    bool invitationPending() const;
+    QString invitationState() const;
 
     Result<QPair<int, int>> deliveryCounts(const QString& messageId) const;
 
@@ -60,21 +76,23 @@ signals:
     void messageReceived(tmc::ChatMessage message, bool local);
     void deliveryChanged(QString messageId, int acknowledged, int expected);
     void callStateChanged(bool active, bool muted);
+    void audioStateChanged();
+    void microphoneLevelChanged(double level);
     void peerVoiceChanged(QString peerId, bool joined, bool muted);
     void connectionAttemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
+    void invitationStateChanged(bool pending, QString state);
     void errorOccurred(QString message);
 
 private:
+    friend class SessionPacketHandlers;
+
     Result<Invitation> decodeSignaling(const QByteArray& document) const;
     void emitSignaling(const QString& connectionId, const QString& type, const QString& sdp);
 
     void handleIncoming(const QString& connectionId, const QString& text);
-    void handlePacket(const QString& connectionId, const class Packet& packet);
-    void handleMeshOffer(const QString& sourceConnectionId, const class Packet& packet);
-    void handleMeshAnswer(const QString& sourceConnectionId, const class Packet& packet);
 
-    void sendPacket(const QString& connectionId, const class Packet& packet);
-    class Packet basePacket(const QString& type, const QJsonObject& payload) const;
+    void sendPacket(const QString& connectionId, const Packet& packet);
+    Packet basePacket(PacketType type, PacketPayload payload) const;
 
     void sendHello(const QString& connectionId);
     void sendPeerList(const QString& connectionId);
@@ -82,12 +100,9 @@ private:
     void broadcastVoiceState();
     void broadcastPeerList(const QString& excludedConnection = {});
 
-    void handlePeerList(const QString& sourceConnectionId, const class Packet& packet);
     void ensureDynamicMesh();
     void startMeshOffer(const PeerIdentity& peer);
-    void scheduleMeshRetry(const PeerIdentity& peer);
-
-    void broadcastService(const QString& type, QJsonObject payload,
+    void broadcastService(PacketType type, MeshSignalingPayload payload,
                           const QString& excludedConnection = {});
 
     void updateMesh();
@@ -96,10 +111,13 @@ private:
     ApplicationController& app_;
     ConnectionPolicy policy_;
     std::unique_ptr<ConnectionManager> connections_;
+    std::unique_ptr<PacketDispatcher> packetDispatcher_;
+    std::unique_ptr<SessionPacketHandlers> packetHandlers_;
     MeshCoordinator mesh_;
     MessagingService messaging_;
     std::unique_ptr<VoiceSession> voice_;
     QTimer* keepalive_{};
+    QString manualInvitationConnectionId_;
 };
 
 } // namespace tmc

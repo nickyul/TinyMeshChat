@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tmc/core/voice_frame_timing.h"
 #include "tmc/network/connection_state.h"
 
 #include <QByteArray>
@@ -29,15 +30,21 @@ public:
     void acceptAnswer(const QString&);
 
     bool sendText(const QString&);
-    bool sendVoiceFrame(quint32 sequence, const QByteArray& opusPayload);
+    bool sendVoiceFrame(quint32 sequence, const QByteArray& opusPayload,
+                        const VoiceFrameTiming& timing);
+    quint64 droppedVoiceFrames() const;
 
 signals:
     void localDescriptionReady(QString type, QString sdp);
     void stateChanged(tmc::ConnectionState);
+    void iceStateChanged(QString state);
+    void gatheringStateChanged(QString state);
+    void candidateDiscovered(QString type, QString transport);
+    void selectedCandidatePairChanged(QString localType, QString remoteType);
     void channelOpened();
     void channelClosed();
     void textReceived(QString);
-    void voiceFrameReceived(quint32 sequence, QByteArray opusPayload);
+    void voiceFrameReceived(quint32 sequence, QByteArray opusPayload, qint64 receivedAtNs);
     void errorOccurred(QString);
 
 private:

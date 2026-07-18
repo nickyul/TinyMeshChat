@@ -37,6 +37,7 @@ Result<InitializationState> ApplicationController::initialize() {
         return Result<InitializationState>::failure("Cannot create application data directory: " +
                                                     dataDir_);
     }
+    Logger::instance().setFilePath(dataDir_ + "/debug.log");
     const auto configPath = dataDir_ + "/config.json";
     if (!QFile::exists(configPath) && !QFile::copy(":/default-config.json", configPath)) {
         return Result<InitializationState>::failure("Cannot create the user configuration: " +
@@ -120,6 +121,22 @@ Result<void> ApplicationController::updateStunServers(const QStringList& servers
     config_ = updated;
     emit stunServersChanged(config_.stunServers);
     Logger::instance().log(QtInfoMsg, "config", "STUN server list updated");
+    return Result<void>::success();
+}
+
+Result<void> ApplicationController::updateAudioPreferences(const AudioPreferences& preferences) {
+    if (!preferences.isValid()) {
+        return Result<void>::failure("Некорректные настройки аудио.");
+    }
+    AppConfig updated = config_;
+    updated.audio = preferences;
+    const auto saved = updated.save(dataDir_ + "/config.json");
+    if (!saved) {
+        return saved;
+    }
+    config_ = updated;
+    emit audioPreferencesChanged(config_.audio);
+    Logger::instance().log(QtInfoMsg, "config", "Audio preferences updated");
     return Result<void>::success();
 }
 

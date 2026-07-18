@@ -1,8 +1,12 @@
 #include "tmc/network/peer_connection.h"
 
+#include "tmc/core/logger.h"
+
 #include <QPointer>
 #include <QtEndian>
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <rtc/rtc.hpp>
 
@@ -12,6 +16,7 @@ struct PeerConnection::State {
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
     std::shared_ptr<rtc::DataChannel> voiceDc;
+    std::atomic<quint64> droppedVoiceFrames{0};
 };
 
 namespace {
@@ -19,6 +24,12 @@ namespace {
 constexpr char VoiceMagic[] = {'T', 'M', 'V', '1'};
 constexpr qsizetype VoiceHeaderSize = 8;
 constexpr qsizetype MaxVoicePayload = 4000;
+
+qint64 monotonicNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 } // namespace
 
@@ -33,6 +44,72 @@ static ConnectionState mapState(rtc::PeerConnection::State s) {
     default:
         return ConnectionState::Disconnected;
     }
+}
+
+static QString iceStateName(rtc::PeerConnection::IceState state) {
+    switch (state) {
+    case rtc::PeerConnection::IceState::New:
+        return "new";
+    case rtc::PeerConnection::IceState::Checking:
+        return "checking";
+    case rtc::PeerConnection::IceState::Connected:
+        return "connected";
+    case rtc::PeerConnection::IceState::Completed:
+        return "completed";
+    case rtc::PeerConnection::IceState::Failed:
+        return "failed";
+    case rtc::PeerConnection::IceState::Disconnected:
+        return "disconnected";
+    case rtc::PeerConnection::IceState::Closed:
+        return "closed";
+    }
+    return "unknown";
+}
+
+static QString gatheringStateName(rtc::PeerConnection::GatheringState state) {
+    switch (state) {
+    case rtc::PeerConnection::GatheringState::New:
+        return "new";
+    case rtc::PeerConnection::GatheringState::InProgress:
+        return "in-progress";
+    case rtc::PeerConnection::GatheringState::Complete:
+        return "complete";
+    }
+    return "unknown";
+}
+
+static QString candidateTypeName(rtc::Candidate::Type type) {
+    switch (type) {
+    case rtc::Candidate::Type::Host:
+        return "host";
+    case rtc::Candidate::Type::ServerReflexive:
+        return "srflx";
+    case rtc::Candidate::Type::PeerReflexive:
+        return "prflx";
+    case rtc::Candidate::Type::Relayed:
+        return "relay";
+    case rtc::Candidate::Type::Unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+static QString candidateTransportName(rtc::Candidate::TransportType type) {
+    switch (type) {
+    case rtc::Candidate::TransportType::Udp:
+        return "udp";
+    case rtc::Candidate::TransportType::TcpActive:
+        return "tcp-active";
+    case rtc::Candidate::TransportType::TcpPassive:
+        return "tcp-passive";
+    case rtc::Candidate::TransportType::TcpSo:
+        return "tcp-so";
+    case rtc::Candidate::TransportType::TcpUnknown:
+        return "tcp";
+    case rtc::Candidate::TransportType::Unknown:
+        return "unknown";
+    }
+    return "unknown";
 }
 
 PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
@@ -57,22 +134,69 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
                 Qt::QueuedConnection);
         }
     });
-    state_->pc->onIceStateChange([self](auto state) {
-        if (!self || state != rtc::PeerConnection::IceState::Failed) {
+    state_->pc->onIceStateChange([self, weak](auto state) {
+        if (!self) {
             return;
+        }
+        const auto stateName = iceStateName(state);
+        QString localType;
+        QString remoteType;
+        if (state == rtc::PeerConnection::IceState::Connected ||
+            state == rtc::PeerConnection::IceState::Completed) {
+            if (const auto shared = weak.lock()) {
+                rtc::Candidate local;
+                rtc::Candidate remote;
+                if (shared->pc->getSelectedCandidatePair(&local, &remote)) {
+                    localType = candidateTypeName(local.type());
+                    remoteType = candidateTypeName(remote.type());
+                }
+            }
         }
         QMetaObject::invokeMethod(
             self,
-            [self] {
+            [self, state, stateName, localType, remoteType] {
                 if (self) {
-                    emit self->errorOccurred(
-                        "ICE failed: direct P2P connection could not be established.");
+                    emit self->iceStateChanged(stateName);
+                    if (!localType.isEmpty()) {
+                        emit self->selectedCandidatePairChanged(localType, remoteType);
+                    }
+                    if (state == rtc::PeerConnection::IceState::Failed) {
+                        emit self->errorOccurred(
+                            "ICE checks failed: direct P2P connection could not be established.");
+                    }
+                }
+            },
+            Qt::QueuedConnection);
+    });
+    state_->pc->onLocalCandidate([self](const rtc::Candidate& candidate) {
+        if (!self) {
+            return;
+        }
+        const auto type = candidateTypeName(candidate.type());
+        const auto transport = candidateTransportName(candidate.transportType());
+        QMetaObject::invokeMethod(
+            self,
+            [self, type, transport] {
+                if (self) {
+                    emit self->candidateDiscovered(type, transport);
                 }
             },
             Qt::QueuedConnection);
     });
     state_->pc->onGatheringStateChange([self, weak](auto s) {
-        if (!self || s != rtc::PeerConnection::GatheringState::Complete) {
+        if (!self) {
+            return;
+        }
+        const auto stateName = gatheringStateName(s);
+        QMetaObject::invokeMethod(
+            self,
+            [self, stateName] {
+                if (self) {
+                    emit self->gatheringStateChanged(stateName);
+                }
+            },
+            Qt::QueuedConnection);
+        if (s != rtc::PeerConnection::GatheringState::Complete) {
             return;
         }
         auto state = weak.lock();
@@ -209,6 +333,7 @@ void PeerConnection::configureVoiceChannel(const std::shared_ptr<rtc::DataChanne
             return;
         }
         const auto& bytes = std::get<rtc::binary>(message);
+        const auto receivedAtNs = monotonicNs();
         if (bytes.size() <= VoiceHeaderSize || bytes.size() > VoiceHeaderSize + MaxVoicePayload) {
             return;
         }
@@ -223,9 +348,9 @@ void PeerConnection::configureVoiceChannel(const std::shared_ptr<rtc::DataChanne
                                  static_cast<qsizetype>(bytes.size()) - VoiceHeaderSize);
         QMetaObject::invokeMethod(
             self,
-            [self, sequence, payload] {
+            [self, sequence, payload, receivedAtNs] {
                 if (self) {
-                    emit self->voiceFrameReceived(sequence, payload);
+                    emit self->voiceFrameReceived(sequence, payload, receivedAtNs);
                 }
             },
             Qt::QueuedConnection);
@@ -257,9 +382,16 @@ bool PeerConnection::sendText(const QString& s) {
     return state_->dc && state_->dc->isOpen() && state_->dc->send(s.toUtf8().toStdString());
 }
 
-bool PeerConnection::sendVoiceFrame(quint32 sequence, const QByteArray& opusPayload) {
+bool PeerConnection::sendVoiceFrame(quint32 sequence, const QByteArray& opusPayload,
+                                    const VoiceFrameTiming& timing) {
     if (!state_->voiceDc || !state_->voiceDc->isOpen() || opusPayload.isEmpty() ||
         opusPayload.size() > MaxVoicePayload) {
+        return false;
+    }
+    constexpr size_t MaxBufferedVoiceBytes = 64 * 1024;
+    const auto bufferedBytes = state_->voiceDc->bufferedAmount();
+    if (bufferedBytes > MaxBufferedVoiceBytes) {
+        state_->droppedVoiceFrames.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     QByteArray packet(VoiceHeaderSize + opusPayload.size(), Qt::Uninitialized);
@@ -267,8 +399,23 @@ bool PeerConnection::sendVoiceFrame(quint32 sequence, const QByteArray& opusPayl
     const auto encodedSequence = qToBigEndian(sequence);
     std::memcpy(packet.data() + sizeof(VoiceMagic), &encodedSequence, sizeof(encodedSequence));
     std::memcpy(packet.data() + VoiceHeaderSize, opusPayload.constData(), opusPayload.size());
+    Logger::instance().trace(
+        "voice_tx",
+        QString("seq=%1 capture_queue_ms=%2 dsp_ms=%3 encode_ms=%4 gui_queue_ms=%5 "
+                "dc_buffer_bytes=%6 payload_bytes=%7")
+            .arg(sequence)
+            .arg(timing.captureQueueMs, 0, 'f', 1)
+            .arg(timing.dspMs, 0, 'f', 3)
+            .arg(timing.encodeMs, 0, 'f', 3)
+            .arg(static_cast<double>(monotonicNs() - timing.encodedAtNs) / 1'000'000.0, 0, 'f', 3)
+            .arg(bufferedBytes)
+            .arg(opusPayload.size()));
     return state_->voiceDc->send(reinterpret_cast<const rtc::byte*>(packet.constData()),
                                  static_cast<size_t>(packet.size()));
+}
+
+quint64 PeerConnection::droppedVoiceFrames() const {
+    return state_->droppedVoiceFrames.load(std::memory_order_relaxed);
 }
 
 } // namespace tmc

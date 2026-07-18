@@ -5,7 +5,7 @@
 namespace tmc {
 
 struct ConnectionPolicy {
-    int iceGatheringTimeoutSeconds{30};
+    int iceGatheringTimeoutSeconds{60};
     int connectionTimeoutSeconds{60};
     int manualSignalingTimeoutSeconds{20 * 60};
     int heartbeatIntervalSeconds{10};

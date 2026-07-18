@@ -2,12 +2,21 @@
 
 #include "tmc/audio/audio_engine.h"
 
+#include <utility>
+
 namespace tmc {
 
-VoiceSession::VoiceSession(QObject* parent)
-    : QObject(parent), audio_(std::make_unique<AudioEngine>()) {
+VoiceSession::VoiceSession(AudioPreferences preferences, QObject* parent)
+    : QObject(parent), audio_(std::make_unique<AudioEngine>(std::move(preferences))) {
     connect(audio_.get(), &AudioEngine::encodedFrameReady, this, &VoiceSession::encodedFrameReady);
     connect(audio_.get(), &AudioEngine::errorOccurred, this, &VoiceSession::errorOccurred);
+    connect(audio_.get(), &AudioEngine::microphoneLevelChanged, this,
+            &VoiceSession::microphoneLevelChanged);
+    connect(audio_.get(), &AudioEngine::microphoneTestPlaybackFinished, this, [this] {
+        if (!active_ && !microphoneTest_) {
+            audio_->stop();
+        }
+    });
 }
 
 VoiceSession::~VoiceSession() = default;
@@ -18,6 +27,14 @@ bool VoiceSession::active() const {
 
 bool VoiceSession::muted() const {
     return muted_;
+}
+
+bool VoiceSession::deafened() const {
+    return deafened_;
+}
+
+bool VoiceSession::microphoneTest() const {
+    return microphoneTest_;
 }
 
 Result<void> VoiceSession::start() {
@@ -41,7 +58,9 @@ void VoiceSession::leave() {
     }
     active_ = false;
     muted_ = false;
-    audio_->stop();
+    if (!microphoneTest_) {
+        audio_->stop();
+    }
     emit stateChanged(false, false);
 }
 
@@ -54,8 +73,44 @@ void VoiceSession::setMuted(bool muted) {
     emit stateChanged(true, muted_);
 }
 
+void VoiceSession::setDeafened(bool deafened) {
+    deafened_ = deafened;
+    audio_->setDeafened(deafened);
+}
+
+void VoiceSession::setMicrophoneTest(bool enabled) {
+    if (microphoneTest_ == enabled) {
+        return;
+    }
+    if (enabled && !audio_->isRunning()) {
+        const auto started = audio_->start();
+        if (!started) {
+            emit errorOccurred(started.error());
+            return;
+        }
+    }
+    microphoneTest_ = enabled;
+    audio_->setMicrophoneTest(enabled);
+}
+
+void VoiceSession::setPeerVolume(const QString& peerId, int percent) {
+    audio_->setPeerVolume(peerId, percent);
+}
+
+Result<void> VoiceSession::applyPreferences(const AudioPreferences& preferences) {
+    return audio_->applyPreferences(preferences);
+}
+
+QPair<QStringList, QStringList> VoiceSession::refreshDevices() {
+    const auto devices = audio_->refreshDevices();
+    return {devices.capture, devices.playback};
+}
+
 void VoiceSession::clear() {
+    microphoneTest_ = false;
+    audio_->setMicrophoneTest(false);
     leave();
+    audio_->stop();
     const auto peerIds = peers_.keys();
     peers_.clear();
     for (const auto& peerId : peerIds) {
@@ -64,10 +119,10 @@ void VoiceSession::clear() {
     }
 }
 
-void VoiceSession::receiveFrame(const QString& peerId, quint32 sequence,
-                                const QByteArray& payload) {
+void VoiceSession::receiveFrame(const QString& peerId, quint32 sequence, const QByteArray& payload,
+                                qint64 transportReceivedAtNs) {
     if (active_ && !peerId.isEmpty()) {
-        audio_->receiveFrame(peerId, sequence, payload);
+        audio_->receiveFrame(peerId, sequence, payload, transportReceivedAtNs);
     }
 }
 
@@ -89,10 +144,6 @@ void VoiceSession::removePeer(const QString& peerId) {
     peers_.remove(peerId);
     audio_->removePeer(peerId);
     emit peerChanged(peerId, false, false);
-}
-
-QJsonObject VoiceSession::statePayload() const {
-    return {{"joined", active_}, {"muted", muted_}};
 }
 
 } // namespace tmc

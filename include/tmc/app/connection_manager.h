@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/core/result.h"
+#include "tmc/core/voice_frame_timing.h"
 #include "tmc/identity/peer_identity.h"
 #include "tmc/network/connection_attempt_state.h"
 #include "tmc/network/connection_policy.h"
@@ -28,6 +29,14 @@ struct ConnectionInfo {
     ConnectionState transportState{ConnectionState::Disconnected};
     ConnectionAttemptState attemptState{ConnectionAttemptState::Gathering};
     qint64 lastActivityMs{0};
+    qint64 createdAtMs{0};
+    QString iceState{"new"};
+    QString selectedCandidatePair;
+    QString lastError;
+    int hostCandidates{0};
+    int serverReflexiveCandidates{0};
+    int relayCandidates{0};
+    quint64 droppedVoiceFrames{0};
 };
 
 class ConnectionManager final : public QObject {
@@ -51,6 +60,7 @@ public:
     std::optional<ConnectionInfo> info(const QString& connectionId) const;
     std::optional<ConnectionInfo> infoForPeer(const QString& peerId) const;
     QList<ConnectionInfo> connections() const;
+    QList<ConnectionInfo> recentAttempts() const;
     QStringList openConnectionIds() const;
     QStringList inactiveConnectionIds(qint64 nowMs, qint64 timeoutMs) const;
     int connectedPeerCount() const;
@@ -58,14 +68,16 @@ public:
     void setStunServers(QStringList stunServers);
 
     bool sendText(const QString& connectionId, const QString& text);
-    void sendVoiceFrameToOpen(quint32 sequence, const QByteArray& payload);
+    void sendVoiceFrameToOpen(quint32 sequence, const QByteArray& payload,
+                              const VoiceFrameTiming& timing);
 
 signals:
     void localDescriptionReady(QString connectionId, QString type, QString sdp);
     void linkOpened(QString connectionId, tmc::PeerIdentity remote);
     void linkRemoved(QString connectionId, tmc::PeerIdentity remote, bool wasOpen);
     void textReceived(QString connectionId, QString text);
-    void voiceFrameReceived(QString connectionId, quint32 sequence, QByteArray payload);
+    void voiceFrameReceived(QString connectionId, quint32 sequence, QByteArray payload,
+                            qint64 receivedAtNs);
     void attemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
     void attemptFailed(tmc::PeerIdentity remote, bool meshManaged, bool localOffer,
                        QString message);
@@ -90,6 +102,7 @@ private:
     QStringList stunServers_;
     ConnectionPolicy policy_;
     QHash<QString, std::shared_ptr<Link>> links_;
+    QList<ConnectionInfo> recentAttempts_;
 };
 
 } // namespace tmc

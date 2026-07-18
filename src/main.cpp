@@ -1,5 +1,6 @@
 #include "tmc/app/application_controller.h"
 #include "tmc/cli/console_controller.h"
+#include "tmc/ui/app_link_controller.h"
 #include "tmc/ui/app_view_model.h"
 
 #include <QCoreApplication>
@@ -9,6 +10,7 @@
 #include <QQuickStyle>
 #include <QTimer>
 #include <QUrl>
+#include <QWindow>
 
 #include <cstdio>
 
@@ -22,6 +24,7 @@ struct CommandLine {
     bool console{false};
     bool qmlSmoke{false};
     QString displayName;
+    QUrl appLink;
     QString error;
 };
 
@@ -39,6 +42,8 @@ CommandLine parseCommandLine(int argc, char** argv) {
                 break;
             }
             options.displayName = QString::fromLocal8Bit(argv[++i]);
+        } else if (argument.startsWith("tinymesh://")) {
+            options.appLink = QUrl(argument);
         }
     }
     return options;
@@ -51,6 +56,18 @@ void configureApplication(QCoreApplication& app) {
 
 void prepareConsole() {
 #ifdef Q_OS_WIN
+    const auto inputHandle = GetStdHandle(STD_INPUT_HANDLE);
+    const auto outputHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+    const auto errorHandle = GetStdHandle(STD_ERROR_HANDLE);
+    const auto isRedirected = [](HANDLE handle) {
+        return handle != nullptr && handle != INVALID_HANDLE_VALUE &&
+               GetFileType(handle) != FILE_TYPE_CHAR;
+    };
+
+    const auto inputRedirected = isRedirected(inputHandle);
+    const auto outputRedirected = isRedirected(outputHandle);
+    const auto errorRedirected = isRedirected(errorHandle);
+
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
         const auto error = GetLastError();
         if (error != ERROR_ACCESS_DENIED && !AllocConsole()) {
@@ -59,9 +76,15 @@ void prepareConsole() {
     }
 
     FILE* stream{};
-    freopen_s(&stream, "CONIN$", "r", stdin);
-    freopen_s(&stream, "CONOUT$", "w", stdout);
-    freopen_s(&stream, "CONOUT$", "w", stderr);
+    if (!inputRedirected) {
+        freopen_s(&stream, "CONIN$", "r", stdin);
+    }
+    if (!outputRedirected) {
+        freopen_s(&stream, "CONOUT$", "w", stdout);
+    }
+    if (!errorRedirected) {
+        freopen_s(&stream, "CONOUT$", "w", stderr);
+    }
 #endif
 }
 
@@ -106,6 +129,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    tmc::AppLinkController appLinks;
+    if (!appLinks.startPrimary(options.appLink)) {
+        return 0;
+    }
+
     tmc::ApplicationController controller;
     const auto initialized = controller.initialize();
     if (!initialized) {
@@ -123,13 +151,31 @@ int main(int argc, char** argv) {
         identityRequired = false;
     }
 
-    tmc::AppViewModel viewModel(controller, identityRequired);
+    tmc::AppViewModel viewModel(controller, appLinks, identityRequired);
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("appViewModel", &viewModel);
     engine.rootContext()->setContextProperty("qmlSmoke", options.qmlSmoke);
     engine.load(QUrl("qrc:/qml/Main.qml"));
     if (engine.rootObjects().isEmpty()) {
         return 1;
+    }
+    const auto activate = [&engine] {
+        if (const auto root = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
+            root->show();
+            root->raise();
+            root->requestActivate();
+        }
+    };
+    QObject::connect(&appLinks, &tmc::AppLinkController::urlReceived, &viewModel,
+                     [&viewModel, activate](const QUrl& url) {
+                         activate();
+                         viewModel.previewSignalingLink(url.toString(QUrl::FullyEncoded));
+                     });
+    QObject::connect(&appLinks, &tmc::AppLinkController::activationRequested, &viewModel, activate);
+    if (options.appLink.isValid()) {
+        QTimer::singleShot(0, &viewModel, [&viewModel, url = options.appLink] {
+            viewModel.previewSignalingLink(url.toString(QUrl::FullyEncoded));
+        });
     }
     if (options.qmlSmoke) {
         if (!identityRequired) {

@@ -27,11 +27,13 @@ public:
     QString dataDirectory() const;
 
     Result<void> updateStunServers(const QStringList& servers);
+    Result<void> updateAudioPreferences(const AudioPreferences& preferences);
 
 signals:
     void fatalError(QString);
     void displayNameChanged(QString displayName);
     void stunServersChanged(QStringList servers);
+    void audioPreferencesChanged(tmc::AudioPreferences preferences);
 
 private:
     QString dataDir_;

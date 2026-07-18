@@ -12,6 +12,7 @@ public:
     static constexpr qsizetype MaxBytes = 256 * 1024;
     static QByteArray encode(const Invitation&);
     static QString encodeText(const Invitation&);
+    static QString encodeLink(const Invitation&);
     static Result<Invitation> decode(const QByteArray&,
                                      const QDateTime& now = QDateTime::currentDateTimeUtc());
     static Result<Invitation> decodeText(const QString&,

@@ -3,12 +3,17 @@
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
 #include "tmc/messaging/chat_message.h"
+#include "tmc/signaling/invitation_codec.h"
+#include "tmc/ui/app_link_controller.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
 #include <QFile>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QVector>
+
+#include <utility>
 
 namespace tmc {
 
@@ -122,7 +127,8 @@ public:
         ConnectedRole,
         VoiceJoinedRole,
         MutedRole,
-        SelfRole
+        SelfRole,
+        VolumeRole
     };
 
     struct Row {
@@ -132,6 +138,7 @@ public:
         bool voiceJoined{false};
         bool muted{false};
         bool self{false};
+        int volume{100};
     };
 
     explicit PeersModel(QObject* parent = nullptr) : QAbstractListModel(parent) {
@@ -159,6 +166,8 @@ public:
             return row.muted;
         case SelfRole:
             return row.self;
+        case VolumeRole:
+            return row.volume;
         default:
             return {};
         }
@@ -167,7 +176,8 @@ public:
     QHash<int, QByteArray> roleNames() const override {
         return {{PeerIdRole, "peerId"},       {DisplayNameRole, "displayName"},
                 {ConnectedRole, "connected"}, {VoiceJoinedRole, "voiceJoined"},
-                {MutedRole, "muted"},         {SelfRole, "isSelf"}};
+                {MutedRole, "muted"},         {SelfRole, "isSelf"},
+                {VolumeRole, "volume"}};
     }
 
     void resetSelf(const PeerIdentity& identity) {
@@ -203,6 +213,15 @@ public:
         emit dataChanged(index(row), index(row), {VoiceJoinedRole, MutedRole});
     }
 
+    void updateVolume(const QString& peerId, int volume) {
+        const int row = find(peerId);
+        if (row < 0) {
+            return;
+        }
+        rows_[row].volume = volume;
+        emit dataChanged(index(row), index(row), {VolumeRole});
+    }
+
     void updateSelfName(const QString& name) {
         for (int row = 0; row < rows_.size(); ++row) {
             if (!rows_[row].self) {
@@ -232,10 +251,11 @@ private:
     QVector<Row> rows_;
 };
 
-AppViewModel::AppViewModel(ApplicationController& controller, bool identityRequired,
-                           QObject* parent)
-    : QObject(parent), controller_(controller), messages_(std::make_unique<MessagesModel>()),
-      peers_(std::make_unique<PeersModel>()), identityRequired_(identityRequired) {
+AppViewModel::AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
+                           bool identityRequired, QObject* parent)
+    : QObject(parent), controller_(controller), appLinks_(appLinks),
+      messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
+      identityRequired_(identityRequired) {
     peers_->resetSelf(controller_.identity());
     connect(&controller_, &ApplicationController::displayNameChanged, this,
             [this](const QString& name) {
@@ -286,8 +306,68 @@ bool AppViewModel::muted() const {
     return session_ && session_->muted();
 }
 
+bool AppViewModel::invitationPending() const {
+    return session_ && session_->invitationPending();
+}
+
+QString AppViewModel::invitationState() const {
+    return session_ ? session_->invitationState() : QString{};
+}
+
 QString AppViewModel::stunServersText() const {
     return controller_.config().stunServers.join('\n');
+}
+
+QStringList AppViewModel::captureDevices() const {
+    return captureDevices_;
+}
+
+QStringList AppViewModel::playbackDevices() const {
+    return playbackDevices_;
+}
+
+QString AppViewModel::captureDevice() const {
+    return controller_.config().audio.captureDevice;
+}
+
+QString AppViewModel::playbackDevice() const {
+    return controller_.config().audio.playbackDevice;
+}
+
+bool AppViewModel::echoCancellation() const {
+    return controller_.config().audio.echoCancellation;
+}
+
+bool AppViewModel::noiseSuppression() const {
+    return controller_.config().audio.noiseSuppression;
+}
+
+bool AppViewModel::automaticGainControl() const {
+    return controller_.config().audio.automaticGainControl;
+}
+
+int AppViewModel::outputVolume() const {
+    return controller_.config().audio.outputVolume;
+}
+
+int AppViewModel::qualityKbps() const {
+    return controller_.config().audio.qualityKbps;
+}
+
+bool AppViewModel::deafened() const {
+    return session_ && session_->deafened();
+}
+
+bool AppViewModel::microphoneTest() const {
+    return session_ && session_->microphoneTest();
+}
+
+double AppViewModel::microphoneLevel() const {
+    return microphoneLevel_;
+}
+
+bool AppViewModel::appLinksRegistered() const {
+    return appLinks_.protocolRegistered();
 }
 
 QAbstractItemModel* AppViewModel::messages() const {
@@ -359,7 +439,55 @@ void AppViewModel::createInvitation() {
     }
 }
 
+void AppViewModel::cancelInvitation() {
+    if (session_) {
+        session_->cancelInvitation();
+    }
+}
+
+void AppViewModel::recreateInvitation() {
+    if (!session_) {
+        return;
+    }
+    const auto result = session_->recreateInvitation();
+    if (!result) {
+        reportError(result.error());
+    }
+}
+
 void AppViewModel::importSignalingText(const QString& text) {
+    if (text.trimmed().startsWith("tinymesh://")) {
+        previewSignalingLink(text);
+        return;
+    }
+    if (!session_) {
+        return;
+    }
+    const auto result = session_->importSignalingText(text);
+    if (!result) {
+        reportError(result.error());
+    }
+}
+
+void AppViewModel::previewSignalingLink(const QString& text) {
+    const auto decoded = InvitationCodec::decodeText(text.trimmed());
+    if (!decoded) {
+        reportError(decoded.error());
+        return;
+    }
+    pendingSignalingText_ = text.trimmed();
+    const auto& invitation = decoded.value();
+    emit signalingPreviewRequested(
+        invitation.kind == Invitation::Kind::Offer ? "offer" : "answer",
+        invitation.fromPeer.displayName,
+        QLocale::system().toString(invitation.expiresAt.toLocalTime(), QLocale::ShortFormat));
+}
+
+void AppViewModel::confirmPendingSignaling() {
+    if (pendingSignalingText_.isEmpty()) {
+        return;
+    }
+    const auto text = std::exchange(pendingSignalingText_, {});
     if (!session_) {
         return;
     }
@@ -431,6 +559,88 @@ void AppViewModel::toggleMute() {
     }
 }
 
+void AppViewModel::toggleDeafen() {
+    if (session_) {
+        session_->setDeafened(!session_->deafened());
+    }
+}
+
+void AppViewModel::toggleMicrophoneTest() {
+    if (session_) {
+        session_->setMicrophoneTest(!session_->microphoneTest());
+    }
+}
+
+void AppViewModel::refreshAudioDevices() {
+    if (!session_) {
+        return;
+    }
+    const auto devices = session_->refreshAudioDevices();
+    captureDevices_ = devices.first;
+    playbackDevices_ = devices.second;
+    emit audioDevicesChanged();
+}
+
+void AppViewModel::updateAudioPreferences(const QString& captureDevice,
+                                          const QString& playbackDevice, bool echoCancellation,
+                                          bool noiseSuppression, bool automaticGainControl,
+                                          int outputVolume, int qualityKbps) {
+    AudioPreferences preferences{
+        captureDevice == "Системное устройство по умолчанию" ? QString{} : captureDevice,
+        playbackDevice == "Системное устройство по умолчанию" ? QString{} : playbackDevice,
+        echoCancellation,
+        noiseSuppression,
+        automaticGainControl,
+        outputVolume,
+        qualityKbps};
+    const auto previous = controller_.config().audio;
+    const auto saved = controller_.updateAudioPreferences(preferences);
+    if (!saved) {
+        reportError(saved.error());
+        return;
+    }
+    if (session_) {
+        const auto applied = session_->applyAudioPreferences(preferences);
+        if (!applied) {
+            controller_.updateAudioPreferences(previous);
+            session_->applyAudioPreferences(previous);
+            reportError(applied.error());
+            return;
+        }
+    }
+    emit audioSettingsChanged();
+    setStatus("Настройки аудио применены.");
+}
+
+void AppViewModel::setPeerVolume(const QString& peerId, int percent) {
+    if (!session_) {
+        return;
+    }
+    const auto volume = qBound(0, percent, 200);
+    session_->setPeerVolume(peerId, volume);
+    peers_->updateVolume(peerId, volume);
+}
+
+void AppViewModel::registerAppLinks() {
+    const auto result = appLinks_.registerProtocol();
+    if (!result) {
+        reportError(result.error());
+        return;
+    }
+    emit appLinksRegisteredChanged();
+    setStatus("Ссылки tinymesh:// зарегистрированы для текущего пользователя.");
+}
+
+void AppViewModel::unregisterAppLinks() {
+    const auto result = appLinks_.unregisterProtocol();
+    if (!result) {
+        reportError(result.error());
+        return;
+    }
+    emit appLinksRegisteredChanged();
+    setStatus("Регистрация ссылок tinymesh:// удалена.");
+}
+
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
     return network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
@@ -480,14 +690,26 @@ void AppViewModel::initializeSession() {
             });
     connect(session_.get(), &NetworkSession::callStateChanged, this,
             [this](bool, bool) { emit callStateChanged(); });
+    connect(session_.get(), &NetworkSession::audioStateChanged, this,
+            &AppViewModel::audioSettingsChanged);
+    connect(session_.get(), &NetworkSession::microphoneLevelChanged, this, [this](double level) {
+        microphoneLevel_ = level;
+        emit microphoneLevelChanged();
+    });
+    connect(session_.get(), &NetworkSession::invitationStateChanged, this,
+            [this](bool, const QString&) { emit invitationStateChanged(); });
     connect(session_.get(), &NetworkSession::signalingReady, this,
             [this](const QString& kind, const QString& text, const QByteArray& document,
                    const QString& suggestedName) {
                 signalingDocument_ = document;
                 signalingName_ = suggestedName;
                 QGuiApplication::clipboard()->setText(text);
-                emit signalingRequested(kind, text, suggestedName);
+                const auto link = text.startsWith("tmc4:") ? "tinymesh://signal/4/" + text.sliced(5)
+                                  : text.startsWith("tmc3:") ? "tinymesh://signal/" + text.sliced(5)
+                                                             : QString{};
+                emit signalingRequested(kind, text, link, suggestedName);
             });
+    refreshAudioDevices();
 }
 
 void AppViewModel::setStatus(const QString& status) {

@@ -39,6 +39,8 @@ $dataChannel = Join-Path $dist 'datachannel.dll'
 if (-not (Test-Path -LiteralPath $dataChannel)) { throw 'libdatachannel runtime is missing from the package' }
 $opus = Join-Path $dist 'opus.dll'
 if (-not (Test-Path -LiteralPath $opus)) { throw 'Opus runtime is missing from the package' }
+$speex = Join-Path $dist 'libspeexdsp.dll'
+if (-not (Test-Path -LiteralPath $speex)) { throw 'SpeexDSP runtime is missing from the package' }
 $zip = Join-Path $distRoot 'TinyMeshChat.zip'
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -LiteralPath $dist -DestinationPath $zip

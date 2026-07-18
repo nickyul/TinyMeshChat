@@ -34,9 +34,11 @@ endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 if(TMC_BUILD_GUI)
-  find_package(Qt6 6.5 REQUIRED COMPONENTS Gui Qml Quick QuickControls2)
+  find_package(Qt6 6.5 REQUIRED COMPONENTS Gui Network Qml Quick QuickControls2)
   find_package(Opus CONFIG REQUIRED)
   find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
+  find_path(SPEEXDSP_INCLUDE_DIR speex/speex_preprocess.h REQUIRED)
+  find_library(SPEEXDSP_LIBRARY NAMES speexdsp REQUIRED)
 endif()
 if(TMC_WITH_LIBDATACHANNEL)
   find_package(LibDataChannel CONFIG REQUIRED)
@@ -53,6 +55,7 @@ target_sources(tmc_core
     src/signaling/invitation_codec.cpp
     src/protocol/packet.cpp
     src/protocol/packet_codec.cpp
+    src/protocol/packet_dispatcher.cpp
     src/messaging/chat_message.cpp
     src/messaging/delivery_tracker.cpp
   PUBLIC
@@ -62,12 +65,14 @@ target_sources(tmc_core
       include/tmc/core/app_config.h
       include/tmc/core/logger.h
       include/tmc/core/result.h
+      include/tmc/core/voice_frame_timing.h
       include/tmc/identity/identity_manager.h
       include/tmc/identity/peer_identity.h
       include/tmc/signaling/invitation.h
       include/tmc/signaling/invitation_codec.h
       include/tmc/protocol/packet.h
       include/tmc/protocol/packet_codec.h
+      include/tmc/protocol/packet_dispatcher.h
       include/tmc/messaging/chat_message.h
       include/tmc/messaging/delivery_tracker.h)
 target_include_directories(tmc_core PUBLIC
@@ -107,10 +112,10 @@ if(TMC_BUILD_GUI)
       FILES include/tmc/audio/audio_engine.h)
   target_include_directories(tmc_audio
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
+    PRIVATE "${MINIAUDIO_INCLUDE_DIR}" "${SPEEXDSP_INCLUDE_DIR}")
   target_link_libraries(tmc_audio
     PUBLIC tmc_core Qt6::Core
-    PRIVATE Opus::opus)
+    PRIVATE Opus::opus "${SPEEXDSP_LIBRARY}")
 
   add_library(tmc_application)
   target_sources(tmc_application
@@ -121,6 +126,7 @@ if(TMC_BUILD_GUI)
       src/app/messaging_service.cpp
       src/app/network_session.cpp
       src/app/peer_registry.cpp
+      src/app/session_packet_handlers.cpp
       src/app/voice_session.cpp
       src/cli/console_controller.cpp
     PUBLIC
@@ -134,6 +140,7 @@ if(TMC_BUILD_GUI)
         include/tmc/app/messaging_service.h
         include/tmc/app/network_session.h
         include/tmc/app/peer_registry.h
+        include/tmc/app/session_packet_handlers.h
         include/tmc/app/voice_session.h
         include/tmc/cli/console_controller.h)
   target_include_directories(tmc_application PUBLIC
@@ -143,6 +150,7 @@ if(TMC_BUILD_GUI)
 
   set(_tmc_app_sources
     src/main.cpp
+    src/ui/app_link_controller.cpp
     src/ui/app_view_model.cpp
     resources/resources.qrc)
   if(APPLE)
@@ -163,11 +171,13 @@ if(TMC_BUILD_GUI)
     PRIVATE
       FILE_SET HEADERS
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
-      FILES include/tmc/ui/app_view_model.h)
+      FILES
+        include/tmc/ui/app_link_controller.h
+        include/tmc/ui/app_view_model.h)
   target_include_directories(TinyMeshChat PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(TinyMeshChat PRIVATE
-    tmc_application Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+    tmc_application Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
   if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
     get_target_property(_tmc_qmake_executable Qt6::qmake IMPORTED_LOCATION)
