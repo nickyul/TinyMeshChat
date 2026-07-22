@@ -105,17 +105,29 @@ if(TMC_BUILD_GUI)
   add_library(tmc_audio)
   target_sources(tmc_audio
     PRIVATE
-      src/audio/audio_engine.cpp
+      src/audio/remote_audio_stream.cpp
+      src/audio/rtp_audio_engine.cpp
     PUBLIC
       FILE_SET HEADERS
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
-      FILES include/tmc/audio/audio_engine.h)
+      FILES
+        include/tmc/audio/audio_network_stats.h
+        include/tmc/audio/remote_audio_stream.h
+        include/tmc/audio/rtp_audio_engine.h)
   target_include_directories(tmc_audio
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     PRIVATE "${MINIAUDIO_INCLUDE_DIR}" "${SPEEXDSP_INCLUDE_DIR}")
   target_link_libraries(tmc_audio
     PUBLIC tmc_core Qt6::Core
     PRIVATE Opus::opus "${SPEEXDSP_LIBRARY}")
+  if(APPLE)
+    # TinyMesh Chat uses miniaudio's native CoreAudio backend on macOS. Keeping
+    # only that backend avoids probing desktop backends that do not apply to a
+    # signed .app bundle and makes the selected transport deterministic.
+    target_compile_definitions(tmc_audio PRIVATE
+      MA_ENABLE_ONLY_SPECIFIC_BACKENDS
+      MA_ENABLE_COREAUDIO)
+  endif()
 
   add_library(tmc_application)
   target_sources(tmc_application
@@ -127,6 +139,8 @@ if(TMC_BUILD_GUI)
       src/app/network_session.cpp
       src/app/peer_registry.cpp
       src/app/session_packet_handlers.cpp
+      src/app/signaling_router.cpp
+      src/app/topology_controller.cpp
       src/app/voice_session.cpp
       src/cli/console_controller.cpp
     PUBLIC
@@ -146,7 +160,7 @@ if(TMC_BUILD_GUI)
   target_include_directories(tmc_application PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
   target_link_libraries(tmc_application
-    PUBLIC tmc_core tmc_transport tmc_audio Qt6::Core)
+    PUBLIC tmc_core tmc_transport tmc_audio Qt6::Core Qt6::Network)
 
   set(_tmc_app_sources
     src/main.cpp

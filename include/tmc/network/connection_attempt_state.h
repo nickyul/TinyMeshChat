@@ -10,7 +10,9 @@ enum class ConnectionAttemptState {
     AwaitingAnswer,
     AwaitingConnection,
     Connecting,
+    AwaitingHello,
     Connected,
+    Suspect,
     TimedOut,
     Failed,
     Cancelled
@@ -26,8 +28,12 @@ inline QString toString(ConnectionAttemptState state) {
         return "awaiting-connection";
     case ConnectionAttemptState::Connecting:
         return "connecting";
+    case ConnectionAttemptState::AwaitingHello:
+        return "awaiting-hello";
     case ConnectionAttemptState::Connected:
         return "connected";
+    case ConnectionAttemptState::Suspect:
+        return "suspect";
     case ConnectionAttemptState::TimedOut:
         return "timed-out";
     case ConnectionAttemptState::Failed:

@@ -128,7 +128,11 @@ public:
         VoiceJoinedRole,
         MutedRole,
         SelfRole,
-        VolumeRole
+        VolumeRole,
+        RttMsRole,
+        PacketLossRole,
+        AudioJitterRole,
+        AudioBufferRole
     };
 
     struct Row {
@@ -139,6 +143,10 @@ public:
         bool muted{false};
         bool self{false};
         int volume{100};
+        int rttMs{-1};
+        double packetLossPercent{-1.0};
+        int audioJitterMs{-1};
+        int audioBufferMs{-1};
     };
 
     explicit PeersModel(QObject* parent = nullptr) : QAbstractListModel(parent) {
@@ -168,6 +176,14 @@ public:
             return row.self;
         case VolumeRole:
             return row.volume;
+        case RttMsRole:
+            return row.rttMs;
+        case PacketLossRole:
+            return row.packetLossPercent;
+        case AudioJitterRole:
+            return row.audioJitterMs;
+        case AudioBufferRole:
+            return row.audioBufferMs;
         default:
             return {};
         }
@@ -177,7 +193,10 @@ public:
         return {{PeerIdRole, "peerId"},       {DisplayNameRole, "displayName"},
                 {ConnectedRole, "connected"}, {VoiceJoinedRole, "voiceJoined"},
                 {MutedRole, "muted"},         {SelfRole, "isSelf"},
-                {VolumeRole, "volume"}};
+                {VolumeRole, "volume"},       {RttMsRole, "rttMs"},
+                {PacketLossRole, "packetLossPercent"},
+                {AudioJitterRole, "audioJitterMs"},
+                {AudioBufferRole, "audioBufferMs"}};
     }
 
     void resetSelf(const PeerIdentity& identity) {
@@ -210,7 +229,14 @@ public:
         }
         rows_[row].voiceJoined = joined;
         rows_[row].muted = muted;
-        emit dataChanged(index(row), index(row), {VoiceJoinedRole, MutedRole});
+        if (!joined) {
+            rows_[row].packetLossPercent = -1.0;
+            rows_[row].audioJitterMs = -1;
+            rows_[row].audioBufferMs = -1;
+        }
+        emit dataChanged(index(row), index(row),
+                         {VoiceJoinedRole, MutedRole, PacketLossRole,
+                          AudioJitterRole, AudioBufferRole});
     }
 
     void updateVolume(const QString& peerId, int volume) {
@@ -220,6 +246,28 @@ public:
         }
         rows_[row].volume = volume;
         emit dataChanged(index(row), index(row), {VolumeRole});
+    }
+
+    void updateRtt(const QString& peerId, int milliseconds) {
+        const int row = find(peerId);
+        if (row < 0) {
+            return;
+        }
+        rows_[row].rttMs = milliseconds;
+        emit dataChanged(index(row), index(row), {RttMsRole});
+    }
+
+    void updateAudioStats(const QString& peerId, double packetLossPercent,
+                          int jitterMs, int bufferMs) {
+        const int row = find(peerId);
+        if (row < 0) {
+            return;
+        }
+        rows_[row].packetLossPercent = packetLossPercent;
+        rows_[row].audioJitterMs = jitterMs;
+        rows_[row].audioBufferMs = bufferMs;
+        emit dataChanged(index(row), index(row),
+                         {PacketLossRole, AudioJitterRole, AudioBufferRole});
     }
 
     void updateSelfName(const QString& name) {
@@ -674,9 +722,17 @@ void AppViewModel::initializeSession() {
             [this](const QString& id, const QString& name, bool connected) {
                 peers_->updatePeer(id, name, connected);
             });
+    connect(session_.get(), &NetworkSession::peerRttChanged, this,
+            [this](const QString& id, int milliseconds) {
+                peers_->updateRtt(id, milliseconds);
+            });
     connect(session_.get(), &NetworkSession::peerVoiceChanged, this,
             [this](const QString& id, bool joined, bool muted) {
                 peers_->updateVoice(id, joined, muted);
+            });
+    connect(session_.get(), &NetworkSession::peerAudioStatsChanged, this,
+            [this](const QString& id, double loss, int jitter, int buffer) {
+                peers_->updateAudioStats(id, loss, jitter, buffer);
             });
     connect(session_.get(), &NetworkSession::messageReceived, this,
             [this](const ChatMessage& message, bool local) {
@@ -704,9 +760,9 @@ void AppViewModel::initializeSession() {
                 signalingDocument_ = document;
                 signalingName_ = suggestedName;
                 QGuiApplication::clipboard()->setText(text);
-                const auto link = text.startsWith("tmc4:") ? "tinymesh://signal/4/" + text.sliced(5)
-                                  : text.startsWith("tmc3:") ? "tinymesh://signal/" + text.sliced(5)
-                                                             : QString{};
+                const auto link = text.startsWith("tmc0:")
+                                      ? "tinymesh://signal/0/" + text.sliced(5)
+                                      : QString{};
                 emit signalingRequested(kind, text, link, suggestedName);
             });
     refreshAudioDevices();

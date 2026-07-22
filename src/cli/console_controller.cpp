@@ -23,10 +23,13 @@ int ConsoleController::run() {
     connect(peer_.get(), &PeerConnection::stateChanged, this, [&out](auto s) {
         out << "state: " << toString(s) << "\n" << Qt::flush;
     });
-    connect(peer_.get(), &PeerConnection::channelOpened, this, [&out] {
-        out << "DataChannel open; direct P2P connected; relay not used\n" << Qt::flush;
+    connect(peer_.get(), &PeerConnection::controlChannelOpened, this, [&out] {
+        out << "Control DataChannel open\n" << Qt::flush;
     });
-    connect(peer_.get(), &PeerConnection::textReceived, this, [&out](const QString& s) {
+    connect(peer_.get(), &PeerConnection::chatChannelOpened, this, [&out] {
+        out << "Chat DataChannel open; direct P2P connected; relay not used\n" << Qt::flush;
+    });
+    connect(peer_.get(), &PeerConnection::controlTextReceived, this, [&out](const QString& s) {
         out << "received: " << s << "\n" << Qt::flush;
     });
     auto gather = [this, &out](const QString& path, auto start) {
@@ -101,8 +104,8 @@ int ConsoleController::run() {
                 peer_->acceptAnswer(QString::fromUtf8(f.readAll()));
             }
         } else if (line.startsWith("/p2p-send ")) {
-            if (!peer_->sendText(line.sliced(10))) {
-                out << "DataChannel is not open\n";
+            if (!peer_->sendControl(line.sliced(10))) {
+                out << "Control DataChannel is not open\n";
             }
         }
 #else

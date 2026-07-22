@@ -24,20 +24,24 @@ public:
     void markEstablished();
 
     bool rememberPeer(const PeerIdentity& peer);
+    bool forgetPeer(const QString& peerId);
     bool ingestPeerList(const QJsonArray& peers, const QString& localPeerId);
     QJsonArray peerList() const;
 
-    bool rememberRoute(const QString& routeId);
-    bool shouldInitiateLink(const QString& localPeerId, const QString& remotePeerId) const;
     bool canAttemptLink(const QString& peerId) const;
 
     void connectionOpened(const PeerIdentity& peer);
     void scheduleRetry(const PeerIdentity& peer);
+    void resetRetryBackoff();
+    void routeAvailable(const QString& peerId);
+    quint64 nextLinkGeneration(const QString& peerId);
+    bool acceptLinkGeneration(const QString& peerId, quint64 generation);
 
     QString meshId() const;
     MeshSessionState state() const;
     bool established() const;
     int peerCount() const;
+    qint64 revision() const;
     PeerIdentity peer(const QString& peerId) const;
     QList<PeerIdentity> peers() const;
 
@@ -56,12 +60,13 @@ private:
     QString meshId_;
     MeshSessionState state_{MeshSessionState::Disconnected};
     bool established_{false};
-    QSet<QString> seenRoutes_;
     QHash<QString, int> retryCounts_;
     QHash<QString, quint64> retryGenerations_;
+    QHash<QString, quint64> linkGenerations_;
     QSet<QString> retryScheduled_;
     QSet<QString> degradedPeers_;
     quint64 sessionGeneration_{0};
+    qint64 revision_{0};
 };
 
 } // namespace tmc

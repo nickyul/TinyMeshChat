@@ -295,8 +295,8 @@ ApplicationWindow {
                 }
 
                 Frame {
-                    SplitView.preferredWidth: 270
-                    SplitView.minimumWidth: 220
+                    SplitView.preferredWidth: 340
+                    SplitView.minimumWidth: 260
                     background: Rectangle { color: root.panel; radius: 10; border.color: "#dce1e5" }
                     ColumnLayout {
                         anchors.fill: parent
@@ -316,9 +316,43 @@ ApplicationWindow {
                                 required property bool isSelf
                                 required property string peerId
                                 required property int volume
+                                required property int rttMs
+                                required property real packetLossPercent
+                                required property int audioJitterMs
+                                required property int audioBufferMs
                                 width: ListView.view.width
                                 Label { text: "●"; color: peerDelegate.connected ? "#729985" : "#a0a8ae" }
-                                Label { Layout.fillWidth: true; text: peerDelegate.displayName + (peerDelegate.isSelf ? qsTr(" (вы)") : ""); elide: Text.ElideRight }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: peerDelegate.displayName + (peerDelegate.isSelf ? qsTr(" (вы)") : "")
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        visible: peerDelegate.voiceJoined && !peerDelegate.isSelf
+                                                 && peerDelegate.packetLossPercent >= 0
+                                        text: qsTr("звук: %1% потерь · jitter %2 ms · buffer %3 ms")
+                                              .arg(peerDelegate.packetLossPercent.toFixed(1))
+                                              .arg(peerDelegate.audioJitterMs)
+                                              .arg(peerDelegate.audioBufferMs)
+                                        color: peerDelegate.packetLossPercent < 1 && peerDelegate.audioJitterMs < 30
+                                               ? "#4f8067"
+                                               : (peerDelegate.packetLossPercent < 5 && peerDelegate.audioJitterMs < 60
+                                                  ? "#9a762d" : "#a65353")
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                Label {
+                                    visible: peerDelegate.connected && !peerDelegate.isSelf && peerDelegate.rttMs >= 0
+                                    text: peerDelegate.rttMs + " ms"
+                                    color: peerDelegate.rttMs < 80 ? "#4f8067"
+                                         : (peerDelegate.rttMs < 150 ? "#9a762d" : "#a65353")
+                                    font.pixelSize: 11
+                                }
                                 Label { visible: peerDelegate.voiceJoined || (peerDelegate.isSelf && appViewModel.callActive); text: peerDelegate.muted ? "🔇" : "🎙" }
                                 Slider {
                                     visible: peerDelegate.voiceJoined && !peerDelegate.isSelf

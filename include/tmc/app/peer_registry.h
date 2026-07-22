@@ -10,6 +10,7 @@ namespace tmc {
 class PeerRegistry {
 public:
     bool remember(const PeerIdentity& peer);
+    bool remove(const QString& peerId);
     void clear();
 
     bool contains(const QString& peerId) const;

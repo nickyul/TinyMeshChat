@@ -13,7 +13,7 @@
 
 namespace tmc {
 
-class AudioEngine;
+class RtpAudioEngine;
 
 class VoiceSession final : public QObject {
     Q_OBJECT
@@ -28,11 +28,12 @@ public:
     void setDeafened(bool deafened);
     void setMicrophoneTest(bool enabled);
     void setPeerVolume(const QString& peerId, int percent);
+    void updateNetworkFeedback(const QString& peerId, double packetLossPercent);
     Result<void> applyPreferences(const AudioPreferences& preferences);
     QPair<QStringList, QStringList> refreshDevices();
     void clear();
 
-    void receiveFrame(const QString& peerId, quint32 sequence, const QByteArray& payload,
+    void receiveFrame(const QString& peerId, quint32 rtpTimestamp, const QByteArray& payload,
                       qint64 transportReceivedAtNs);
     void updatePeer(const QString& peerId, bool joined, bool muted);
     void removePeer(const QString& peerId);
@@ -48,9 +49,10 @@ signals:
     void peerChanged(QString peerId, bool joined, bool muted);
     void errorOccurred(QString message);
     void microphoneLevelChanged(double level);
+    void networkStatsChanged(QString peerId, double packetLossPercent, int jitterMs, int bufferMs);
 
 private:
-    std::unique_ptr<AudioEngine> audio_;
+    std::unique_ptr<RtpAudioEngine> audio_;
     QHash<QString, QPair<bool, bool>> peers_;
     bool active_{false};
     bool muted_{false};

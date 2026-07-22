@@ -23,9 +23,18 @@ struct ConnectionInfo {
     PeerIdentity remote;
     bool open{false};
     bool everOpened{false};
+    bool transportOpen{false};
+    bool controlChannelOpen{false};
+    bool chatChannelOpen{false};
+    bool audioTrackOpen{false};
+    quint64 audioFramesAttempted{0};
+    quint64 audioFramesSent{0};
+    quint64 audioFramesReceived{0};
+    bool helloReceived{false};
     bool localOffer{false};
     bool meshManaged{false};
     bool answerApplied{false};
+    quint64 generation{0};
     ConnectionState transportState{ConnectionState::Disconnected};
     ConnectionAttemptState attemptState{ConnectionAttemptState::Gathering};
     qint64 lastActivityMs{0};
@@ -36,7 +45,11 @@ struct ConnectionInfo {
     int hostCandidates{0};
     int serverReflexiveCandidates{0};
     int relayCandidates{0};
-    quint64 droppedVoiceFrames{0};
+    int roundTripTimeMs{-1};
+    quint64 controlBufferedBytes{0};
+    quint64 chatBufferedBytes{0};
+    quint64 queuedControlBytes{0};
+    quint64 queuedChatBytes{0};
 };
 
 class ConnectionManager final : public QObject {
@@ -47,11 +60,15 @@ public:
     ~ConnectionManager() override;
 
     Result<void> create(const QString& connectionId, const PeerIdentity& remote, bool localOffer,
-                        bool meshManaged);
+                        bool meshManaged, quint64 generation = 0);
     Result<void> startOffer(const QString& connectionId);
     Result<void> acceptOffer(const QString& connectionId, const QString& sdp);
     Result<void> acceptAnswer(const QString& connectionId, const QString& sdp);
+    Result<void> startAudioOffer(const QString& connectionId);
+    Result<void> acceptAudioOffer(const QString& connectionId, const QString& sdp);
+    Result<void> acceptAudioAnswer(const QString& connectionId, const QString& sdp);
     void setRemote(const QString& connectionId, const PeerIdentity& remote);
+    void markHelloReceived(const QString& connectionId, const PeerIdentity& remote);
 
     void discard(const QString& connectionId);
     void discardStale(const QString& peerId = {});
@@ -66,17 +83,21 @@ public:
     int connectedPeerCount() const;
 
     void setStunServers(QStringList stunServers);
+    int recordRoundTripTime(const QString& connectionId, int sampleMs);
 
-    bool sendText(const QString& connectionId, const QString& text);
-    void sendVoiceFrameToOpen(quint32 sequence, const QByteArray& payload,
-                              const VoiceFrameTiming& timing);
+    bool sendControl(const QString& connectionId, const QString& text);
+    bool sendChat(const QString& connectionId, const QString& text);
+    void sendAudioFrameToOpen(quint32 sequence, const QByteArray& payload);
 
 signals:
     void localDescriptionReady(QString connectionId, QString type, QString sdp);
+    void audioDescriptionReady(QString connectionId, QString type, QString sdp);
+    void transportOpened(QString connectionId, tmc::PeerIdentity remote);
     void linkOpened(QString connectionId, tmc::PeerIdentity remote);
     void linkRemoved(QString connectionId, tmc::PeerIdentity remote, bool wasOpen);
-    void textReceived(QString connectionId, QString text);
-    void voiceFrameReceived(QString connectionId, quint32 sequence, QByteArray payload,
+    void controlTextReceived(QString connectionId, QString text);
+    void chatTextReceived(QString connectionId, QString text);
+    void audioFrameReceived(QString connectionId, quint32 timestamp, QByteArray payload,
                             qint64 receivedAtNs);
     void attemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
     void attemptFailed(tmc::PeerIdentity remote, bool meshManaged, bool localOffer,
@@ -90,9 +111,12 @@ private:
     bool isCurrent(const std::shared_ptr<Link>& link) const;
 
     void configure(const std::shared_ptr<Link>& link);
+    void updateTransportReadiness(const std::shared_ptr<Link>& link);
+    void updateHandshakeReadiness(const std::shared_ptr<Link>& link);
     void setAttemptState(const std::shared_ptr<Link>& link, ConnectionAttemptState state);
     void startDeadline(const std::shared_ptr<Link>& link, int seconds, QString message);
     void cancelDeadline(const std::shared_ptr<Link>& link);
+    void suspect(const std::shared_ptr<Link>& link, QString message);
     void fail(const std::shared_ptr<Link>& link, ConnectionAttemptState state,
               const QString& message);
     void remove(const std::shared_ptr<Link>& link);

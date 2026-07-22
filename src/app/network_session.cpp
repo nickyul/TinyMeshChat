@@ -11,8 +11,11 @@
 
 #include <QDateTime>
 #include <QJsonObject>
+#include <QNetworkInformation>
 #include <QSet>
 #include <QUuid>
+
+#include <chrono>
 
 namespace tmc {
 
@@ -20,6 +23,12 @@ namespace {
 
 QString uuid() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+qint64 monotonicNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
 
 } // namespace
@@ -38,6 +47,25 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
 
     connect(connections_.get(), &ConnectionManager::localDescriptionReady, this,
             &NetworkSession::emitSignaling);
+    connect(connections_.get(), &ConnectionManager::audioDescriptionReady, this,
+            [this](const QString& connectionId, const QString& type, const QString& sdp) {
+                const auto connection = connections_->info(connectionId);
+                if (!connection || !connection->open) {
+                    return;
+                }
+                auto negotiation = audioNegotiations_.value(connectionId);
+                const bool offer = type == "offer";
+                if (offer) {
+                    negotiation = qMax<quint64>(1, negotiation + 1);
+                    audioNegotiations_.insert(connectionId, negotiation);
+                }
+                auto packet = basePacket(offer ? PacketType::SessionOffer
+                                               : PacketType::SessionAnswer,
+                                         SessionSignalingPayload{connectionId, negotiation,
+                                                                 "audio", sdp});
+                packet.targetId = connection->remote.peerId;
+                sendPacket(connectionId, packet);
+            });
     connect(connections_.get(), &ConnectionManager::statusChanged, this,
             &NetworkSession::statusChanged);
     connect(connections_.get(), &ConnectionManager::attemptChanged, this,
@@ -54,6 +82,10 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
                 }
                 updateMesh();
             });
+    connect(connections_.get(), &ConnectionManager::transportOpened, this,
+            [this](const QString& connectionId, const PeerIdentity&) {
+                sendHello(connectionId);
+            });
     connect(connections_.get(), &ConnectionManager::linkOpened, this,
             [this](const QString& connectionId, const PeerIdentity& remote) {
                 if (connectionId == manualInvitationConnectionId_) {
@@ -61,25 +93,37 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
                     emit invitationStateChanged(false, "connected");
                 }
                 mesh_.connectionOpened(remote);
+                router_.observeDirect(remote.peerId, connectionId);
                 Logger::instance().log(QtInfoMsg, "network",
                                        "Direct DataChannel opened for " + connectionId.left(8));
                 emit peerChanged(remote.peerId, remote.displayName, true);
                 emit statusChanged("Прямое P2P-соединение установлено. Relay не используется.");
                 updateMesh();
-                sendHello(connectionId);
                 sendPeerList(connectionId);
                 sendVoiceState(connectionId);
                 broadcastPeerList(connectionId);
+                announceLocalPeer();
                 ensureDynamicMesh();
+                sendPing(connectionId);
+                if (topology_.shouldInitiateLink(app_.identity().peerId, remote.peerId)) {
+                    const auto audio = connections_->startAudioOffer(connectionId);
+                    if (!audio) {
+                        emit errorOccurred("Не удалось начать согласование audio Track: " +
+                                           audio.error());
+                    }
+                }
             });
     connect(connections_.get(), &ConnectionManager::linkRemoved, this,
             [this](const QString& connectionId, const PeerIdentity& remote, bool wasOpen) {
+                router_.forgetConnection(connectionId);
+                pendingPings_.remove(connectionId);
                 if (connectionId == manualInvitationConnectionId_) {
                     manualInvitationConnectionId_.clear();
                     emit invitationStateChanged(false, "finished");
                 }
                 const auto replacement = connections_->infoForPeer(remote.peerId);
                 if (!remote.peerId.isEmpty() && (!replacement || !replacement->open)) {
+                    emit peerRttChanged(remote.peerId, -1);
                     emit peerChanged(remote.peerId, remote.displayName, false);
                     voice_->removePeer(remote.peerId);
                 }
@@ -88,14 +132,20 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
                 }
                 updateMesh();
             });
-    connect(connections_.get(), &ConnectionManager::textReceived, this,
-            &NetworkSession::handleIncoming);
-    connect(connections_.get(), &ConnectionManager::voiceFrameReceived, this,
-            [this](const QString& connectionId, quint32 sequence, const QByteArray& payload,
+    connect(connections_.get(), &ConnectionManager::controlTextReceived, this,
+            [this](const QString& connectionId, const QString& text) {
+                handleIncoming(connectionId, text, false);
+            });
+    connect(connections_.get(), &ConnectionManager::chatTextReceived, this,
+            [this](const QString& connectionId, const QString& text) {
+                handleIncoming(connectionId, text, true);
+            });
+    connect(connections_.get(), &ConnectionManager::audioFrameReceived, this,
+            [this](const QString& connectionId, quint32 timestamp, const QByteArray& payload,
                    qint64 receivedAtNs) {
                 const auto connection = connections_->info(connectionId);
                 if (connection) {
-                    voice_->receiveFrame(connection->remote.peerId, sequence, payload,
+                    voice_->receiveFrame(connection->remote.peerId, timestamp, payload,
                                          receivedAtNs);
                 }
             });
@@ -107,7 +157,8 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     connect(voice_.get(), &VoiceSession::encodedFrameReady, this,
             [this](quint32 sequence, const QByteArray& payload, const VoiceFrameTiming& timing) {
                 if (voice_->active() && !voice_->muted()) {
-                    connections_->sendVoiceFrameToOpen(sequence, payload, timing);
+                    Q_UNUSED(timing)
+                    connections_->sendAudioFrameToOpen(sequence, payload);
                 }
             });
     connect(voice_.get(), &VoiceSession::stateChanged, this, [this](bool active, bool muted) {
@@ -115,6 +166,18 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
         emit callStateChanged(active, muted);
     });
     connect(voice_.get(), &VoiceSession::peerChanged, this, &NetworkSession::peerVoiceChanged);
+    connect(voice_.get(), &VoiceSession::networkStatsChanged, this,
+            [this](const QString& peerId, double loss, int jitter, int buffer) {
+                emit peerAudioStatsChanged(peerId, loss, jitter, buffer);
+                const auto connection = connections_->infoForPeer(peerId);
+                if (!connection || !connection->open) {
+                    return;
+                }
+                auto packet = basePacket(PacketType::VoiceQuality,
+                                         VoiceQualityPayload{loss, jitter, buffer});
+                packet.targetId = peerId;
+                sendPacket(connection->connectionId, packet);
+            });
     connect(voice_.get(), &VoiceSession::errorOccurred, this, &NetworkSession::errorOccurred);
     connect(voice_.get(), &VoiceSession::microphoneLevelChanged, this,
             &NetworkSession::microphoneLevelChanged);
@@ -134,9 +197,20 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
             connections_->discard(connectionId);
         }
         for (const auto& connectionId : connections_->openConnectionIds()) {
-            sendPacket(connectionId,
-                       basePacket(PacketType::Ping,
-                                  HeartbeatPayload{uuid(), QDateTime::currentDateTimeUtc()}));
+            sendPing(connectionId);
+            const auto connection = connections_->info(connectionId);
+            if (connection &&
+                (voice_->active() || connection->audioFramesAttempted > 0 ||
+                 connection->audioFramesReceived > 0)) {
+                Logger::instance().trace(
+                    "voice_transport",
+                    QString("peer=%1 track=%2 attempted=%3 sent=%4 received=%5")
+                        .arg(connection->remote.peerId.left(8),
+                             connection->audioTrackOpen ? "open" : "closed")
+                        .arg(connection->audioFramesAttempted)
+                        .arg(connection->audioFramesSent)
+                        .arg(connection->audioFramesReceived));
+            }
         }
     });
     keepalive_->start();
@@ -153,6 +227,14 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     });
     connect(&app_, &ApplicationController::stunServersChanged, connections_.get(),
             &ConnectionManager::setStunServers);
+
+    if (QNetworkInformation::loadDefaultBackend()) {
+        connect(QNetworkInformation::instance(), &QNetworkInformation::reachabilityChanged, this,
+                [this] {
+                    mesh_.resetRetryBackoff();
+                    ensureDynamicMesh();
+                });
+    }
 }
 
 NetworkSession::~NetworkSession() = default;
@@ -177,6 +259,12 @@ void NetworkSession::leaveMesh() {
         return;
     }
     voice_->leave();
+    if (!mesh_.meshId().isEmpty()) {
+        auto leave = basePacket(PacketType::PeerLeave, PeerLeavePayload{"left"});
+        leave.ttl = policy_.maxPeers;
+        router_.rememberPacket(leave.packetId);
+        broadcastService(leave);
+    }
     const auto connections = connections_->connections();
     for (const auto& connection : connections) {
         connections_->discard(connection.connectionId);
@@ -263,11 +351,15 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
                 "Повторно получен offer для уже известного соединения. Убедитесь, что друг "
                 "отправил строку из окна «Answer готов», а не исходное приглашение.");
         }
-        const auto existing = connections_->infoForPeer(invitation.fromPeer.peerId);
+        const auto existing = invitation.fromPeer.peerId.isEmpty()
+                                  ? std::optional<ConnectionInfo>{}
+                                  : connections_->infoForPeer(invitation.fromPeer.peerId);
         if (existing && existing->open) {
             return Result<void>::failure("Этот участник уже подключён к mesh.");
         }
-        connections_->discardStale(invitation.fromPeer.peerId);
+        if (!invitation.fromPeer.peerId.isEmpty()) {
+            connections_->discardStale(invitation.fromPeer.peerId);
+        }
 
         const bool joiningMesh = mesh_.meshId().isEmpty();
         if (joiningMesh) {
@@ -285,7 +377,9 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
             }
             return created;
         }
-        emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
+        if (!invitation.fromPeer.peerId.isEmpty()) {
+            emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
+        }
         emit statusChanged("Offer импортирован. Создаётся answer…");
         const auto accepted = connections_->acceptOffer(invitation.connectionId, invitation.sdp);
         if (!accepted && joiningMesh) {
@@ -295,7 +389,7 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         return accepted;
     }
 
-    if (mesh_.meshId() != invitation.meshId) {
+    if (!invitation.meshId.isEmpty() && mesh_.meshId() != invitation.meshId) {
         return Result<void>::failure("Answer относится к другому mesh.");
     }
     const auto connection = connections_->info(invitation.connectionId);
@@ -306,9 +400,11 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         return Result<void>::failure("Этот answer уже импортирован.");
     }
 
-    connections_->setRemote(invitation.connectionId, invitation.fromPeer);
-    mesh_.rememberPeer(invitation.fromPeer);
-    emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
+    if (!invitation.fromPeer.peerId.isEmpty()) {
+        connections_->setRemote(invitation.connectionId, invitation.fromPeer);
+        mesh_.rememberPeer(invitation.fromPeer);
+        emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
+    }
     emit statusChanged("Answer импортирован. Устанавливается прямое P2P-соединение…");
     return connections_->acceptAnswer(invitation.connectionId, invitation.sdp);
 }
@@ -332,11 +428,13 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
     invitation.expiresAt = now.addSecs(policy_.manualSignalingTimeoutSeconds);
 
     if (connection->meshManaged) {
-        const auto packetType =
-            connection->localOffer ? PacketType::MeshOffer : PacketType::MeshAnswer;
-        broadcastService(packetType,
-                         {connection->localOffer ? "offer" : "answer", uuid(), 0, connectionId,
-                          app_.identity(), connection->remote.peerId, sdp});
+        auto packet = basePacket(connection->localOffer ? PacketType::LinkOffer
+                                                        : PacketType::LinkAnswer,
+                                 LinkSignalingPayload{connectionId, connection->generation, sdp});
+        packet.targetId = connection->remote.peerId;
+        packet.ttl = policy_.maxPeers;
+        router_.rememberPacket(packet.packetId);
+        sendRouted(std::move(packet));
         emit statusChanged(connection->localOffer
                                ? "Mesh offer отправлен через доступные P2P-каналы."
                                : "Mesh answer отправлен через доступные P2P-каналы.");
@@ -364,7 +462,11 @@ Packet NetworkSession::basePacket(PacketType type, PacketPayload payload) const 
 
 void NetworkSession::sendPacket(const QString& connectionId, const Packet& packet) {
     const auto bytes = PacketCodec::encode(packet);
-    if (!connections_->sendText(connectionId, QString::fromUtf8(bytes))) {
+    const bool chatPacket =
+        packet.type == PacketType::ChatMessage || packet.type == PacketType::ChatAck;
+    const bool sent = chatPacket ? connections_->sendChat(connectionId, QString::fromUtf8(bytes))
+                                 : connections_->sendControl(connectionId, QString::fromUtf8(bytes));
+    if (!sent) {
         emit errorOccurred("Не удалось отправить пакет участнику.");
     }
 }
@@ -372,19 +474,62 @@ void NetworkSession::sendPacket(const QString& connectionId, const Packet& packe
 void NetworkSession::sendHello(const QString& connectionId) {
     sendPacket(connectionId,
                basePacket(PacketType::PeerHello,
-                          HelloPayload{app_.identity().displayName, app_.identity().deviceId}));
+                          HelloPayload{app_.identity().displayName,
+                                       app_.identity().deviceId,
+                                       app_.identity().createdAt}));
 }
 
-void NetworkSession::handleIncoming(const QString& connectionId, const QString& text) {
-    QSet<QString> senders;
-    const auto connection = connections_->info(connectionId);
-    if (connection && !connection->remote.peerId.isEmpty()) {
-        senders.insert(connection->remote.peerId);
+void NetworkSession::sendPing(const QString& connectionId) {
+    const auto nonce = uuid();
+    pendingPings_.insert(connectionId, PendingPing{nonce, monotonicNs()});
+    sendPacket(connectionId,
+               basePacket(PacketType::Ping,
+                          HeartbeatPayload{nonce, QDateTime::currentDateTimeUtc()}));
+}
+
+void NetworkSession::receivePong(const QString& connectionId,
+                                 const HeartbeatPayload& payload) {
+    const auto pending = pendingPings_.find(connectionId);
+    if (pending == pendingPings_.end() || pending->nonce != payload.nonce) {
+        return;
     }
-    auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId(), senders);
+    const auto elapsedNs = monotonicNs() - pending->sentAtNs;
+    pendingPings_.erase(pending);
+    const auto sampleMs = static_cast<int>((elapsedNs + 500'000) / 1'000'000);
+    const auto smoothedMs = connections_->recordRoundTripTime(connectionId, sampleMs);
+    const auto connection = connections_->info(connectionId);
+    if (smoothedMs >= 0 && connection && !connection->remote.peerId.isEmpty()) {
+        emit peerRttChanged(connection->remote.peerId, smoothedMs);
+    }
+}
+
+void NetworkSession::handleIncoming(const QString& connectionId, const QString& text,
+                                    bool chatChannel) {
+    const auto connection = connections_->info(connectionId);
+    auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId(), {});
     if (!decoded) {
         Logger::instance().log(QtWarningMsg, "protocol", decoded.error());
         emit errorOccurred("Получен некорректный сетевой пакет: " + decoded.error());
+        return;
+    }
+    const bool chatPacket = decoded.value().type == PacketType::ChatMessage ||
+                            decoded.value().type == PacketType::ChatAck;
+    if (chatPacket != chatChannel) {
+        emit errorOccurred(chatChannel ? "Служебный пакет получен в chat DataChannel."
+                                       : "Пакет чата получен в control DataChannel.");
+        return;
+    }
+    const auto type = decoded.value().type;
+    const bool routed = type == PacketType::PeerAnnounce || type == PacketType::PeerLeave ||
+                        type == PacketType::RouteRequest || type == PacketType::RouteReply ||
+                        type == PacketType::LinkOffer || type == PacketType::LinkAnswer;
+    if (!routed && connection && !connection->remote.peerId.isEmpty() &&
+        decoded.value().senderId != connection->remote.peerId) {
+        emit errorOccurred("Packet sender does not match the direct WebRTC peer.");
+        return;
+    }
+    if (connection && !connection->open && decoded.value().type != PacketType::PeerHello) {
+        emit errorOccurred("До завершения handshake разрешён только peer.hello.");
         return;
     }
     if (!packetDispatcher_->dispatch({connectionId}, decoded.value())) {
@@ -394,7 +539,17 @@ void NetworkSession::handleIncoming(const QString& connectionId, const QString& 
 }
 
 void NetworkSession::sendPeerList(const QString& connectionId) {
-    sendPacket(connectionId, basePacket(PacketType::PeerList, PeerListPayload{mesh_.peerList()}));
+    sendPacket(connectionId,
+               basePacket(PacketType::PeerSnapshot,
+                          PeerSnapshotPayload{mesh_.revision(), mesh_.peerList()}));
+}
+
+void NetworkSession::announceLocalPeer(const QString& excludedConnection) {
+    auto packet = basePacket(PacketType::PeerAnnounce,
+                             PeerAnnouncePayload{app_.identity(), mesh_.revision(), 0});
+    packet.ttl = policy_.maxPeers;
+    router_.rememberPacket(packet.packetId);
+    broadcastService(packet, excludedConnection);
 }
 
 void NetworkSession::sendVoiceState(const QString& connectionId) {
@@ -419,7 +574,7 @@ void NetworkSession::broadcastPeerList(const QString& excludedConnection) {
 void NetworkSession::ensureDynamicMesh() {
     for (const auto& peer : mesh_.peers()) {
         if (peer.peerId == app_.identity().peerId ||
-            !mesh_.shouldInitiateLink(app_.identity().peerId, peer.peerId) ||
+            !topology_.shouldInitiateLink(app_.identity().peerId, peer.peerId) ||
             !mesh_.canAttemptLink(peer.peerId)) {
             continue;
         }
@@ -447,7 +602,8 @@ void NetworkSession::startMeshOffer(const PeerIdentity& peer) {
     }
 
     const auto connectionId = uuid();
-    auto created = connections_->create(connectionId, peer, true, true);
+    const auto generation = mesh_.nextLinkGeneration(peer.peerId);
+    auto created = connections_->create(connectionId, peer, true, true, generation);
     if (!created) {
         mesh_.scheduleRetry(peer);
         return;
@@ -459,13 +615,64 @@ void NetworkSession::startMeshOffer(const PeerIdentity& peer) {
     }
 }
 
-void NetworkSession::broadcastService(PacketType type, MeshSignalingPayload payload,
-                                      const QString& excludedConnection) {
-    mesh_.rememberRoute(payload.routeId);
+void NetworkSession::broadcastService(const Packet& packet, const QString& excludedConnection) {
     for (const auto& connectionId : connections_->openConnectionIds()) {
         if (connectionId != excludedConnection) {
-            sendPacket(connectionId, basePacket(type, payload));
+            sendPacket(connectionId, packet);
         }
+    }
+}
+
+bool NetworkSession::sendRouted(Packet packet, const QString& excludedConnection) {
+    if (packet.targetId.isEmpty()) {
+        return false;
+    }
+    const auto direct = connections_->infoForPeer(packet.targetId);
+    if (direct && direct->open && direct->connectionId != excludedConnection) {
+        sendPacket(direct->connectionId, packet);
+        return true;
+    }
+    const auto nextHop = router_.nextHop(packet.targetId, excludedConnection);
+    if (nextHop && connections_->info(*nextHop) && connections_->info(*nextHop)->open) {
+        sendPacket(*nextHop, packet);
+        return true;
+    }
+    if (packet.senderId == app_.identity().peerId) {
+        auto& queue = pendingRouted_[packet.targetId];
+        if (packet.type == PacketType::LinkOffer || packet.type == PacketType::LinkAnswer) {
+            queue.clear();
+        }
+        if (queue.size() < 16) {
+            queue.append(std::move(packet));
+        }
+        requestRoute(queue.constFirst().targetId);
+    }
+    return false;
+}
+
+void NetworkSession::requestRoute(const QString& peerId) {
+    if (peerId.isEmpty() || routeRequests_.contains(peerId)) {
+        return;
+    }
+    const auto requestId = uuid();
+    routeRequests_.insert(peerId, requestId);
+    auto request = basePacket(PacketType::RouteRequest, RoutePayload{requestId, 0});
+    request.targetId = peerId;
+    request.ttl = policy_.maxPeers;
+    router_.rememberPacket(request.packetId);
+    broadcastService(request);
+    QTimer::singleShot(5000, this, [this, peerId, requestId] {
+        if (routeRequests_.value(peerId) == requestId) {
+            routeRequests_.remove(peerId);
+        }
+    });
+}
+
+void NetworkSession::flushRouted(const QString& peerId) {
+    routeRequests_.remove(peerId);
+    const auto packets = pendingRouted_.take(peerId);
+    for (auto packet : packets) {
+        sendRouted(std::move(packet));
     }
 }
 
@@ -612,15 +819,27 @@ QString NetworkSession::diagnostics() const {
                               toString(connection.attemptState))
                          .arg(elapsed)
                          .arg(connection.connectionId.left(8)));
-        lines.append(QString("    candidates: host=%1 srflx=%2 relay=%3 · selected: %4 · "
-                             "voice drops=%5")
+        lines.append(QString("    candidates: host=%1 srflx=%2 relay=%3 · selected: %4")
                          .arg(connection.hostCandidates)
                          .arg(connection.serverReflexiveCandidates)
                          .arg(connection.relayCandidates)
                          .arg(connection.selectedCandidatePair.isEmpty()
                                   ? "не выбрана"
-                                  : connection.selectedCandidatePair)
-                         .arg(connection.droppedVoiceFrames));
+                                  : connection.selectedCandidatePair));
+        lines.append(QString("    channels: control=%1 chat=%2 audio-rtp=%3 hello=%4 · "
+                             "buffered: control=%5 chat=%6 · queued: control=%7 chat=%8")
+                         .arg(connection.controlChannelOpen ? "open" : "closed",
+                              connection.chatChannelOpen ? "open" : "closed",
+                              connection.audioTrackOpen ? "open" : "closed",
+                              connection.helloReceived ? "yes" : "no")
+                         .arg(connection.controlBufferedBytes)
+                         .arg(connection.chatBufferedBytes)
+                         .arg(connection.queuedControlBytes)
+                         .arg(connection.queuedChatBytes));
+        lines.append(QString("    audio frames: attempted=%1 sent=%2 received=%3")
+                         .arg(connection.audioFramesAttempted)
+                         .arg(connection.audioFramesSent)
+                         .arg(connection.audioFramesReceived));
     }
     const auto recent = connections_->recentAttempts();
     if (!recent.isEmpty()) {
@@ -651,6 +870,11 @@ void NetworkSession::updateMesh() {
 void NetworkSession::clearSessionData() {
     messaging_.clear();
     voice_->clear();
+    router_.clear();
+    pendingRouted_.clear();
+    routeRequests_.clear();
+    audioNegotiations_.clear();
+    pendingPings_.clear();
 }
 
 } // namespace tmc

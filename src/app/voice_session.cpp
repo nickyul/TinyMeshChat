@@ -1,18 +1,21 @@
 #include "tmc/app/voice_session.h"
 
-#include "tmc/audio/audio_engine.h"
+#include "tmc/audio/rtp_audio_engine.h"
 
 #include <utility>
 
 namespace tmc {
 
 VoiceSession::VoiceSession(AudioPreferences preferences, QObject* parent)
-    : QObject(parent), audio_(std::make_unique<AudioEngine>(std::move(preferences))) {
-    connect(audio_.get(), &AudioEngine::encodedFrameReady, this, &VoiceSession::encodedFrameReady);
-    connect(audio_.get(), &AudioEngine::errorOccurred, this, &VoiceSession::errorOccurred);
-    connect(audio_.get(), &AudioEngine::microphoneLevelChanged, this,
+    : QObject(parent), audio_(std::make_unique<RtpAudioEngine>(std::move(preferences))) {
+    connect(audio_.get(), &RtpAudioEngine::encodedFrameReady, this,
+            &VoiceSession::encodedFrameReady);
+    connect(audio_.get(), &RtpAudioEngine::errorOccurred, this, &VoiceSession::errorOccurred);
+    connect(audio_.get(), &RtpAudioEngine::microphoneLevelChanged, this,
             &VoiceSession::microphoneLevelChanged);
-    connect(audio_.get(), &AudioEngine::microphoneTestPlaybackFinished, this, [this] {
+    connect(audio_.get(), &RtpAudioEngine::networkStatsChanged, this,
+            &VoiceSession::networkStatsChanged);
+    connect(audio_.get(), &RtpAudioEngine::microphoneTestPlaybackFinished, this, [this] {
         if (!active_ && !microphoneTest_) {
             audio_->stop();
         }
@@ -97,6 +100,10 @@ void VoiceSession::setPeerVolume(const QString& peerId, int percent) {
     audio_->setPeerVolume(peerId, percent);
 }
 
+void VoiceSession::updateNetworkFeedback(const QString& peerId, double packetLossPercent) {
+    audio_->setPeerNetworkLoss(peerId, packetLossPercent);
+}
+
 Result<void> VoiceSession::applyPreferences(const AudioPreferences& preferences) {
     return audio_->applyPreferences(preferences);
 }
@@ -119,10 +126,11 @@ void VoiceSession::clear() {
     }
 }
 
-void VoiceSession::receiveFrame(const QString& peerId, quint32 sequence, const QByteArray& payload,
+void VoiceSession::receiveFrame(const QString& peerId, quint32 rtpTimestamp,
+                                const QByteArray& payload,
                                 qint64 transportReceivedAtNs) {
     if (active_ && !peerId.isEmpty()) {
-        audio_->receiveFrame(peerId, sequence, payload, transportReceivedAtNs);
+        audio_->receiveFrame(peerId, rtpTimestamp, payload, transportReceivedAtNs);
     }
 }
 

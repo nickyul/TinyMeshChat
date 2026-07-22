@@ -18,6 +18,10 @@ bool PeerRegistry::remember(const PeerIdentity& peer) {
     return added;
 }
 
+bool PeerRegistry::remove(const QString& peerId) {
+    return peers_.remove(peerId);
+}
+
 void PeerRegistry::clear() {
     peers_.clear();
 }

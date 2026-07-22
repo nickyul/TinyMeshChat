@@ -20,7 +20,12 @@ AppLinkController::AppLinkController(QObject* parent)
 AppLinkController::~AppLinkController() = default;
 
 QString AppLinkController::serverName() const {
-    const auto userScope = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    auto userScope = qEnvironmentVariable("TMC_DATA_DIR");
+    if (userScope.isEmpty()) {
+        userScope = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    } else {
+        userScope = QDir(userScope).absolutePath();
+    }
     const auto digest =
         QCryptographicHash::hash(userScope.toUtf8(), QCryptographicHash::Sha256).toHex().left(16);
     return "tinymesh-chat-" + QString::fromLatin1(digest);

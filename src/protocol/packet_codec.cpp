@@ -21,8 +21,8 @@ Result<PeerIdentity> decodeIdentity(const QJsonValue& value) {
     }
     const auto object = value.toObject();
     PeerIdentity identity{
-        object.value("peer_id").toString(), object.value("display_name").toString(),
-        object.value("device_id").toString(),
+        object.value("id").toString(), object.value("name").toString(),
+        object.value("device").toString(),
         QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
     if (!identity.isValid() || identity.displayName.size() > 128) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
@@ -34,35 +34,50 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
     switch (type) {
     case PacketType::PeerHello: {
         const auto displayName = payload.value("display_name").toString();
+        const auto identityCreatedAt = payload.value("identity_created_at");
         if (displayName.trimmed().isEmpty() || displayName.size() > 128 ||
-            !validUuid(payload.value("device_id"))) {
+            !validUuid(payload.value("device_id")) || !validTimestamp(identityCreatedAt)) {
             break;
         }
         return Result<PacketPayload>::success(
-            HelloPayload{displayName, payload.value("device_id").toString()});
+            HelloPayload{displayName, payload.value("device_id").toString(),
+                         QDateTime::fromString(identityCreatedAt.toString(),
+                                               Qt::ISODateWithMs)});
     }
-    case PacketType::PeerHelloAck:
-        if (payload.isEmpty()) {
-            return Result<PacketPayload>::success(EmptyPayload{});
-        }
-        break;
-    case PacketType::PeerList: {
+    case PacketType::PeerSnapshot: {
         if (!payload.value("peers").isArray()) {
             break;
         }
         const auto peers = payload.value("peers").toArray();
-        if (peers.isEmpty() || peers.size() > 16) {
+        const auto revision = payload.value("revision").toInteger(-1);
+        if (peers.isEmpty() || peers.size() > 16 || revision < 0) {
             break;
         }
         QSet<QString> unique;
         for (const auto& peer : peers) {
             const auto decoded = decodeIdentity(peer);
             if (!decoded || unique.contains(decoded.value().peerId)) {
-                return Result<PacketPayload>::failure("Invalid peer.list payload");
+                return Result<PacketPayload>::failure("Invalid peer.snapshot payload");
             }
             unique.insert(decoded.value().peerId);
         }
-        return Result<PacketPayload>::success(PeerListPayload{peers});
+        return Result<PacketPayload>::success(PeerSnapshotPayload{revision, peers});
+    }
+    case PacketType::PeerAnnounce: {
+        const auto peer = decodeIdentity(payload.value("peer"));
+        const auto epoch = payload.value("epoch").toInteger(-1);
+        const auto hops = payload.value("hops").toInt(-1);
+        if (peer && epoch >= 0 && hops >= 0 && hops <= 16) {
+            return Result<PacketPayload>::success(PeerAnnouncePayload{peer.value(), epoch, hops});
+        }
+        break;
+    }
+    case PacketType::PeerLeave: {
+        const auto reason = payload.value("reason").toString();
+        if (reason.size() <= 128) {
+            return Result<PacketPayload>::success(PeerLeavePayload{reason});
+        }
+        break;
     }
     case PacketType::ChatMessage: {
         const auto messageId = payload.value("message_id").toString();
@@ -87,23 +102,50 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
                 payload.value("joined").toBool(), payload.value("muted").toBool()});
         }
         break;
-    case PacketType::MeshOffer:
-    case PacketType::MeshAnswer: {
-        const auto expectedPhase = type == PacketType::MeshOffer ? "offer" : "answer";
-        const auto identity = decodeIdentity(payload.value("from_peer"));
-        const auto hopCount = payload.value("hop_count").toInt(-1);
+    case PacketType::VoiceQuality: {
+        const auto loss = payload.value("loss_percent").toDouble(-1.0);
+        const auto jitter = payload.value("jitter_ms").toInt(-1);
+        const auto buffer = payload.value("buffer_ms").toInt(-1);
+        if (loss >= 0.0 && loss <= 100.0 && jitter >= 0 && jitter <= 5000 &&
+            buffer >= 0 && buffer <= 1000) {
+            return Result<PacketPayload>::success(VoiceQualityPayload{loss, jitter, buffer});
+        }
+        break;
+    }
+    case PacketType::RouteRequest:
+    case PacketType::RouteReply: {
+        const auto requestId = payload.value("request").toString();
+        const auto hops = payload.value("hops").toInt(-1);
+        if (!QUuid::fromString(requestId).isNull() && hops >= 0 && hops <= 16) {
+            return Result<PacketPayload>::success(RoutePayload{requestId, hops});
+        }
+        break;
+    }
+    case PacketType::LinkOffer:
+    case PacketType::LinkAnswer: {
+        const auto connectionId = payload.value("link").toString();
+        const auto generation = payload.value("generation").toInteger(-1);
         const auto sdp = payload.value("sdp").toString();
-        if (!identity || payload.value("phase").toString() != expectedPhase || hopCount < 0 ||
-            hopCount > 16 || !validUuid(payload.value("route_id")) ||
-            !validUuid(payload.value("connection_id")) ||
-            !validUuid(payload.value("target_peer_id")) || sdp.isEmpty() ||
+        if (QUuid::fromString(connectionId).isNull() || generation < 0 || sdp.isEmpty() ||
             sdp.toUtf8().size() >= PacketCodec::MaxBytes) {
             break;
         }
         return Result<PacketPayload>::success(
-            MeshSignalingPayload{expectedPhase, payload.value("route_id").toString(), hopCount,
-                                 payload.value("connection_id").toString(), identity.value(),
-                                 payload.value("target_peer_id").toString(), sdp});
+            LinkSignalingPayload{connectionId, static_cast<quint64>(generation), sdp});
+    }
+    case PacketType::SessionOffer:
+    case PacketType::SessionAnswer: {
+        const auto connectionId = payload.value("link").toString();
+        const auto negotiation = payload.value("negotiation").toInteger(-1);
+        const auto reason = payload.value("reason").toString();
+        const auto sdp = payload.value("sdp").toString();
+        if (!QUuid::fromString(connectionId).isNull() && negotiation >= 0 && reason.size() <= 64 &&
+            !sdp.isEmpty() &&
+            sdp.toUtf8().size() < PacketCodec::MaxBytes) {
+            return Result<PacketPayload>::success(SessionSignalingPayload{
+                connectionId, static_cast<quint64>(negotiation), reason, sdp});
+        }
+        break;
     }
     case PacketType::Ping:
     case PacketType::Pong:
@@ -121,21 +163,29 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
 
 const QSet<QString>& PacketCodec::knownTypes() {
     static const QSet<QString> types{
-        "peer.hello",  "peer.hello_ack", "peer.list",   "chat.message", "chat.ack",
-        "voice.state", "mesh.offer",     "mesh.answer", "ping",         "pong"};
+        "peer.hello",     "peer.snapshot",  "peer.announce",
+        "peer.leave",     "chat.message",   "chat.ack",     "voice.state",
+        "voice.quality",
+        "route.request",  "route.reply",    "link.offer",   "link.answer",
+        "session.offer",  "session.answer", "ping",         "pong"};
     return types;
 }
 
 QByteArray PacketCodec::encode(const Packet& packet) {
-    return QJsonDocument(
-               QJsonObject{{"protocol_version", 4},
-                           {"packet_type", toString(packet.type)},
-                           {"packet_id", packet.packetId},
-                           {"mesh_id", packet.meshId},
-                           {"sender_id", packet.senderId},
-                           {"created_at", packet.createdAt.toUTC().toString(Qt::ISODateWithMs)},
-                           {"payload", payloadToJson(packet.payload)}})
-        .toJson(QJsonDocument::Compact);
+    QJsonObject object{{"v", 0},
+                       {"type", toString(packet.type)},
+                       {"id", packet.packetId},
+                       {"mesh", packet.meshId},
+                       {"from", packet.senderId},
+                       {"created_at", packet.createdAt.toUTC().toString(Qt::ISODateWithMs)},
+                       {"body", payloadToJson(packet.payload)}};
+    if (!packet.targetId.isEmpty()) {
+        object.insert("to", packet.targetId);
+    }
+    if (packet.ttl > 0) {
+        object.insert("ttl", packet.ttl);
+    }
+    return QJsonDocument(object).toJson(QJsonDocument::Compact);
 }
 
 Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expectedMesh,
@@ -149,28 +199,34 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
         return Result<Packet>::failure("Invalid packet JSON");
     }
     const auto object = document.object();
-    const auto type = packetTypeFromString(object.value("packet_type").toString());
-    if (object.value("protocol_version").toInt() != 4 || !type) {
+    const auto type = packetTypeFromString(object.value("type").toString());
+    if (object.value("v").toInt(-1) != 0 || !type) {
         return Result<Packet>::failure("Unsupported protocol version or packet type");
     }
-    if (!validUuid(object.value("packet_id")) || !validUuid(object.value("mesh_id")) ||
-        !validUuid(object.value("sender_id")) || !validTimestamp(object.value("created_at")) ||
-        !object.value("payload").isObject()) {
+    if (!validUuid(object.value("id")) || !validUuid(object.value("mesh")) ||
+        !validUuid(object.value("from")) || !validTimestamp(object.value("created_at")) ||
+        !object.value("body").isObject()) {
         return Result<Packet>::failure("Packet contains invalid fields");
     }
     Packet packet{*type,
-                  object.value("packet_id").toString(),
-                  object.value("mesh_id").toString(),
-                  object.value("sender_id").toString(),
+                  object.value("id").toString(),
+                  object.value("mesh").toString(),
+                  object.value("from").toString(),
                   QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs),
-                  EmptyPayload{}};
+                  EmptyPayload{},
+                  object.value("to").toString(),
+                  object.value("ttl").toInt(0)};
+    if ((!packet.targetId.isEmpty() && QUuid::fromString(packet.targetId).isNull()) ||
+        packet.ttl < 0 || packet.ttl > 16) {
+        return Result<Packet>::failure("Packet contains invalid routing fields");
+    }
     if (!expectedMesh.isEmpty() && packet.meshId != expectedMesh) {
         return Result<Packet>::failure("Packet belongs to another mesh");
     }
     if (!allowedSenders.isEmpty() && !allowedSenders.contains(packet.senderId)) {
         return Result<Packet>::failure("Packet sender is not a mesh participant");
     }
-    const auto payload = decodePayload(packet.type, object.value("payload").toObject());
+    const auto payload = decodePayload(packet.type, object.value("body").toObject());
     if (!payload) {
         return Result<Packet>::failure(payload.error());
     }

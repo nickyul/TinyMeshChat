@@ -9,11 +9,11 @@ namespace tmc {
 struct AudioPreferences {
     QString captureDevice;
     QString playbackDevice;
-    bool echoCancellation{true};
+    bool echoCancellation{false};
     bool noiseSuppression{true};
     bool automaticGainControl{true};
     int outputVolume{100};
-    int qualityKbps{32};
+    int qualityKbps{48};
 
     bool isValid() const;
 };

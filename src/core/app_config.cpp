@@ -49,11 +49,11 @@ Result<AppConfig> AppConfig::load(const QString& path) {
     if (!audio.isEmpty()) {
         c.audio.captureDevice = audio.value("capture_device").toString();
         c.audio.playbackDevice = audio.value("playback_device").toString();
-        c.audio.echoCancellation = audio.value("echo_cancellation").toBool(true);
+        c.audio.echoCancellation = audio.value("echo_cancellation").toBool(false);
         c.audio.noiseSuppression = audio.value("noise_suppression").toBool(true);
         c.audio.automaticGainControl = audio.value("automatic_gain_control").toBool(true);
         c.audio.outputVolume = audio.value("output_volume").toInt(100);
-        c.audio.qualityKbps = audio.value("quality_kbps").toInt(32);
+        c.audio.qualityKbps = audio.value("quality_kbps").toInt(48);
         if (!c.audio.isValid()) {
             return Result<AppConfig>::failure("Invalid audio settings");
         }

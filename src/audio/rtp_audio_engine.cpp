@@ -1,5 +1,5 @@
-#include "tmc/audio/audio_engine.h"
-
+#include "tmc/audio/rtp_audio_engine.h"
+#include "tmc/audio/remote_audio_stream.h"
 #include "tmc/core/logger.h"
 
 #include <QHash>
@@ -14,7 +14,6 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
-#include <map>
 #include <mutex>
 #include <opus/opus.h>
 #include <speex/speex_echo.h>
@@ -38,9 +37,7 @@ constexpr int SampleRate = 48000;
 constexpr int Channels = 1;
 constexpr int FrameSamples = 960;
 constexpr int MaxOpusPacketBytes = 4000;
-constexpr int MinJitterFrames = 3;
-constexpr int MaxJitterFrames = 10;
-constexpr int MaxQueuedPlaybackFrames = 2;
+constexpr int MaxQueuedPlaybackFrames = 1;
 constexpr int ExpectedPacketLossPercent = 3;
 constexpr float LimiterThreshold = 30000.0F;
 constexpr float PcmPeak = 32767.0F;
@@ -105,16 +102,9 @@ private:
 
 struct EncodedFrame {
     QString peerId;
-    quint32 sequence{0};
+    quint32 rtpTimestamp{0};
     QByteArray payload;
     qint64 transportReceivedAtNs{0};
-    qint64 audioQueuedAtNs{0};
-};
-
-struct ReceivedPacket {
-    QByteArray payload;
-    qint64 transportReceivedAtNs{0};
-    qint64 audioQueuedAtNs{0};
 };
 
 struct DeviceChoice {
@@ -122,29 +112,10 @@ struct DeviceChoice {
     ma_device_id id{};
 };
 
-struct RemoteAudio {
-    OpusDecoder* decoder{};
-    QString peerId;
-    std::map<quint32, ReceivedPacket> packets;
-    std::deque<opus_int16> samples;
-    quint32 expectedSequence{0};
-    bool hasSequence{false};
-    bool started{false};
-    int targetFrames{MinJitterFrames};
-    int stableFrames{0};
-    float volume{1.0F};
-
-    ~RemoteAudio() {
-        if (decoder) {
-            opus_decoder_destroy(decoder);
-        }
-    }
-};
-
 } // namespace
 
-struct AudioEngine::State {
-    explicit State(AudioEngine* owner, AudioPreferences initialPreferences)
+struct RtpAudioEngine::State {
+    explicit State(RtpAudioEngine* owner, AudioPreferences initialPreferences)
         : owner(owner), preferences(std::move(initialPreferences)) {
     }
 
@@ -155,12 +126,14 @@ struct AudioEngine::State {
         }
     }
 
-    AudioEngine* owner{};
+    RtpAudioEngine* owner{};
     AudioPreferences preferences;
     ma_context context{};
-    ma_device device{};
+    ma_device captureDevice{};
+    ma_device playbackDevice{};
     bool contextInitialized{false};
-    bool deviceInitialized{false};
+    bool captureDeviceInitialized{false};
+    bool playbackDeviceInitialized{false};
     std::atomic_bool running{false};
     std::atomic_bool muted{false};
     std::atomic_bool deafened{false};
@@ -178,41 +151,58 @@ struct AudioEngine::State {
     std::deque<EncodedFrame> incoming;
     QStringList removals;
     QHash<QString, int> pendingVolumes;
+    QHash<QString, int> pendingPacketLoss;
     std::jthread worker;
     OpusEncoder* encoder{};
     SpeexEchoState* echo{};
     SpeexPreprocessState* preprocess{};
-    std::unordered_map<std::string, std::unique_ptr<RemoteAudio>> remotes;
+    std::unordered_map<std::string, std::unique_ptr<RemoteAudioStream>> remotes;
     std::unordered_map<std::string, int> peerVolumes;
+    std::unordered_map<std::string, int> peerPacketLoss;
     std::deque<opus_int16> testSamples;
     bool testPlaybackActive{false};
     quint32 nextSequence{0};
+    int configuredPacketLoss{ExpectedPacketLossPercent};
 
-    static void callback(ma_device* device, void* output, const void* input, ma_uint32 frameCount);
+    static void captureCallback(ma_device* device, void* output, const void* input,
+                                ma_uint32 frameCount);
+    static void playbackCallback(ma_device* device, void* output, const void* input,
+                                 ma_uint32 frameCount);
     void run(std::stop_token stopToken);
     void processIncoming();
     void processCapture();
-    void processRemote(RemoteAudio& remote);
     void mixPlayback();
     void stopWorker();
 };
 
-void AudioEngine::State::callback(ma_device* device, void* output, const void* input,
-                                  ma_uint32 frameCount) {
+void RtpAudioEngine::State::playbackCallback(ma_device* device, void* output, const void*,
+                                             ma_uint32 frameCount) {
     auto* state = static_cast<State*>(device->pUserData);
     auto* outputSamples = static_cast<opus_int16*>(output);
     const auto popped = state->playbackRing.pop(outputSamples, frameCount);
     std::fill(outputSamples + popped, outputSamples + frameCount, opus_int16{0});
-    if (input && !state->muted.load(std::memory_order_relaxed)) {
-        const auto writable =
-            (std::min)({static_cast<size_t>(frameCount), state->captureRing.freeSpace(),
-                        state->renderRing.freeSpace()});
-        state->renderRing.push(outputSamples, writable);
-        state->captureRing.push(static_cast<const opus_int16*>(input), writable);
+    if (!state->muted.load(std::memory_order_relaxed)) {
+        state->renderRing.push(outputSamples,
+                               std::min(static_cast<size_t>(frameCount),
+                                        state->renderRing.freeSpace()));
     }
 }
 
-void AudioEngine::State::run(std::stop_token stopToken) {
+void RtpAudioEngine::State::captureCallback(ma_device* device, void*, const void* input,
+                                            ma_uint32 frameCount) {
+    auto* state = static_cast<State*>(device->pUserData);
+    if (!input) {
+        return;
+    }
+    const auto* inputSamples = static_cast<const opus_int16*>(input);
+    if (!state->muted.load(std::memory_order_relaxed)) {
+        state->captureRing.push(inputSamples,
+                                std::min(static_cast<size_t>(frameCount),
+                                         state->captureRing.freeSpace()));
+    }
+}
+
+void RtpAudioEngine::State::run(std::stop_token stopToken) {
     std::array<opus_int16, FrameSamples> capture{};
     std::array<opus_int16, FrameSamples> render{};
     std::array<opus_int16, FrameSamples> processed{};
@@ -226,7 +216,7 @@ void AudioEngine::State::run(std::stop_token stopToken) {
         if (startMicTestPlayback.exchange(false, std::memory_order_acq_rel)) {
             testPlaybackActive = !testSamples.empty();
             if (!testPlaybackActive) {
-                QPointer<AudioEngine> target(owner);
+                QPointer<RtpAudioEngine> target(owner);
                 QMetaObject::invokeMethod(
                     owner,
                     [target] {
@@ -245,6 +235,16 @@ void AudioEngine::State::run(std::stop_token stopToken) {
             std::fill(render.begin() + static_cast<ptrdiff_t>(renderCount), render.end(), 0);
 
             const auto dspStartedAtNs = monotonicNs();
+            const auto rms = [](const auto& samples) {
+                double energy = 0.0;
+                for (const auto sample : samples) {
+                    const auto normalized = static_cast<double>(sample) / 32768.0;
+                    energy += normalized * normalized;
+                }
+                return std::sqrt(energy / samples.size());
+            };
+            const auto rawLevel = rms(capture);
+            const auto renderLevel = rms(render);
             if (preferences.echoCancellation && echo) {
                 speex_echo_cancellation(echo, capture.data(), render.data(), processed.data());
             } else {
@@ -253,15 +253,16 @@ void AudioEngine::State::run(std::stop_token stopToken) {
             if (preprocess && (preferences.noiseSuppression || preferences.automaticGainControl)) {
                 speex_preprocess_run(preprocess, processed.data());
             }
+            auto processedLevel = rms(processed);
+            if (preferences.echoCancellation && rawLevel > 0.001 && renderLevel < 0.003 &&
+                processedLevel < rawLevel * 0.08) {
+                processed = capture;
+                processedLevel = rawLevel;
+            }
             const auto dspFinishedAtNs = monotonicNs();
 
-            double energy = 0.0;
-            for (const auto sample : processed) {
-                const auto normalized = static_cast<double>(sample) / 32768.0;
-                energy += normalized * normalized;
-            }
-            const auto level = std::clamp(std::sqrt(energy / FrameSamples), 0.0, 1.0);
-            QPointer<AudioEngine> target(owner);
+            const auto level = std::clamp(processedLevel, 0.0, 1.0);
+            QPointer<RtpAudioEngine> target(owner);
             QMetaObject::invokeMethod(
                 owner,
                 [target, level] {
@@ -299,188 +300,113 @@ void AudioEngine::State::run(std::stop_token stopToken) {
                     Qt::QueuedConnection);
             }
         }
+        mixPlayback();
+
+        const auto statsAtNs = monotonicNs();
         for (auto& [peerId, remote] : remotes) {
             Q_UNUSED(peerId)
-            processRemote(*remote);
+            const auto stats = remote->takeStats(statsAtNs);
+            if (!stats) {
+                continue;
+            }
+            QPointer<RtpAudioEngine> target(owner);
+            const auto remotePeerId = QString::fromStdString(peerId);
+            QMetaObject::invokeMethod(
+                owner,
+                [target, remotePeerId, stats = *stats] {
+                    if (target) {
+                        emit target->networkStatsChanged(remotePeerId,
+                                                         stats.packetLossPercent,
+                                                         stats.jitterMs,
+                                                         stats.bufferMs);
+                    }
+                },
+                Qt::QueuedConnection);
         }
-        mixPlayback();
 
         std::unique_lock lock(queueMutex);
         queueCondition.wait_for(lock, std::chrono::milliseconds(5));
     }
 }
 
-void AudioEngine::State::processIncoming() {
+void RtpAudioEngine::State::processIncoming() {
     std::deque<EncodedFrame> frames;
     QStringList peersToRemove;
     QHash<QString, int> volumes;
+    QHash<QString, int> packetLoss;
     {
         std::lock_guard lock(queueMutex);
         frames.swap(incoming);
         peersToRemove.swap(removals);
         volumes.swap(pendingVolumes);
+        packetLoss.swap(pendingPacketLoss);
     }
     for (const auto& peerId : peersToRemove) {
-        remotes.erase(peerId.toStdString());
+        const auto key = peerId.toStdString();
+        remotes.erase(key);
+        peerPacketLoss.erase(key);
+    }
+    for (auto it = packetLoss.cbegin(); it != packetLoss.cend(); ++it) {
+        peerPacketLoss[it.key().toStdString()] = it.value();
+    }
+    int worstPacketLoss = ExpectedPacketLossPercent;
+    for (const auto& [peerId, loss] : peerPacketLoss) {
+        Q_UNUSED(peerId)
+        worstPacketLoss = std::max(worstPacketLoss, loss);
+    }
+    if (encoder && worstPacketLoss != configuredPacketLoss) {
+        opus_encoder_ctl(encoder, OPUS_SET_PACKET_LOSS_PERC(worstPacketLoss));
+        opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(worstPacketLoss >= 2 ? 1 : 0));
+        configuredPacketLoss = worstPacketLoss;
     }
     for (auto it = volumes.cbegin(); it != volumes.cend(); ++it) {
         const auto key = it.key().toStdString();
         peerVolumes[key] = it.value();
         const auto remote = remotes.find(key);
         if (remote != remotes.end()) {
-            remote->second->volume = static_cast<float>(it.value()) / 100.0F;
+            remote->second->setVolume(it.value());
         }
     }
     for (auto& frame : frames) {
-        auto& remote = remotes[frame.peerId.toStdString()];
+        const auto key = frame.peerId.toStdString();
+        auto& remote = remotes[key];
         if (!remote) {
-            remote = std::make_unique<RemoteAudio>();
-            remote->peerId = frame.peerId;
-            int error = OPUS_OK;
-            remote->decoder = opus_decoder_create(SampleRate, Channels, &error);
-            if (!remote->decoder || error != OPUS_OK) {
-                remotes.erase(frame.peerId.toStdString());
+            const auto volume = peerVolumes.find(key);
+            remote = std::make_unique<RemoteAudioStream>(
+                frame.peerId, volume == peerVolumes.end() ? 100 : volume->second);
+            if (!remote->valid()) {
+                remotes.erase(key);
                 continue;
             }
-            if (const auto volume = peerVolumes.find(frame.peerId.toStdString());
-                volume != peerVolumes.end()) {
-                remote->volume = static_cast<float>(volume->second) / 100.0F;
-            }
         }
-        remote->packets.emplace(frame.sequence,
-                                ReceivedPacket{std::move(frame.payload),
-                                               frame.transportReceivedAtNs, frame.audioQueuedAtNs});
-        while (remote->packets.size() > 32) {
-            remote->packets.erase(remote->packets.begin());
-        }
+        remote->enqueue(frame.rtpTimestamp, std::move(frame.payload),
+                        frame.transportReceivedAtNs);
     }
 }
 
-void AudioEngine::State::processRemote(RemoteAudio& remote) {
-    if (!remote.started) {
-        if (static_cast<int>(remote.packets.size()) < remote.targetFrames) {
-            return;
-        }
-        remote.expectedSequence = remote.packets.begin()->first;
-        remote.hasSequence = true;
-        remote.started = true;
-    }
-    while (remote.samples.size() < static_cast<size_t>(FrameSamples * remote.targetFrames) &&
-           !remote.packets.empty()) {
-        const auto exact = remote.packets.find(remote.expectedSequence);
-        std::array<opus_int16, FrameSamples> decoded{};
-        if (exact != remote.packets.end()) {
-            const auto packet = std::move(exact->second);
-            const auto decodeStartedAtNs = monotonicNs();
-            const auto count = opus_decode(
-                remote.decoder, reinterpret_cast<const unsigned char*>(packet.payload.constData()),
-                packet.payload.size(), decoded.data(), decoded.size(), 0);
-            const auto decodedAtNs = monotonicNs();
-            remote.packets.erase(exact);
-            if (count > 0) {
-                const auto pcmQueuedMs =
-                    static_cast<double>(remote.samples.size() + count) * 1000.0 / SampleRate;
-                const auto playbackQueuedMs =
-                    static_cast<double>(playbackRing.available()) * 1000.0 / SampleRate;
-                Logger::instance().trace(
-                    "voice_rx",
-                    QString("peer=%1 seq=%2 transport_to_audio_ms=%3 worker_queue_ms=%4 "
-                            "decode_ms=%5 pcm_queue_ms=%6 playback_queue_ms=%7 target_ms=%8")
-                        .arg(remote.peerId.left(8))
-                        .arg(remote.expectedSequence)
-                        .arg(elapsedMs(packet.transportReceivedAtNs, packet.audioQueuedAtNs), 0,
-                             'f', 3)
-                        .arg(elapsedMs(packet.audioQueuedAtNs, decodeStartedAtNs), 0, 'f', 3)
-                        .arg(elapsedMs(decodeStartedAtNs, decodedAtNs), 0, 'f', 3)
-                        .arg(pcmQueuedMs, 0, 'f', 1)
-                        .arg(playbackQueuedMs, 0, 'f', 1)
-                        .arg(remote.targetFrames * 20));
-                remote.samples.insert(remote.samples.end(), decoded.begin(),
-                                      decoded.begin() + count);
-            }
-            ++remote.expectedSequence;
-            if (++remote.stableFrames >= 250 && remote.targetFrames > MinJitterFrames) {
-                --remote.targetFrames;
-                remote.stableFrames = 0;
-            }
-            continue;
-        }
-
-        const auto next = remote.packets.begin();
-        if (static_cast<qint32>(next->first - remote.expectedSequence) <= 0) {
-            remote.packets.erase(next);
-            continue;
-        }
-        if (remote.samples.size() >= FrameSamples) {
-            break;
-        }
-        int count = 0;
-        if (next->first == remote.expectedSequence + 1) {
-            count = opus_decode(
-                remote.decoder,
-                reinterpret_cast<const unsigned char*>(next->second.payload.constData()),
-                next->second.payload.size(), decoded.data(), decoded.size(), 1);
-        }
-        if (count <= 0) {
-            count = opus_decode(remote.decoder, nullptr, 0, decoded.data(), decoded.size(), 0);
-        }
-        if (count > 0) {
-            remote.samples.insert(remote.samples.end(), decoded.begin(), decoded.begin() + count);
-        }
-        ++remote.expectedSequence;
-        remote.targetFrames = (std::min)(MaxJitterFrames, remote.targetFrames + 1);
-        remote.stableFrames = 0;
-    }
-}
-
-void AudioEngine::State::mixPlayback() {
+void RtpAudioEngine::State::mixPlayback() {
     if (playbackRing.freeSpace() < FrameSamples ||
         playbackRing.available() >= FrameSamples * MaxQueuedPlaybackFrames) {
         return;
     }
-    bool hasAudio = testPlaybackActive && !testSamples.empty();
-    for (const auto& [peerId, remote] : remotes) {
-        Q_UNUSED(peerId)
-        hasAudio = hasAudio || !remote->samples.empty();
-    }
-    if (deafened.load(std::memory_order_relaxed)) {
-        const auto testWasPlaying = testPlaybackActive;
-        testSamples.clear();
-        testPlaybackActive = false;
-        for (auto& [peerId, remote] : remotes) {
-            Q_UNUSED(peerId)
-            remote->samples.clear();
-            remote->packets.clear();
-            remote->started = false;
-        }
-        if (testWasPlaying) {
-            QPointer<AudioEngine> target(owner);
-            QMetaObject::invokeMethod(
-                owner,
-                [target] {
-                    if (target) {
-                        emit target->microphoneTestPlaybackFinished();
-                    }
-                },
-                Qt::QueuedConnection);
-        }
-        return;
-    }
-    if (!hasAudio) {
-        return;
-    }
+    const bool suppressOutput = deafened.load(std::memory_order_relaxed);
     std::array<opus_int16, FrameSamples> mixed{};
+    std::vector<std::pair<float, RemoteAudioStream::PcmFrame>> decodedRemotes;
+    decodedRemotes.reserve(remotes.size());
+    for (auto& [peerId, remote] : remotes) {
+        Q_UNUSED(peerId)
+        RemoteAudioStream::PcmFrame decoded{};
+        if (remote->render(decoded) && !suppressOutput) {
+            decodedRemotes.emplace_back(remote->volume(), std::move(decoded));
+        }
+    }
     const auto master = static_cast<float>(outputVolume.load(std::memory_order_relaxed)) / 100.0F;
     for (int index = 0; index < FrameSamples; ++index) {
         float sum = 0.0F;
-        for (auto& [peerId, remote] : remotes) {
-            Q_UNUSED(peerId)
-            if (!remote->samples.empty()) {
-                sum += static_cast<float>(remote->samples.front()) * remote->volume;
-                remote->samples.pop_front();
-            }
+        for (const auto& [volume, decoded] : decodedRemotes) {
+            sum += static_cast<float>(decoded[index]) * volume;
         }
-        if (testPlaybackActive && !testSamples.empty()) {
+        if (!suppressOutput && testPlaybackActive && !testSamples.empty()) {
             sum += static_cast<float>(testSamples.front());
             testSamples.pop_front();
         }
@@ -498,7 +424,7 @@ void AudioEngine::State::mixPlayback() {
     playbackRing.push(mixed.data(), mixed.size());
     if (testPlaybackActive && testSamples.empty()) {
         testPlaybackActive = false;
-        QPointer<AudioEngine> target(owner);
+        QPointer<RtpAudioEngine> target(owner);
         QMetaObject::invokeMethod(
             owner,
             [target] {
@@ -510,7 +436,7 @@ void AudioEngine::State::mixPlayback() {
     }
 }
 
-void AudioEngine::State::stopWorker() {
+void RtpAudioEngine::State::stopWorker() {
     if (worker.joinable()) {
         worker.request_stop();
         queueCondition.notify_all();
@@ -533,16 +459,16 @@ void AudioEngine::State::stopWorker() {
     testPlaybackActive = false;
 }
 
-AudioEngine::AudioEngine(AudioPreferences preferences, QObject* parent)
+RtpAudioEngine::RtpAudioEngine(AudioPreferences preferences, QObject* parent)
     : QObject(parent), state_(std::make_unique<State>(this, std::move(preferences))) {
     state_->outputVolume.store(state_->preferences.outputVolume, std::memory_order_relaxed);
 }
 
-AudioEngine::~AudioEngine() {
+RtpAudioEngine::~RtpAudioEngine() {
     stop();
 }
 
-AudioDeviceLists AudioEngine::refreshDevices() {
+AudioDeviceLists RtpAudioEngine::refreshDevices() {
     AudioDeviceLists result;
     if (!state_->contextInitialized) {
         if (ma_context_init(nullptr, 0, nullptr, &state_->context) != MA_SUCCESS) {
@@ -577,7 +503,7 @@ AudioDeviceLists AudioEngine::refreshDevices() {
     return result;
 }
 
-Result<void> AudioEngine::start() {
+Result<void> RtpAudioEngine::start() {
     if (state_->running.load(std::memory_order_acquire)) {
         return Result<void>::success();
     }
@@ -614,16 +540,22 @@ Result<void> AudioEngine::start() {
     speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC, &agc);
     speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
 
-    auto config = ma_device_config_init(ma_device_type_duplex);
-    config.capture.format = ma_format_s16;
-    config.capture.channels = Channels;
-    config.playback.format = ma_format_s16;
-    config.playback.channels = Channels;
-    config.sampleRate = SampleRate;
-    config.periodSizeInFrames = FrameSamples;
-    config.periods = 3;
-    config.dataCallback = State::callback;
-    config.pUserData = state_.get();
+    auto captureConfig = ma_device_config_init(ma_device_type_capture);
+    captureConfig.capture.format = ma_format_s16;
+    captureConfig.capture.channels = Channels;
+    captureConfig.sampleRate = SampleRate;
+    captureConfig.periodSizeInFrames = FrameSamples / 2;
+    captureConfig.periods = 3;
+    captureConfig.dataCallback = State::captureCallback;
+    captureConfig.pUserData = state_.get();
+    auto playbackConfig = ma_device_config_init(ma_device_type_playback);
+    playbackConfig.playback.format = ma_format_s16;
+    playbackConfig.playback.channels = Channels;
+    playbackConfig.sampleRate = SampleRate;
+    playbackConfig.periodSizeInFrames = FrameSamples / 2;
+    playbackConfig.periods = 3;
+    playbackConfig.dataCallback = State::playbackCallback;
+    playbackConfig.pUserData = state_.get();
     const auto capture = std::find_if(
         state_->captureDevices.cbegin(), state_->captureDevices.cend(),
         [this](const auto& device) { return device.name == state_->preferences.captureDevice; });
@@ -631,42 +563,79 @@ Result<void> AudioEngine::start() {
         state_->playbackDevices.cbegin(), state_->playbackDevices.cend(),
         [this](const auto& device) { return device.name == state_->preferences.playbackDevice; });
     if (capture != state_->captureDevices.cend()) {
-        config.capture.pDeviceID = &capture->id;
+        captureConfig.capture.pDeviceID = &capture->id;
     }
     if (playback != state_->playbackDevices.cend()) {
-        config.playback.pDeviceID = &playback->id;
+        playbackConfig.playback.pDeviceID = &playback->id;
     }
-    const auto initResult = ma_device_init(&state_->context, &config, &state_->device);
-    if (initResult != MA_SUCCESS) {
+    const auto captureInit =
+        ma_device_init(&state_->context, &captureConfig, &state_->captureDevice);
+    if (captureInit != MA_SUCCESS) {
         state_->stopWorker();
         return Result<void>::failure(
-            QString("Не удалось открыть микрофон или динамики: %1")
-                .arg(QString::fromUtf8(ma_result_description(initResult))));
+            QString("Не удалось открыть микрофон: %1")
+                .arg(QString::fromUtf8(ma_result_description(captureInit))));
     }
-    state_->deviceInitialized = true;
+    state_->captureDeviceInitialized = true;
+    const auto playbackInit =
+        ma_device_init(&state_->context, &playbackConfig, &state_->playbackDevice);
+    if (playbackInit != MA_SUCCESS) {
+        ma_device_uninit(&state_->captureDevice);
+        state_->captureDeviceInitialized = false;
+        state_->stopWorker();
+        return Result<void>::failure(
+            QString("Не удалось открыть устройство воспроизведения: %1")
+                .arg(QString::fromUtf8(ma_result_description(playbackInit))));
+    }
+    state_->playbackDeviceInitialized = true;
+    std::array<char, MA_MAX_DEVICE_NAME_LENGTH + 1> captureName{};
+    std::array<char, MA_MAX_DEVICE_NAME_LENGTH + 1> playbackName{};
+    ma_device_get_name(&state_->captureDevice, ma_device_type_capture, captureName.data(),
+                       captureName.size(), nullptr);
+    ma_device_get_name(&state_->playbackDevice, ma_device_type_playback, playbackName.data(),
+                       playbackName.size(), nullptr);
+    Logger::instance().log(
+        QtInfoMsg, "audio",
+        QString("backend=%1 capture='%2' playback='%3' rate=%4 period=%5x%6")
+            .arg(QString::fromUtf8(ma_get_backend_name(state_->context.backend)),
+                 QString::fromUtf8(captureName.data()), QString::fromUtf8(playbackName.data()))
+            .arg(state_->captureDevice.sampleRate)
+            .arg(captureConfig.periodSizeInFrames)
+            .arg(captureConfig.periods));
     state_->captureRing.clear();
     state_->playbackRing.clear();
     state_->renderRing.clear();
     std::array<opus_int16, FrameSamples> initialRenderDelay{};
     state_->renderRing.push(initialRenderDelay.data(), initialRenderDelay.size());
-    state_->nextSequence = 0;
+    state_->configuredPacketLoss = ExpectedPacketLossPercent;
     state_->running.store(true, std::memory_order_release);
     state_->worker =
         std::jthread([state = state_.get()](std::stop_token token) { state->run(token); });
-    const auto startResult = ma_device_start(&state_->device);
-    if (startResult != MA_SUCCESS) {
+    const auto playbackStart = ma_device_start(&state_->playbackDevice);
+    if (playbackStart != MA_SUCCESS) {
         stop();
         return Result<void>::failure(
-            QString("Не удалось запустить аудиоустройство: %1")
-                .arg(QString::fromUtf8(ma_result_description(startResult))));
+            QString("Не удалось запустить устройство воспроизведения: %1")
+                .arg(QString::fromUtf8(ma_result_description(playbackStart))));
+    }
+    const auto captureStart = ma_device_start(&state_->captureDevice);
+    if (captureStart != MA_SUCCESS) {
+        stop();
+        return Result<void>::failure(
+            QString("Не удалось запустить микрофон: %1")
+                .arg(QString::fromUtf8(ma_result_description(captureStart))));
     }
     return Result<void>::success();
 }
 
-void AudioEngine::stop() {
-    if (state_->deviceInitialized) {
-        ma_device_uninit(&state_->device);
-        state_->deviceInitialized = false;
+void RtpAudioEngine::stop() {
+    if (state_->captureDeviceInitialized) {
+        ma_device_uninit(&state_->captureDevice);
+        state_->captureDeviceInitialized = false;
+    }
+    if (state_->playbackDeviceInitialized) {
+        ma_device_uninit(&state_->playbackDevice);
+        state_->playbackDeviceInitialized = false;
     }
     state_->running.store(false, std::memory_order_release);
     state_->stopWorker();
@@ -675,7 +644,7 @@ void AudioEngine::stop() {
     state_->renderRing.clear();
 }
 
-Result<void> AudioEngine::applyPreferences(const AudioPreferences& preferences) {
+Result<void> RtpAudioEngine::applyPreferences(const AudioPreferences& preferences) {
     if (!preferences.isValid()) {
         return Result<void>::failure("Некорректные настройки аудио.");
     }
@@ -688,18 +657,18 @@ Result<void> AudioEngine::applyPreferences(const AudioPreferences& preferences) 
     return restart ? start() : Result<void>::success();
 }
 
-void AudioEngine::setMuted(bool muted) {
+void RtpAudioEngine::setMuted(bool muted) {
     state_->muted.store(muted, std::memory_order_relaxed);
 }
 
-void AudioEngine::setDeafened(bool deafened) {
+void RtpAudioEngine::setDeafened(bool deafened) {
     state_->deafened.store(deafened, std::memory_order_relaxed);
     if (deafened) {
         state_->playbackRing.clear();
     }
 }
 
-void AudioEngine::setMicrophoneTest(bool enabled) {
+void RtpAudioEngine::setMicrophoneTest(bool enabled) {
     state_->micTest.store(enabled, std::memory_order_release);
     if (enabled) {
         state_->resetMicTest.store(true, std::memory_order_release);
@@ -709,7 +678,7 @@ void AudioEngine::setMicrophoneTest(bool enabled) {
     state_->queueCondition.notify_one();
 }
 
-void AudioEngine::setPeerVolume(const QString& peerId, int percent) {
+void RtpAudioEngine::setPeerVolume(const QString& peerId, int percent) {
     if (peerId.isEmpty()) {
         return;
     }
@@ -718,24 +687,35 @@ void AudioEngine::setPeerVolume(const QString& peerId, int percent) {
     state_->queueCondition.notify_one();
 }
 
-bool AudioEngine::isRunning() const {
+void RtpAudioEngine::setPeerNetworkLoss(const QString& peerId, double packetLossPercent) {
+    if (peerId.isEmpty()) {
+        return;
+    }
+    std::lock_guard lock(state_->queueMutex);
+    state_->pendingPacketLoss[peerId] =
+        std::clamp(static_cast<int>(std::ceil(packetLossPercent)), 0, 20);
+    state_->queueCondition.notify_one();
+}
+
+bool RtpAudioEngine::isRunning() const {
     return state_->running.load(std::memory_order_acquire);
 }
 
-bool AudioEngine::isDeafened() const {
+bool RtpAudioEngine::isDeafened() const {
     return state_->deafened.load(std::memory_order_relaxed);
 }
 
-bool AudioEngine::microphoneTest() const {
+bool RtpAudioEngine::microphoneTest() const {
     return state_->micTest.load(std::memory_order_relaxed);
 }
 
-AudioPreferences AudioEngine::preferences() const {
+AudioPreferences RtpAudioEngine::preferences() const {
     return state_->preferences;
 }
 
-void AudioEngine::receiveFrame(const QString& peerId, quint32 sequence,
-                               const QByteArray& opusPayload, qint64 transportReceivedAtNs) {
+void RtpAudioEngine::receiveFrame(const QString& peerId, quint32 rtpTimestamp,
+                                  const QByteArray& opusPayload,
+                                  qint64 transportReceivedAtNs) {
     if (!isRunning() || peerId.isEmpty() || opusPayload.isEmpty() ||
         opusPayload.size() > MaxOpusPacketBytes) {
         return;
@@ -744,12 +724,11 @@ void AudioEngine::receiveFrame(const QString& peerId, quint32 sequence,
     if (state_->incoming.size() >= 256) {
         state_->incoming.pop_front();
     }
-    state_->incoming.push_back(
-        {peerId, sequence, opusPayload, transportReceivedAtNs, monotonicNs()});
+    state_->incoming.push_back({peerId, rtpTimestamp, opusPayload, transportReceivedAtNs});
     state_->queueCondition.notify_one();
 }
 
-void AudioEngine::removePeer(const QString& peerId) {
+void RtpAudioEngine::removePeer(const QString& peerId) {
     std::lock_guard lock(state_->queueMutex);
     state_->removals.append(peerId);
     state_->queueCondition.notify_one();

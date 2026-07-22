@@ -14,13 +14,19 @@ namespace tmc {
 
 enum class PacketType {
     PeerHello,
-    PeerHelloAck,
-    PeerList,
+    PeerSnapshot,
+    PeerAnnounce,
+    PeerLeave,
     ChatMessage,
     ChatAck,
     VoiceState,
-    MeshOffer,
-    MeshAnswer,
+    VoiceQuality,
+    RouteRequest,
+    RouteReply,
+    LinkOffer,
+    LinkAnswer,
+    SessionOffer,
+    SessionAnswer,
     Ping,
     Pong
 };
@@ -30,10 +36,22 @@ struct EmptyPayload {};
 struct HelloPayload {
     QString displayName;
     QString deviceId;
+    QDateTime identityCreatedAt;
 };
 
-struct PeerListPayload {
+struct PeerSnapshotPayload {
+    qint64 revision{0};
     QJsonArray peers;
+};
+
+struct PeerAnnouncePayload {
+    PeerIdentity peer;
+    qint64 epoch{0};
+    int hops{0};
+};
+
+struct PeerLeavePayload {
+    QString reason;
 };
 
 struct ChatMessagePayload {
@@ -51,13 +69,27 @@ struct VoiceStatePayload {
     bool muted{false};
 };
 
-struct MeshSignalingPayload {
-    QString phase;
-    QString routeId;
-    int hopCount{0};
+struct VoiceQualityPayload {
+    double packetLossPercent{0.0};
+    int jitterMs{0};
+    int bufferMs{0};
+};
+
+struct RoutePayload {
+    QString requestId;
+    int hops{0};
+};
+
+struct LinkSignalingPayload {
     QString connectionId;
-    PeerIdentity fromPeer;
-    QString targetPeerId;
+    quint64 generation{0};
+    QString sdp;
+};
+
+struct SessionSignalingPayload {
+    QString connectionId;
+    quint64 negotiation{0};
+    QString reason;
     QString sdp;
 };
 
@@ -67,16 +99,20 @@ struct HeartbeatPayload {
 };
 
 using PacketPayload =
-    std::variant<EmptyPayload, HelloPayload, PeerListPayload, ChatMessagePayload, ChatAckPayload,
-                 VoiceStatePayload, MeshSignalingPayload, HeartbeatPayload>;
+    std::variant<EmptyPayload, HelloPayload, PeerSnapshotPayload, PeerAnnouncePayload,
+                 PeerLeavePayload, ChatMessagePayload, ChatAckPayload, VoiceStatePayload,
+                 VoiceQualityPayload, RoutePayload, LinkSignalingPayload,
+                 SessionSignalingPayload, HeartbeatPayload>;
 
 struct Packet {
-    PacketType type{PacketType::PeerHelloAck};
+    PacketType type{PacketType::PeerHello};
     QString packetId;
     QString meshId;
     QString senderId;
     QDateTime createdAt;
     PacketPayload payload;
+    QString targetId;
+    int ttl{0};
 };
 
 QString toString(PacketType type);
