@@ -16,6 +16,7 @@
 #include <QUuid>
 
 #include <chrono>
+#include <utility>
 
 namespace tmc {
 
@@ -37,12 +38,60 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     : QObject(parent), app_(app), policy_(policy),
       connections_(std::make_unique<ConnectionManager>(app.config().stunServers, policy)),
       packetDispatcher_(std::make_unique<PacketDispatcher>()),
-      packetHandlers_(std::make_unique<SessionPacketHandlers>(*this)), mesh_(policy),
-      voice_(std::make_unique<VoiceSession>(app.config().audio)) {
+      mesh_(policy), voice_(std::make_unique<VoiceSession>(app.config().audio)) {
     Q_ASSERT(policy_.isValid());
     qRegisterMetaType<ChatMessage>();
     qRegisterMetaType<ConnectionAttemptState>();
     qRegisterMetaType<MeshSessionState>();
+
+    SessionPacketHandlers::Callbacks handlerCallbacks;
+    handlerCallbacks.localIdentity = [this] { return app_.identity(); };
+    handlerCallbacks.makePacket = [this](PacketType type, PacketPayload payload) {
+        return basePacket(type, std::move(payload));
+    };
+    handlerCallbacks.sendPacket = [this](const QString& connectionId, const Packet& packet) {
+        return sendPacket(connectionId, packet);
+    };
+    handlerCallbacks.broadcastService =
+        [this](const Packet& packet, const QString& excludedConnection) {
+            broadcastService(packet, excludedConnection);
+        };
+    handlerCallbacks.broadcastPeerList = [this](const QString& excludedConnection) {
+        broadcastPeerList(excludedConnection);
+    };
+    handlerCallbacks.ensureDynamicMesh = [this] { ensureDynamicMesh(); };
+    handlerCallbacks.updateMesh = [this] { updateMesh(); };
+    handlerCallbacks.flushRouted = [this](const QString& peerId) { flushRouted(peerId); };
+    handlerCallbacks.receivePong =
+        [this](const QString& connectionId, const HeartbeatPayload& payload) {
+            receivePong(connectionId, payload);
+        };
+    handlerCallbacks.rememberAudioNegotiation =
+        [this](const QString& connectionId, quint64 negotiation) {
+            audioNegotiations_.insert(connectionId, negotiation);
+        };
+    handlerCallbacks.isCurrentAudioNegotiation =
+        [this](const QString& connectionId, quint64 negotiation) {
+            return audioNegotiations_.value(connectionId) == negotiation;
+        };
+    handlerCallbacks.peerChanged = [this](QString peerId, QString displayName, bool connected) {
+        emit peerChanged(std::move(peerId), std::move(displayName), connected);
+    };
+    handlerCallbacks.statusChanged = [this](QString status) {
+        emit statusChanged(std::move(status));
+    };
+    handlerCallbacks.errorOccurred = [this](QString message) {
+        emit errorOccurred(std::move(message));
+    };
+    handlerCallbacks.messageReceived = [this](ChatMessage message, bool local) {
+        emit messageReceived(std::move(message), local);
+    };
+    handlerCallbacks.deliveryChanged =
+        [this](QString messageId, int acknowledged, int expected) {
+            emit deliveryChanged(std::move(messageId), acknowledged, expected);
+        };
+    packetHandlers_ = std::make_unique<SessionPacketHandlers>(
+        *connections_, mesh_, router_, messaging_, *voice_, policy_, std::move(handlerCallbacks));
     packetHandlers_->registerWith(*packetDispatcher_);
 
     connect(connections_.get(), &ConnectionManager::localDescriptionReady, this,
@@ -117,6 +166,7 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
             [this](const QString& connectionId, const PeerIdentity& remote, bool wasOpen) {
                 router_.forgetConnection(connectionId);
                 pendingPings_.remove(connectionId);
+                audioNegotiations_.remove(connectionId);
                 if (connectionId == manualInvitationConnectionId_) {
                     manualInvitationConnectionId_.clear();
                     emit invitationStateChanged(false, "finished");
@@ -434,7 +484,17 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
         packet.targetId = connection->remote.peerId;
         packet.ttl = policy_.maxPeers;
         router_.rememberPacket(packet.packetId);
-        sendRouted(std::move(packet));
+        Logger::instance().log(
+            QtInfoMsg, "mesh_signaling",
+            QString("origin type=%1 link=%2 generation=%3 target=%4 ttl=%5")
+                .arg(toString(packet.type), connectionId.left(8))
+                .arg(connection->generation)
+                .arg(packet.targetId.left(8))
+                .arg(packet.ttl));
+        // Link negotiation is rare and the mesh is capped at six peers. Flooding it over
+        // every established edge is more reliable than trusting one possibly stale route;
+        // packet-id deduplication and TTL keep the traffic bounded.
+        broadcastService(packet);
         emit statusChanged(connection->localOffer
                                ? "Mesh offer отправлен через доступные P2P-каналы."
                                : "Mesh answer отправлен через доступные P2P-каналы.");
@@ -460,15 +520,21 @@ Packet NetworkSession::basePacket(PacketType type, PacketPayload payload) const 
             std::move(payload)};
 }
 
-void NetworkSession::sendPacket(const QString& connectionId, const Packet& packet) {
+bool NetworkSession::sendPacket(const QString& connectionId, const Packet& packet) {
     const auto bytes = PacketCodec::encode(packet);
     const bool chatPacket =
         packet.type == PacketType::ChatMessage || packet.type == PacketType::ChatAck;
     const bool sent = chatPacket ? connections_->sendChat(connectionId, QString::fromUtf8(bytes))
                                  : connections_->sendControl(connectionId, QString::fromUtf8(bytes));
     if (!sent) {
+        Logger::instance().log(
+            QtWarningMsg, "protocol",
+            QString("send_failed type=%1 connection=%2 target=%3 bytes=%4")
+                .arg(toString(packet.type), connectionId.left(8), packet.targetId.left(8))
+                .arg(bytes.size()));
         emit errorOccurred("Не удалось отправить пакет участнику.");
     }
+    return sent;
 }
 
 void NetworkSession::sendHello(const QString& connectionId) {
@@ -629,13 +695,11 @@ bool NetworkSession::sendRouted(Packet packet, const QString& excludedConnection
     }
     const auto direct = connections_->infoForPeer(packet.targetId);
     if (direct && direct->open && direct->connectionId != excludedConnection) {
-        sendPacket(direct->connectionId, packet);
-        return true;
+        return sendPacket(direct->connectionId, packet);
     }
     const auto nextHop = router_.nextHop(packet.targetId, excludedConnection);
     if (nextHop && connections_->info(*nextHop) && connections_->info(*nextHop)->open) {
-        sendPacket(*nextHop, packet);
-        return true;
+        return sendPacket(*nextHop, packet);
     }
     if (packet.senderId == app_.identity().peerId) {
         auto& queue = pendingRouted_[packet.targetId];

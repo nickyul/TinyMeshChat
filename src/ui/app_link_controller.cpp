@@ -31,31 +31,40 @@ QString AppLinkController::serverName() const {
     return "tinymesh-chat-" + QString::fromLatin1(digest);
 }
 
-bool AppLinkController::forwardToPrimary(const QUrl& url) const {
+Result<bool> AppLinkController::forwardToPrimary(const QUrl& url) const {
     QLocalSocket socket;
     socket.connectToServer(serverName(), QIODevice::WriteOnly);
     if (!socket.waitForConnected(250)) {
-        return false;
+        return Result<bool>::success(false);
     }
     const auto message = url.isValid() ? url.toString(QUrl::FullyEncoded).toUtf8()
                                        : QByteArray("activate");
-    socket.write(message);
-    socket.flush();
-    socket.waitForBytesWritten(500);
+    if (socket.write(message) != message.size()) {
+        return Result<bool>::failure("Не удалось передать команду запущенному приложению.");
+    }
+    if (socket.bytesToWrite() > 0 && !socket.waitForBytesWritten(500)) {
+        return Result<bool>::failure("Истекло время передачи команды запущенному приложению.");
+    }
     socket.disconnectFromServer();
-    return true;
+    return Result<bool>::success(true);
 }
 
-bool AppLinkController::startPrimary(const QUrl& initialUrl) {
-    if (forwardToPrimary(initialUrl)) {
-        return false;
+Result<AppInstanceState> AppLinkController::startPrimary(const QUrl& initialUrl) {
+    const auto forwarded = forwardToPrimary(initialUrl);
+    if (!forwarded) {
+        return Result<AppInstanceState>::failure(forwarded.error());
+    }
+    if (forwarded.value()) {
+        return Result<AppInstanceState>::success(AppInstanceState::ForwardedToPrimary);
     }
     QLocalServer::removeServer(serverName());
     if (!server_->listen(serverName())) {
-        return true;
+        return Result<AppInstanceState>::failure(
+            QString("Не удалось запустить локальный сервер приложения: %1")
+                .arg(server_->errorString()));
     }
     connect(server_.get(), &QLocalServer::newConnection, this, &AppLinkController::acceptConnection);
-    return true;
+    return Result<AppInstanceState>::success(AppInstanceState::Primary);
 }
 
 void AppLinkController::acceptConnection() {

@@ -2,6 +2,8 @@
 
 #include <QDateTime>
 
+#include <algorithm>
+
 namespace tmc {
 
 namespace {
@@ -38,11 +40,15 @@ void SignalingRouter::observeRoute(const QString& peerId, const QString& connect
         return;
     }
     expire();
-    const auto current = routes_.constFind(peerId);
-    if (current == routes_.cend() || hops <= current->hops ||
-        current->connectionId == connectionId) {
-        routes_.insert(peerId,
-                       Route{connectionId, hops, QDateTime::currentMSecsSinceEpoch()});
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    auto current = routes_.find(peerId);
+    if (current == routes_.end() || hops < current->hops) {
+        routes_.insert(peerId, Route{connectionId, hops, now});
+    } else if (current->connectionId == connectionId) {
+        // Refreshing a route through the same edge must not turn a known direct route
+        // into a longer one merely because a forwarded packet arrived on that edge.
+        current->hops = (std::min)(current->hops, hops);
+        current->updatedAtMs = now;
     }
 }
 
@@ -55,7 +61,7 @@ void SignalingRouter::forgetConnection(const QString& connectionId) {
         }
     }
     for (auto iterator = reverseRoutes_.begin(); iterator != reverseRoutes_.end();) {
-        if (iterator.value() == connectionId) {
+        if (iterator->connectionId == connectionId) {
             iterator = reverseRoutes_.erase(iterator);
         } else {
             ++iterator;
@@ -80,16 +86,18 @@ std::optional<QString> SignalingRouter::nextHop(const QString& peerId,
 void SignalingRouter::rememberReverseRoute(const QString& requestId,
                                            const QString& connectionId) {
     if (!requestId.isEmpty() && !connectionId.isEmpty()) {
-        reverseRoutes_.insert(requestId, connectionId);
+        reverseRoutes_.insert(
+            requestId, ReverseRoute{connectionId, QDateTime::currentMSecsSinceEpoch()});
     }
 }
 
 std::optional<QString> SignalingRouter::reverseHop(const QString& requestId) const {
     const auto iterator = reverseRoutes_.constFind(requestId);
-    if (iterator == reverseRoutes_.cend()) {
+    if (iterator == reverseRoutes_.cend() ||
+        QDateTime::currentMSecsSinceEpoch() - iterator->updatedAtMs > RouteLifetimeMs) {
         return std::nullopt;
     }
-    return iterator.value();
+    return iterator->connectionId;
 }
 
 void SignalingRouter::expire() {
@@ -104,6 +112,13 @@ void SignalingRouter::expire() {
     for (auto iterator = seenPackets_.begin(); iterator != seenPackets_.end();) {
         if (iterator.value() < threshold) {
             iterator = seenPackets_.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+    for (auto iterator = reverseRoutes_.begin(); iterator != reverseRoutes_.end();) {
+        if (iterator->updatedAtMs < threshold) {
+            iterator = reverseRoutes_.erase(iterator);
         } else {
             ++iterator;
         }

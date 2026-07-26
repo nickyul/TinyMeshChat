@@ -489,10 +489,18 @@ ApplicationWindow {
         title: qsTr("Имя пользователя")
         modal: true
         anchors.centerIn: parent
+        width: Math.min(420, root.width - 48)
         standardButtons: Dialog.Save | Dialog.Cancel
         onOpened: identityEdit.text = appViewModel.displayName
         onAccepted: appViewModel.updateDisplayName(identityEdit.text)
-        TextField { id: identityEdit; width: 360; maximumLength: 128 }
+        ColumnLayout {
+            anchors.fill: parent
+            TextField {
+                id: identityEdit
+                Layout.fillWidth: true
+                maximumLength: 128
+            }
+        }
     }
 
     Dialog {

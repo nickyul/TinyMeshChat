@@ -11,6 +11,11 @@ class QLocalServer;
 
 namespace tmc {
 
+enum class AppInstanceState {
+    Primary,
+    ForwardedToPrimary,
+};
+
 class AppLinkController final : public QObject {
     Q_OBJECT
 
@@ -18,7 +23,7 @@ public:
     explicit AppLinkController(QObject* parent = nullptr);
     ~AppLinkController() override;
 
-    bool startPrimary(const QUrl& initialUrl = {});
+    Result<AppInstanceState> startPrimary(const QUrl& initialUrl = {});
     Result<void> registerProtocol();
     Result<void> unregisterProtocol();
     bool protocolRegistered() const;
@@ -32,7 +37,7 @@ protected:
 
 private:
     QString serverName() const;
-    bool forwardToPrimary(const QUrl& url) const;
+    Result<bool> forwardToPrimary(const QUrl& url) const;
     void acceptConnection();
 
     std::unique_ptr<QLocalServer> server_;

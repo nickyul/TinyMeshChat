@@ -693,7 +693,7 @@ QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
     return network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
            controller_.config().stunServers.join("\n  ") + "\n\nКаталог данных:\n" +
-           controller_.dataDirectory();
+           controller_.dataDirectory() + "\nЛог:\n" + controller_.dataDirectory() + "/debug.log";
 }
 
 void AppViewModel::initializeSession() {

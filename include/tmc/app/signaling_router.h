@@ -30,10 +30,15 @@ private:
         qint64 updatedAtMs{0};
     };
 
+    struct ReverseRoute {
+        QString connectionId;
+        qint64 updatedAtMs{0};
+    };
+
     void expire();
 
     QHash<QString, Route> routes_;
-    QHash<QString, QString> reverseRoutes_;
+    QHash<QString, ReverseRoute> reverseRoutes_;
     QHash<QString, qint64> seenPackets_;
 };
 

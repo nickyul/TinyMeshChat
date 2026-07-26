@@ -90,14 +90,12 @@ signals:
     void errorOccurred(QString message);
 
 private:
-    friend class SessionPacketHandlers;
-
     Result<Invitation> decodeSignaling(const QByteArray& document) const;
     void emitSignaling(const QString& connectionId, const QString& type, const QString& sdp);
 
     void handleIncoming(const QString& connectionId, const QString& text, bool chatChannel);
 
-    void sendPacket(const QString& connectionId, const Packet& packet);
+    bool sendPacket(const QString& connectionId, const Packet& packet);
     Packet basePacket(PacketType type, PacketPayload payload) const;
 
     void sendHello(const QString& connectionId);

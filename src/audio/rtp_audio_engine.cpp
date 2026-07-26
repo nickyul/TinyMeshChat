@@ -43,6 +43,10 @@ constexpr float LimiterThreshold = 30000.0F;
 constexpr float PcmPeak = 32767.0F;
 constexpr size_t MaxMicrophoneTestSamples = SampleRate * 10;
 constexpr size_t RingCapacity = 1 << 16;
+constexpr double MeterFloorDb = -60.0;
+constexpr double MeterCeilingDb = -6.0;
+constexpr double MeterAttack = 0.65;
+constexpr double MeterRelease = 0.12;
 
 qint64 monotonicNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -161,6 +165,7 @@ struct RtpAudioEngine::State {
     std::unordered_map<std::string, int> peerPacketLoss;
     std::deque<opus_int16> testSamples;
     bool testPlaybackActive{false};
+    double meterLevel{0.0};
     quint32 nextSequence{0};
     int configuredPacketLoss{ExpectedPacketLossPercent};
 
@@ -261,7 +266,15 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
             }
             const auto dspFinishedAtNs = monotonicNs();
 
-            const auto level = std::clamp(processedLevel, 0.0, 1.0);
+            const auto levelDb = 20.0 * std::log10((std::max)(processedLevel, 1e-9));
+            const auto meterTarget =
+                std::clamp((levelDb - MeterFloorDb) / (MeterCeilingDb - MeterFloorDb), 0.0, 1.0);
+            const auto smoothing = meterTarget > meterLevel ? MeterAttack : MeterRelease;
+            meterLevel += (meterTarget - meterLevel) * smoothing;
+            if (meterTarget == 0.0 && meterLevel < 0.005) {
+                meterLevel = 0.0;
+            }
+            const auto level = meterLevel;
             QPointer<RtpAudioEngine> target(owner);
             QMetaObject::invokeMethod(
                 owner,
@@ -457,6 +470,7 @@ void RtpAudioEngine::State::stopWorker() {
     remotes.clear();
     testSamples.clear();
     testPlaybackActive = false;
+    meterLevel = 0.0;
 }
 
 RtpAudioEngine::RtpAudioEngine(AudioPreferences preferences, QObject* parent)
@@ -528,17 +542,32 @@ Result<void> RtpAudioEngine::start() {
 
     state_->echo = speex_echo_state_init(FrameSamples, FrameSamples * 10);
     state_->preprocess = speex_preprocess_state_init(FrameSamples, SampleRate);
-    int sampleRate = SampleRate;
-    speex_echo_ctl(state_->echo, SPEEX_ECHO_SET_SAMPLING_RATE, &sampleRate);
-    if (state_->preferences.echoCancellation) {
-        speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_ECHO_STATE, state_->echo);
+    if (!state_->echo || !state_->preprocess) {
+        state_->stopWorker();
+        return Result<void>::failure("Не удалось инициализировать Speex DSP.");
     }
+
+    int sampleRate = SampleRate;
     int denoise = state_->preferences.noiseSuppression ? 1 : 0;
     int agc = state_->preferences.automaticGainControl ? 1 : 0;
-    int agcLevel = 12000;
-    speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
-    speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC, &agc);
-    speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
+    float agcLevel = 12000.0F;
+    const auto echoRateResult =
+        speex_echo_ctl(state_->echo, SPEEX_ECHO_SET_SAMPLING_RATE, &sampleRate);
+    const auto echoStateResult =
+        state_->preferences.echoCancellation
+            ? speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_ECHO_STATE, state_->echo)
+            : 0;
+    const auto denoiseResult =
+        speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
+    const auto agcResult =
+        speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC, &agc);
+    const auto agcLevelResult =
+        speex_preprocess_ctl(state_->preprocess, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
+    if (echoRateResult != 0 || echoStateResult != 0 || denoiseResult != 0 || agcResult != 0 ||
+        agcLevelResult != 0) {
+        state_->stopWorker();
+        return Result<void>::failure("Не удалось настроить Speex DSP.");
+    }
 
     auto captureConfig = ma_device_config_init(ma_device_type_capture);
     captureConfig.capture.format = ma_format_s16;
@@ -659,6 +688,9 @@ Result<void> RtpAudioEngine::applyPreferences(const AudioPreferences& preference
 
 void RtpAudioEngine::setMuted(bool muted) {
     state_->muted.store(muted, std::memory_order_relaxed);
+    if (muted) {
+        emit microphoneLevelChanged(0.0);
+    }
 }
 
 void RtpAudioEngine::setDeafened(bool deafened) {

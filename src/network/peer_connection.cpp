@@ -420,6 +420,7 @@ void PeerConnection::configureAudioTrack(const std::shared_ptr<rtc::Track>& trac
     track->setMediaHandler(packetizer);
 
     QPointer<PeerConnection> self(this);
+    std::weak_ptr<State> weak = state_;
     track->onError([self](const std::string& error) {
         if (!self) {
             return;
@@ -434,12 +435,13 @@ void PeerConnection::configureAudioTrack(const std::shared_ptr<rtc::Track>& trac
             },
             Qt::QueuedConnection);
     });
-    track->onFrame([self](rtc::binary bytes, rtc::FrameInfo info) {
-        if (!self || bytes.empty()) {
+    track->onFrame([self, weak](rtc::binary bytes, rtc::FrameInfo info) {
+        const auto state = weak.lock();
+        if (!self || !state || bytes.empty()) {
             return;
         }
         const auto receivedAtNs = monotonicNs();
-        self->state_->audioFramesReceived.fetch_add(1, std::memory_order_relaxed);
+        state->audioFramesReceived.fetch_add(1, std::memory_order_relaxed);
         const QByteArray payload(reinterpret_cast<const char*>(bytes.data()),
                                  static_cast<qsizetype>(bytes.size()));
         QMetaObject::invokeMethod(
@@ -529,8 +531,13 @@ bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel,
         return true;
     }
 
-    channel->send(bytes.toStdString());
-    return true;
+    try {
+        channel->send(bytes.toStdString());
+        return true;
+    } catch (const std::exception& error) {
+        emit errorOccurred("DataChannel send: " + QString::fromUtf8(error.what()));
+        return false;
+    }
 }
 
 void PeerConnection::flushTextQueue(bool control) {
@@ -541,9 +548,15 @@ void PeerConnection::flushTextQueue(bool control) {
     auto& queue = control ? state_->controlQueue : state_->chatQueue;
     auto& queuedBytes = control ? state_->queuedControlBytes : state_->queuedChatBytes;
     while (!queue.isEmpty() && channel->bufferedAmount() <= TextBufferedHighWater) {
-        const auto bytes = queue.dequeue();
+        const auto& bytes = queue.head();
+        try {
+            channel->send(bytes.toStdString());
+        } catch (const std::exception& error) {
+            emit errorOccurred("DataChannel queue flush: " + QString::fromUtf8(error.what()));
+            return;
+        }
         queuedBytes -= static_cast<quint64>(bytes.size());
-        channel->send(bytes.toStdString());
+        queue.dequeue();
     }
 }
 

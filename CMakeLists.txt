@@ -164,6 +164,9 @@ if(TMC_BUILD_GUI)
 
   set(_tmc_app_sources
     src/main.cpp
+    src/bootstrap/application_options.cpp
+    src/bootstrap/console_runtime.cpp
+    src/bootstrap/gui_runtime.cpp
     src/ui/app_link_controller.cpp
     src/ui/app_view_model.cpp
     resources/resources.qrc)
@@ -186,6 +189,9 @@ if(TMC_BUILD_GUI)
       FILE_SET HEADERS
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
       FILES
+        include/tmc/bootstrap/application_options.h
+        include/tmc/bootstrap/console_runtime.h
+        include/tmc/bootstrap/gui_runtime.h
         include/tmc/ui/app_link_controller.h
         include/tmc/ui/app_view_model.h)
   target_include_directories(TinyMeshChat PRIVATE
