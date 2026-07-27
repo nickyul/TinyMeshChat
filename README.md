@@ -30,41 +30,34 @@ TinyMesh Chat — настольный P2P-чат с групповыми гол
 - Visual Studio 2022 с компонентами C++;
 - CMake 3.25+;
 - Qt 6.5+ с MSVC 2022 x64;
-- vcpkg, встроенный в Visual Studio или указанный через `VCPKG_ROOT`.
+- отдельная установка vcpkg, указанная через `VCPKG_ROOT`.
 
-На текущей машине проект автоматически находит:
+Локальные пути к Qt и vcpkg задаются в `CMakeUserPresets.json`. В текущих локальных presets используются:
 
 ```text
 C:\Qt\6.8.3\msvc2022_64
-C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg
-```
-
-Для другой установки задайте:
-
-```powershell
-$env:VCPKG_ROOT = 'C:\dev\vcpkg'
-$env:QT_ROOT = 'C:\Qt\6.8.3\msvc2022_64'
+C:\vcpkg
 ```
 
 ## Сборка
 
 ```powershell
-cmake --preset windows-debug
-cmake --build --preset windows-debug
+cmake --preset windows-debug-local
+cmake --build --preset windows-debug-local
 ```
 
 Release:
 
 ```powershell
-cmake --preset windows-release
-cmake --build --preset windows-release
+cmake --preset windows-release-local
+cmake --build --preset windows-release-local
 ```
 
 ## Запуск
 
 ```powershell
-.\build\windows-debug\Debug\TinyMeshChat.exe
-.\build\windows-debug\Debug\TinyMeshChat.exe --console --display-name "Your name"
+.\build\windows-debug-local\Debug\TinyMeshChat.exe
+.\build\windows-debug-local\Debug\TinyMeshChat.exe --console --display-name "Your name"
 ```
 
 ## Подключение нового пользователя
@@ -108,24 +101,12 @@ TURN и relay не используются. Поэтому соединение
 
 ## Portable-пакет
 
-```powershell
-.\scripts\package-windows.ps1
-```
-
-Скрипт создаёт `dist/TinyMeshChat.zip` с Qt runtime и DLL сетевых зависимостей.
+Windows job запускает `scripts/package-windows.ps1`. Скрипт создаёт `dist/TinyMeshChat.zip` с Qt runtime и DLL сетевых зависимостей.
 
 ## Сборка на macOS
 
-Нужны Xcode Command Line Tools, CMake, Ninja, Qt 6.5+ для macOS и vcpkg. Укажите каталоги зависимостей:
-
-```bash
-export VCPKG_ROOT="$HOME/vcpkg"
-export QT_ROOT="$HOME/Qt/6.9.3/macos"
-bash scripts/build-macos.sh
-```
-
-Скрипт собирает приложение под нативную архитектуру текущего Mac, запускает `macdeployqt`, выполняет локальную ad-hoc подпись и создаёт `dist/TinyMeshChat-macOS.zip`. Для явного выбора архитектуры можно задать `TMC_OSX_ARCHITECTURES=arm64` или `x86_64`. Универсальную сборку можно запросить значением `arm64;x86_64`, только если Qt и все vcpkg-зависимости доступны для обеих архитектур.
+macOS job использует Xcode, CMake, Ninja, Qt 6.9.3 и vcpkg, после чего запускает `scripts/package-macos.sh`. Скрипт собирает ARM64 release, запускает `macdeployqt`, выполняет локальную ad-hoc подпись и создаёт `dist/TinyMeshChat-macOS.zip`.
 
 На другом Mac распакуйте ZIP и запустите `TinyMeshChat.app`. Поскольку сборка не подписана сертификатом Apple Developer ID и не notarized, при первом запуске может потребоваться команда `Открыть` из контекстного меню Finder.
 
-Каждый push в ветку `main` запускает workflow `Desktop builds`. Он собирает `TinyMeshChat-macOS.zip` и portable `TinyMeshChat.zip` для Windows 10/11 x64. Оба архива можно скачать на странице GitHub `Actions` из раздела `Artifacts` соответствующего запуска.
+Workflow `Desktop builds` запускается вручную, для push в `main` и pull request в `main`. Он собирает ARM64-архив `TinyMeshChat-macOS.zip` и portable `TinyMeshChat.zip` для Windows 10/11 x64. Оба архива можно скачать на странице GitHub `Actions` из раздела `Artifacts` соответствующего запуска.

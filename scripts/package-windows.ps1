@@ -1,47 +1,76 @@
-param([string]$Preset = 'windows-release')
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$preset = 'windows-release'
 $root = Split-Path -Parent $PSScriptRoot
-cmake --preset $Preset
-if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
-cmake --build --preset $Preset
-if ($LASTEXITCODE -ne 0) { throw "CMake build failed with exit code $LASTEXITCODE" }
-$build = Join-Path $root "build/$Preset"
+$build = Join-Path $root "build/$preset"
 $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'TinyMeshChat'
-if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
-New-Item -ItemType Directory -Path $dist | Out-Null
-$exe = Get-ChildItem -LiteralPath $build -Recurse -Filter TinyMeshChat.exe | Select-Object -First 1
-if (-not $exe) { throw 'TinyMeshChat.exe was not produced' }
-Copy-Item -LiteralPath $exe.FullName -Destination $dist
-Copy-Item -LiteralPath (Join-Path $root 'config/default-config.json') -Destination $dist
-$deployPath = $null
-$deployCommand = Get-Command windeployqt.exe -CommandType Application -ErrorAction SilentlyContinue |
-  Select-Object -First 1
-if ($deployCommand) { $deployPath = $deployCommand.Source }
-if (-not $deployPath -and $env:QT_ROOT) {
-  $candidate = Join-Path $env:QT_ROOT 'bin/windeployqt.exe'
-  if (Test-Path -LiteralPath $candidate -PathType Leaf) { $deployPath = $candidate }
-}
-if (-not $deployPath) {
-  $candidate = Get-ChildItem -Path 'C:\Qt' -Recurse -Filter windeployqt.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match 'msvc2022_64[\\/]bin' } |
-    Sort-Object FullName -Descending | Select-Object -First 1
-  if ($candidate) { $deployPath = $candidate.FullName }
-}
-if (-not $deployPath -or -not (Test-Path -LiteralPath $deployPath -PathType Leaf)) {
-  throw 'windeployqt.exe was not found; set QT_ROOT or add Qt bin to PATH'
-}
-& $deployPath --release --no-translations --compiler-runtime --qmldir (Join-Path $root 'qml') (Join-Path $dist 'TinyMeshChat.exe')
+$exePath = Join-Path $build 'Release/TinyMeshChat.exe'
+$exeDestination = Join-Path $dist 'TinyMeshChat.exe'
 
-Get-ChildItem -LiteralPath $exe.DirectoryName -Filter *.dll -File |
-  ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dist -Force }
-$dataChannel = Join-Path $dist 'datachannel.dll'
-if (-not (Test-Path -LiteralPath $dataChannel)) { throw 'libdatachannel runtime is missing from the package' }
-$opus = Join-Path $dist 'opus.dll'
-if (-not (Test-Path -LiteralPath $opus)) { throw 'Opus runtime is missing from the package' }
-$speex = Join-Path $dist 'libspeexdsp.dll'
-if (-not (Test-Path -LiteralPath $speex)) { throw 'SpeexDSP runtime is missing from the package' }
+if ([string]::IsNullOrWhiteSpace($env:QT_ROOT)) {
+    throw 'QT_ROOT is not set'
+}
+$deployPath = Join-Path $env:QT_ROOT 'bin/windeployqt.exe'
+if (-not (Test-Path -LiteralPath $deployPath -PathType Leaf)) {
+    throw "windeployqt.exe was not found at $deployPath"
+}
+
+cmake --preset $preset
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE"
+}
+
+cmake --build --preset $preset
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed with exit code $LASTEXITCODE"
+}
+
+if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+    throw "TinyMeshChat.exe was not produced at $exePath"
+}
+
+if (Test-Path -LiteralPath $dist) {
+    Remove-Item -LiteralPath $dist -Recurse -Force
+}
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
+Copy-Item -LiteralPath $exePath -Destination $exeDestination
+
+$deployArguments = @(
+    '--release'
+    '--no-translations'
+    '--compiler-runtime'
+    '--qmldir'
+    (Join-Path $root 'qml')
+    $exeDestination
+)
+& $deployPath @deployArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "windeployqt failed with exit code $LASTEXITCODE"
+}
+
+$exeDirectory = Split-Path -Parent $exePath
+Get-ChildItem -LiteralPath $exeDirectory -Filter '*.dll' -File |
+    ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $dist -Force
+    }
+
+$requiredDlls = @(
+    'datachannel.dll'
+    'opus.dll'
+    'libspeexdsp.dll'
+)
+foreach ($dll in $requiredDlls) {
+    $dllPath = Join-Path $dist $dll
+    if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) {
+        throw "Required runtime library is missing from the package: $dll"
+    }
+}
+
 $zip = Join-Path $distRoot 'TinyMeshChat.zip'
-if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+if (Test-Path -LiteralPath $zip) {
+    Remove-Item -LiteralPath $zip -Force
+}
 Compress-Archive -LiteralPath $dist -DestinationPath $zip
 Write-Host "Created $zip"

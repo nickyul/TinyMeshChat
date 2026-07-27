@@ -1,4 +1,4 @@
-name: Desktop builds
+name: "Desktop builds"
 
 on:
   workflow_dispatch:
@@ -10,13 +10,17 @@ on:
 permissions:
   contents: read
 
+env:
+  QT_VERSION: "6.9.3"
+  VCPKG_REF: "2026.06.24"
+
 concurrency:
   group: desktop-builds-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
 
     steps:
@@ -26,46 +30,35 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.9.3"
+          version: ${{ env.QT_VERSION }}
           host: mac
           target: desktop
           cache: true
-
-      - name: Cache vcpkg tool
-        id: cache_vcpkg_tool_macos
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg
-          key: vcpkg-tool-${{ runner.os }}-${{ runner.arch }}-2026.06.24
 
       - name: Cache vcpkg binaries
         id: cache_vcpkg_binaries_macos
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
           restore-keys: |
-            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
       - name: Bootstrap vcpkg
         run: |
-          if [[ ! -x "$RUNNER_TEMP/vcpkg/vcpkg" ]]; then
-            rm -rf "$RUNNER_TEMP/vcpkg"
-            git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
-            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-          fi
+          rm -rf "$RUNNER_TEMP/vcpkg"
+          git clone --branch "$VCPKG_REF" --depth 1 https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
 
       - name: Build and package
         env:
           VCPKG_ROOT: ${{ runner.temp }}/vcpkg
           VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-binary-cache
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
-          TMC_VCPKG_TRIPLET: arm64-osx-tmc
         run: |
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-          echo "vcpkg tool cache hit: ${{ steps.cache_vcpkg_tool_macos.outputs.cache-hit }}"
           echo "vcpkg binary cache hit: ${{ steps.cache_vcpkg_binaries_macos.outputs.cache-hit }}"
-          bash scripts/build-macos.sh macos-release
+          bash scripts/package-macos.sh
 
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
@@ -85,45 +78,38 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.8.3"
+          version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
           arch: win64_msvc2022_64
           cache: true
 
-      - name: Cache vcpkg tool
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg
-          key: vcpkg-tool-${{ runner.os }}-${{ runner.arch }}-2026.06.24
-
       - name: Cache vcpkg binaries
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-2026.06.24-
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          if (-not (Test-Path -LiteralPath "$env:RUNNER_TEMP/vcpkg/vcpkg.exe")) {
-            if (Test-Path -LiteralPath "$env:RUNNER_TEMP/vcpkg") {
-              Remove-Item -LiteralPath "$env:RUNNER_TEMP/vcpkg" -Recurse -Force
-            }
-            git clone --branch 2026.06.24 --depth 1 https://github.com/microsoft/vcpkg "$env:RUNNER_TEMP/vcpkg"
-            & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          if (Test-Path -LiteralPath "$env:RUNNER_TEMP/vcpkg") {
+            Remove-Item -LiteralPath "$env:RUNNER_TEMP/vcpkg" -Recurse -Force
           }
+          git clone --branch $env:VCPKG_REF --depth 1 https://github.com/microsoft/vcpkg "$env:RUNNER_TEMP/vcpkg"
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Build and package
         shell: pwsh
         env:
           VCPKG_ROOT: ${{ runner.temp }}/vcpkg
           VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-binary-cache
+          QT_ROOT: ${{ env.QT_ROOT_DIR }}
         run: |
           New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
-          .\scripts\package-windows.ps1 windows-release
+          .\scripts\package-windows.ps1
 
       - name: Upload Windows portable app
         uses: actions/upload-artifact@v4

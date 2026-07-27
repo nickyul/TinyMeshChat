@@ -5,22 +5,22 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>ru</string>
     <key>CFBundleDisplayName</key>
-    <string>TinyMesh Chat</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundleExecutable</key>
-    <string>TinyMeshChat</string>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>chat.tinymesh.app</string>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>TinyMesh Chat</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>chat.tinymesh.app.signaling</string>
+            <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}.signaling</string>
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>tinymesh</string>
@@ -28,9 +28,9 @@
         </dict>
     </array>
     <key>CFBundleShortVersionString</key>
-    <string>@PROJECT_VERSION@</string>
+    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundleVersion</key>
-    <string>@PROJECT_VERSION@</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>

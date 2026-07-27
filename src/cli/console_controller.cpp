@@ -1,14 +1,12 @@
 #include "tmc/cli/console_controller.h"
 
 #include "tmc/app/application_controller.h"
-#ifdef TMC_WITH_LIBDATACHANNEL
 #include "tmc/network/peer_connection.h"
 
 #include <QEventLoop>
 #include <QFile>
-#include <QTimer>
-#endif
 #include <QTextStream>
+#include <QTimer>
 
 namespace tmc {
 
@@ -18,7 +16,6 @@ ConsoleController::ConsoleController(ApplicationController& a, QObject* p) : QOb
 int ConsoleController::run() {
     QTextStream in(stdin), out(stdout);
     out << "TinyMesh Chat console. /help for commands\n";
-#ifdef TMC_WITH_LIBDATACHANNEL
     peer_ = std::make_shared<PeerConnection>(app_.config().stunServers);
     connect(peer_.get(), &PeerConnection::stateChanged, this, [&out](auto s) {
         out << "state: " << toString(s) << "\n" << Qt::flush;
@@ -56,7 +53,6 @@ int ConsoleController::run() {
             out << type << " saved to " << path << "\n";
         }
     };
-#endif
     for (;;) {
         out << "> " << Qt::flush;
         auto line = in.readLine();
@@ -78,9 +74,7 @@ int ConsoleController::run() {
             }
         } else if (line == "/status") {
             out << "Dynamic P2P mesh; relay not used\n";
-        }
-#ifdef TMC_WITH_LIBDATACHANNEL
-        else if (line.startsWith("/p2p-offer ")) {
+        } else if (line.startsWith("/p2p-offer ")) {
             auto path = line.sliced(11).trimmed();
             gather(path, [this] { peer_->createOffer(); });
         } else if (line.startsWith("/p2p-answer ")) {
@@ -107,13 +101,9 @@ int ConsoleController::run() {
             if (!peer_->sendControl(line.sliced(10))) {
                 out << "Control DataChannel is not open\n";
             }
-        }
-#else
-        else if (line.startsWith("/p2p-")) {
+        } else if (line.startsWith("/p2p-")) {
             out << "This build was compiled without libdatachannel\n";
-        }
-#endif
-        else {
+        } else {
             out << "Unknown command. Use /help\n";
         }
     }
