@@ -23,7 +23,8 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool meshVisible READ meshVisible NOTIFY meshStateChanged)
     Q_PROPERTY(bool connecting READ connecting NOTIFY meshStateChanged)
     Q_PROPERTY(bool degraded READ degraded NOTIFY meshStateChanged)
-    Q_PROPERTY(QString meshSummary READ meshSummary NOTIFY meshSummaryChanged)
+    Q_PROPERTY(int connectedPeerCount READ connectedPeerCount NOTIFY meshPeerCountsChanged)
+    Q_PROPERTY(int expectedPeerCount READ expectedPeerCount NOTIFY meshPeerCountsChanged)
     Q_PROPERTY(bool callActive READ callActive NOTIFY callStateChanged)
     Q_PROPERTY(bool muted READ muted NOTIFY callStateChanged)
     Q_PROPERTY(bool invitationPending READ invitationPending NOTIFY invitationStateChanged)
@@ -56,7 +57,8 @@ public:
     bool meshVisible() const;
     bool connecting() const;
     bool degraded() const;
-    QString meshSummary() const;
+    int connectedPeerCount() const;
+    int expectedPeerCount() const;
     bool callActive() const;
     bool muted() const;
     bool invitationPending() const;
@@ -87,12 +89,10 @@ public:
     Q_INVOKABLE void cancelInvitation();
     Q_INVOKABLE void recreateInvitation();
     Q_INVOKABLE void importSignalingText(const QString& text);
-    Q_INVOKABLE void previewSignalingLink(const QString& text);
-    Q_INVOKABLE void confirmPendingSignaling();
     Q_INVOKABLE void importSignalingFile(const QUrl& url);
     Q_INVOKABLE void saveSignalingFile(const QUrl& url);
     Q_INVOKABLE void copyText(const QString& text);
-    Q_INVOKABLE void sendMessage(const QString& text);
+    Q_INVOKABLE bool sendMessage(const QString& text);
     Q_INVOKABLE void toggleCall();
     Q_INVOKABLE void toggleMute();
     Q_INVOKABLE void toggleDeafen();
@@ -112,7 +112,7 @@ signals:
     void displayNameChanged();
     void statusChanged();
     void meshStateChanged();
-    void meshSummaryChanged();
+    void meshPeerCountsChanged();
     void callStateChanged();
     void invitationStateChanged();
     void stunServersChanged();
@@ -121,11 +121,11 @@ signals:
     void microphoneLevelChanged();
     void appLinksRegisteredChanged();
     void errorRequested(QString message);
-    void signalingRequested(QString kind, QString text, QString link, QString suggestedName);
-    void signalingPreviewRequested(QString kind, QString peerName, QString expiresAt);
+    void signalingRequested(QString kind, QString text, QString link);
 
 private:
     void initializeSession();
+    void setMeshPeerCounts(int connected, int expected);
     void setStatus(const QString& status);
     void reportError(const QString& error);
 
@@ -135,13 +135,12 @@ private:
     std::unique_ptr<MessagesModel> messages_;
     std::unique_ptr<PeersModel> peers_;
     QByteArray signalingDocument_;
-    QString signalingName_;
     QString status_;
-    QString meshSummary_{"Прямые связи: 0/0"};
     QStringList captureDevices_;
     QStringList playbackDevices_;
     double microphoneLevel_{0.0};
-    QString pendingSignalingText_;
+    int connectedPeerCount_{0};
+    int expectedPeerCount_{0};
     bool identityRequired_{false};
 };
 

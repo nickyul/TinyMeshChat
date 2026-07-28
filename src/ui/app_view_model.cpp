@@ -3,14 +3,12 @@
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
 #include "tmc/messaging/chat_message.h"
-#include "tmc/signaling/invitation_codec.h"
 #include "tmc/ui/app_link_controller.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
 #include <QFile>
 #include <QGuiApplication>
-#include <QLocale>
 #include <QVector>
 
 #include <utility>
@@ -20,18 +18,19 @@ namespace tmc {
 class MessagesModel final : public QAbstractListModel {
 public:
     enum Role {
-        MessageIdRole = Qt::UserRole + 1,
-        AuthorRole,
+        AuthorRole = Qt::UserRole + 1,
         TextRole,
-        TimestampRole,
+        CreatedAtRole,
         LocalRole,
-        DeliveryRole
+        AcknowledgedCountRole,
+        ExpectedCountRole
     };
 
     struct Row {
         ChatMessage message;
         QString author;
-        QString delivery;
+        int acknowledgedCount{0};
+        int expectedCount{0};
         bool local{false};
     };
 
@@ -48,26 +47,30 @@ public:
         }
         const auto& row = rows_[index.row()];
         switch (role) {
-        case MessageIdRole:
-            return row.message.messageId;
         case AuthorRole:
             return row.author;
         case TextRole:
             return row.message.text;
-        case TimestampRole:
-            return row.message.createdAt.toLocalTime().toString("HH:mm");
+        case CreatedAtRole:
+            return row.message.createdAt;
         case LocalRole:
             return row.local;
-        case DeliveryRole:
-            return row.delivery;
+        case AcknowledgedCountRole:
+            return row.acknowledgedCount;
+        case ExpectedCountRole:
+            return row.expectedCount;
         default:
             return {};
         }
     }
 
     QHash<int, QByteArray> roleNames() const override {
-        return {{MessageIdRole, "messageId"}, {AuthorRole, "author"}, {TextRole, "text"},
-                {TimestampRole, "timestamp"}, {LocalRole, "local"},   {DeliveryRole, "delivery"}};
+        return {{AuthorRole, "author"},
+                {TextRole, "text"},
+                {CreatedAtRole, "createdAt"},
+                {LocalRole, "local"},
+                {AcknowledgedCountRole, "acknowledgedCount"},
+                {ExpectedCountRole, "expectedCount"}};
     }
 
     void add(const ChatMessage& message, QString author, bool local) {
@@ -84,7 +87,7 @@ public:
             ++row;
         }
         beginInsertRows({}, row, row);
-        rows_.insert(row, {message, std::move(author), {}, local});
+        rows_.insert(row, {message, std::move(author), 0, 0, local});
         endInsertRows();
         constexpr int MaxVisibleMessages = 2000;
         if (rows_.size() > MaxVisibleMessages) {
@@ -99,9 +102,14 @@ public:
             if (rows_[row].message.messageId != messageId) {
                 continue;
             }
-            rows_[row].delivery =
-                expected > 0 ? QString("%1/%2").arg(acknowledged).arg(expected) : QString();
-            emit dataChanged(index(row), index(row), {DeliveryRole});
+            if (rows_[row].acknowledgedCount == acknowledged &&
+                rows_[row].expectedCount == expected) {
+                return;
+            }
+            rows_[row].acknowledgedCount = acknowledged;
+            rows_[row].expectedCount = expected;
+            emit dataChanged(index(row), index(row),
+                             {AcknowledgedCountRole, ExpectedCountRole});
             return;
         }
     }
@@ -342,8 +350,12 @@ bool AppViewModel::degraded() const {
     return session_ && session_->meshState() == MeshSessionState::Degraded;
 }
 
-QString AppViewModel::meshSummary() const {
-    return meshSummary_;
+int AppViewModel::connectedPeerCount() const {
+    return connectedPeerCount_;
+}
+
+int AppViewModel::expectedPeerCount() const {
+    return expectedPeerCount_;
 }
 
 bool AppViewModel::callActive() const {
@@ -504,38 +516,6 @@ void AppViewModel::recreateInvitation() {
 }
 
 void AppViewModel::importSignalingText(const QString& text) {
-    if (text.trimmed().startsWith("tinymesh://")) {
-        previewSignalingLink(text);
-        return;
-    }
-    if (!session_) {
-        return;
-    }
-    const auto result = session_->importSignalingText(text);
-    if (!result) {
-        reportError(result.error());
-    }
-}
-
-void AppViewModel::previewSignalingLink(const QString& text) {
-    const auto decoded = InvitationCodec::decodeText(text.trimmed());
-    if (!decoded) {
-        reportError(decoded.error());
-        return;
-    }
-    pendingSignalingText_ = text.trimmed();
-    const auto& invitation = decoded.value();
-    emit signalingPreviewRequested(
-        invitation.kind == Invitation::Kind::Offer ? "offer" : "answer",
-        invitation.fromPeer.displayName,
-        QLocale::system().toString(invitation.expiresAt.toLocalTime(), QLocale::ShortFormat));
-}
-
-void AppViewModel::confirmPendingSignaling() {
-    if (pendingSignalingText_.isEmpty()) {
-        return;
-    }
-    const auto text = std::exchange(pendingSignalingText_, {});
     if (!session_) {
         return;
     }
@@ -577,14 +557,16 @@ void AppViewModel::copyText(const QString& text) {
     setStatus("Текст скопирован в буфер обмена.");
 }
 
-void AppViewModel::sendMessage(const QString& text) {
+bool AppViewModel::sendMessage(const QString& text) {
     if (!session_) {
-        return;
+        return false;
     }
     const auto result = session_->sendMessage(text);
     if (!result) {
         reportError(result.error());
+        return false;
     }
+    return true;
 }
 
 void AppViewModel::toggleCall() {
@@ -708,16 +690,11 @@ void AppViewModel::initializeSession() {
                 if (state == MeshSessionState::Disconnected) {
                     messages_->clear();
                     peers_->resetSelf(controller_.identity());
-                    meshSummary_ = "Прямые связи: 0/0";
-                    emit meshSummaryChanged();
+                    setMeshPeerCounts(0, 0);
                 }
                 emit meshStateChanged();
             });
-    connect(session_.get(), &NetworkSession::meshChanged, this,
-            [this](int connected, int expected) {
-                meshSummary_ = QString("Прямые связи: %1/%2").arg(connected).arg(expected);
-                emit meshSummaryChanged();
-            });
+    connect(session_.get(), &NetworkSession::meshChanged, this, &AppViewModel::setMeshPeerCounts);
     connect(session_.get(), &NetworkSession::peerChanged, this,
             [this](const QString& id, const QString& name, bool connected) {
                 peers_->updatePeer(id, name, connected);
@@ -745,7 +722,10 @@ void AppViewModel::initializeSession() {
                 messages_->updateDelivery(id, acknowledged, expected);
             });
     connect(session_.get(), &NetworkSession::callStateChanged, this,
-            [this](bool, bool) { emit callStateChanged(); });
+            [this](bool active, bool muted) {
+                peers_->updateVoice(controller_.identity().peerId, active, muted);
+                emit callStateChanged();
+            });
     connect(session_.get(), &NetworkSession::audioStateChanged, this,
             &AppViewModel::audioSettingsChanged);
     connect(session_.get(), &NetworkSession::microphoneLevelChanged, this, [this](double level) {
@@ -755,17 +735,24 @@ void AppViewModel::initializeSession() {
     connect(session_.get(), &NetworkSession::invitationStateChanged, this,
             [this](bool, const QString&) { emit invitationStateChanged(); });
     connect(session_.get(), &NetworkSession::signalingReady, this,
-            [this](const QString& kind, const QString& text, const QByteArray& document,
-                   const QString& suggestedName) {
+            [this](const QString& kind, const QString& text, const QByteArray& document) {
                 signalingDocument_ = document;
-                signalingName_ = suggestedName;
                 QGuiApplication::clipboard()->setText(text);
                 const auto link = text.startsWith("tmc0:")
                                       ? "tinymesh://signal/0/" + text.sliced(5)
                                       : QString{};
-                emit signalingRequested(kind, text, link, suggestedName);
+                emit signalingRequested(kind, text, link);
             });
     refreshAudioDevices();
+}
+
+void AppViewModel::setMeshPeerCounts(int connected, int expected) {
+    if (connectedPeerCount_ == connected && expectedPeerCount_ == expected) {
+        return;
+    }
+    connectedPeerCount_ = connected;
+    expectedPeerCount_ = expected;
+    emit meshPeerCountsChanged();
 }
 
 void AppViewModel::setStatus(const QString& status) {

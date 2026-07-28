@@ -504,8 +504,7 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
     const auto document = InvitationCodec::encode(invitation);
     const auto text = InvitationCodec::encodeText(invitation);
     const auto kind = invitation.kind == Invitation::Kind::Offer ? "offer" : "answer";
-    const auto extension = invitation.kind == Invitation::Kind::Offer ? ".tmcinvite" : ".tmcanswer";
-    emit signalingReady(kind, text, document, "tiny-mesh-" + connectionId.left(8) + extension);
+    emit signalingReady(kind, text, document);
     emit statusChanged(invitation.kind == Invitation::Kind::Offer
                            ? "Приглашение готово. Ожидание answer."
                            : "Answer готов. Отправьте его пригласившему участнику.");

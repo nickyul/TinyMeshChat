@@ -1,6 +1,12 @@
 <RCC>
   <qresource prefix="/">
     <file alias="default-config.json">../config/default-config.json</file>
+    <file alias="qml/AppPalette.qml">../qml/AppPalette.qml</file>
+    <file alias="qml/AppLinkSettingsDialog.qml">../qml/AppLinkSettingsDialog.qml</file>
+    <file alias="qml/AudioSettingsDialog.qml">../qml/AudioSettingsDialog.qml</file>
+    <file alias="qml/DiagnosticsDialog.qml">../qml/DiagnosticsDialog.qml</file>
     <file alias="qml/Main.qml">../qml/Main.qml</file>
+    <file alias="qml/PrimaryButton.qml">../qml/PrimaryButton.qml</file>
+    <file alias="qml/SignalingOutputDialog.qml">../qml/SignalingOutputDialog.qml</file>
   </qresource>
 </RCC>

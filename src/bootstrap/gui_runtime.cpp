@@ -74,8 +74,7 @@ int GuiRuntime::run() {
     wireAppLinks();
     if (options_.appLink.isValid()) {
         QTimer::singleShot(0, viewModel_.get(), [this] {
-            viewModel_->previewSignalingLink(
-                options_.appLink.toString(QUrl::FullyEncoded));
+            viewModel_->importSignalingText(options_.appLink.toString(QUrl::FullyEncoded));
         });
     }
     if (options_.qmlSmoke) {
@@ -101,11 +100,10 @@ void GuiRuntime::bringMainWindowToFront() {
 
 void GuiRuntime::wireAppLinks() {
     QObject::connect(appLinks_.get(), &AppLinkController::urlReceived, engine_.get(),
-                     [this](const QUrl& url) {
-                         bringMainWindowToFront();
-                         viewModel_->previewSignalingLink(
-                             url.toString(QUrl::FullyEncoded));
-                     });
+                      [this](const QUrl& url) {
+                          bringMainWindowToFront();
+                          viewModel_->importSignalingText(url.toString(QUrl::FullyEncoded));
+                      });
     QObject::connect(appLinks_.get(), &AppLinkController::activationRequested, engine_.get(),
                      [this] { bringMainWindowToFront(); });
 }

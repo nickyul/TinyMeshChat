@@ -72,7 +72,7 @@ public:
 
 signals:
     void meshStateChanged(tmc::MeshSessionState state);
-    void signalingReady(QString kind, QString text, QByteArray document, QString suggestedName);
+    void signalingReady(QString kind, QString text, QByteArray document);
     void statusChanged(QString status);
     void meshChanged(int connected, int expected);
     void peerChanged(QString peerId, QString displayName, bool connected);
