@@ -31,7 +31,6 @@ target_sources(tmc_core
         src/core/logger.cpp
         src/identity/peer_identity.cpp
         src/identity/identity_manager.cpp
-        src/signaling/invitation.cpp
         src/signaling/invitation_codec.cpp
         src/protocol/packet.cpp
         src/protocol/packet_codec.cpp

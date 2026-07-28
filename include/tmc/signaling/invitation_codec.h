@@ -13,10 +13,8 @@ public:
     static QByteArray encode(const Invitation&);
     static QString encodeText(const Invitation&);
     static QString encodeLink(const Invitation&);
-    static Result<Invitation> decode(const QByteArray&,
-                                     const QDateTime& now = QDateTime::currentDateTimeUtc());
-    static Result<Invitation> decodeText(const QString&,
-                                         const QDateTime& now = QDateTime::currentDateTimeUtc());
+    static Result<Invitation> decode(const QByteArray&);
+    static Result<Invitation> decodeText(const QString&);
 };
 
 } // namespace tmc

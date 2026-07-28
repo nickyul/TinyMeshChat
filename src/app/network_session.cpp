@@ -401,34 +401,18 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
                 "Повторно получен offer для уже известного соединения. Убедитесь, что друг "
                 "отправил строку из окна «Answer готов», а не исходное приглашение.");
         }
-        const auto existing = invitation.fromPeer.peerId.isEmpty()
-                                  ? std::optional<ConnectionInfo>{}
-                                  : connections_->infoForPeer(invitation.fromPeer.peerId);
-        if (existing && existing->open) {
-            return Result<void>::failure("Этот участник уже подключён к mesh.");
-        }
-        if (!invitation.fromPeer.peerId.isEmpty()) {
-            connections_->discardStale(invitation.fromPeer.peerId);
-        }
-
         const bool joiningMesh = mesh_.meshId().isEmpty();
         if (joiningMesh) {
             clearSessionData();
-            mesh_.beginJoin(app_.identity(), invitation.fromPeer, invitation.meshId);
-        } else {
-            mesh_.rememberPeer(invitation.fromPeer);
+            mesh_.beginJoin(app_.identity(), {}, invitation.meshId);
         }
 
-        auto created =
-            connections_->create(invitation.connectionId, invitation.fromPeer, false, false);
+        auto created = connections_->create(invitation.connectionId, {}, false, false);
         if (!created) {
             if (joiningMesh) {
                 mesh_.leave();
             }
             return created;
-        }
-        if (!invitation.fromPeer.peerId.isEmpty()) {
-            emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
         }
         emit statusChanged("Offer импортирован. Создаётся answer…");
         const auto accepted = connections_->acceptOffer(invitation.connectionId, invitation.sdp);
@@ -450,11 +434,6 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         return Result<void>::failure("Этот answer уже импортирован.");
     }
 
-    if (!invitation.fromPeer.peerId.isEmpty()) {
-        connections_->setRemote(invitation.connectionId, invitation.fromPeer);
-        mesh_.rememberPeer(invitation.fromPeer);
-        emit peerChanged(invitation.fromPeer.peerId, invitation.fromPeer.displayName, false);
-    }
     emit statusChanged("Answer импортирован. Устанавливается прямое P2P-соединение…");
     return connections_->acceptAnswer(invitation.connectionId, invitation.sdp);
 }
@@ -466,16 +445,11 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
     if (!connection) {
         return;
     }
-    const auto now = QDateTime::currentDateTimeUtc();
     Invitation invitation;
     invitation.kind = connection->localOffer ? Invitation::Kind::Offer : Invitation::Kind::Answer;
     invitation.meshId = mesh_.meshId();
     invitation.connectionId = connectionId;
     invitation.sdp = sdp;
-    invitation.nonce = uuid();
-    invitation.fromPeer = app_.identity();
-    invitation.createdAt = now;
-    invitation.expiresAt = now.addSecs(policy_.manualSignalingTimeoutSeconds);
 
     if (connection->meshManaged) {
         auto packet = basePacket(connection->localOffer ? PacketType::LinkOffer

@@ -120,7 +120,7 @@ QString InvitationCodec::encodeLink(const Invitation& invitation) {
     return text.isEmpty() ? QString{} : "tinymesh://signal/0/" + text.sliced(5);
 }
 
-Result<Invitation> InvitationCodec::decode(const QByteArray& bytes, const QDateTime&) {
+Result<Invitation> InvitationCodec::decode(const QByteArray& bytes) {
     if (bytes.size() > MaxBytes) {
         return Result<Invitation>::failure("Signaling document is too large");
     }
@@ -142,7 +142,7 @@ Result<Invitation> InvitationCodec::decode(const QByteArray& bytes, const QDateT
     return validate(std::move(invitation));
 }
 
-Result<Invitation> InvitationCodec::decodeText(const QString& value, const QDateTime&) {
+Result<Invitation> InvitationCodec::decodeText(const QString& value) {
     auto text = value.trimmed();
     if (text.startsWith("tinymesh://signal/0/")) {
         text = "tmc0:" + text.sliced(QString("tinymesh://signal/0/").size());
