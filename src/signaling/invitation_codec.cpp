@@ -1,5 +1,7 @@
 #include "tmc/signaling/invitation_codec.h"
 
+#include "tmc/network/sdp_description_codec.h"
+
 #include <QDataStream>
 #include <QIODevice>
 #include <QJsonDocument>
@@ -32,7 +34,12 @@ bool readUuid(QDataStream& stream, QString& text) {
     return true;
 }
 
-QByteArray encodeCompact(const Invitation& invitation) {
+Result<QByteArray> encodeCompact(const Invitation& invitation) {
+    auto description = SdpDescriptionCodec::pack(invitation.sdp);
+    if (!description) {
+        return Result<QByteArray>::failure(description.error());
+    }
+
     QByteArray raw;
     QDataStream stream(&raw, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
@@ -40,12 +47,14 @@ QByteArray encodeCompact(const Invitation& invitation) {
     stream << CompactVersion << static_cast<quint8>(offer ? 0 : 1);
     if ((offer && !writeUuid(stream, invitation.meshId)) ||
         !writeUuid(stream, invitation.connectionId)) {
-        return {};
+        return Result<QByteArray>::failure("Invalid compact signaling identifiers");
     }
-    const auto sdp = invitation.sdp.toUtf8();
-    stream << static_cast<quint32>(sdp.size());
-    stream.writeRawData(sdp.constData(), sdp.size());
-    return stream.status() == QDataStream::Ok ? raw : QByteArray{};
+    stream << static_cast<quint32>(description.value().size());
+    stream.writeRawData(description.value().constData(), description.value().size());
+    if (stream.status() != QDataStream::Ok) {
+        return Result<QByteArray>::failure("Failed to encode compact signaling payload");
+    }
+    return Result<QByteArray>::success(std::move(raw));
 }
 
 Result<Invitation> validate(Invitation invitation) {
@@ -73,18 +82,26 @@ Result<Invitation> decodeCompact(const QByteArray& raw) {
         !readUuid(stream, invitation.connectionId)) {
         return Result<Invitation>::failure("Invalid compact signaling identifiers");
     }
-    quint32 sdpBytes{};
-    stream >> sdpBytes;
-    if (stream.status() != QDataStream::Ok || sdpBytes == 0 ||
-        sdpBytes > static_cast<quint32>(InvitationCodec::MaxBytes) ||
-        sdpBytes > static_cast<quint32>(raw.size())) {
+    quint32 descriptionBytes{};
+    stream >> descriptionBytes;
+    if (stream.status() != QDataStream::Ok || descriptionBytes == 0 ||
+        descriptionBytes > static_cast<quint32>(InvitationCodec::MaxBytes) ||
+        descriptionBytes > static_cast<quint32>(raw.size())) {
         return Result<Invitation>::failure("Invalid compact signaling length");
     }
-    QByteArray sdp(sdpBytes, Qt::Uninitialized);
-    if (stream.readRawData(sdp.data(), sdp.size()) != sdp.size() || !stream.atEnd()) {
+    QByteArray description(descriptionBytes, Qt::Uninitialized);
+    if (stream.readRawData(description.data(), description.size()) != description.size() ||
+        !stream.atEnd()) {
         return Result<Invitation>::failure("Truncated compact signaling payload");
     }
-    invitation.sdp = QString::fromUtf8(sdp);
+    const auto type = invitation.kind == Invitation::Kind::Offer
+                          ? SdpDescriptionType::Offer
+                          : SdpDescriptionType::Answer;
+    auto sdp = SdpDescriptionCodec::unpack(description, type);
+    if (!sdp) {
+        return Result<Invitation>::failure(sdp.error());
+    }
+    invitation.sdp = std::move(sdp.value());
     return validate(std::move(invitation));
 }
 
@@ -107,12 +124,12 @@ QByteArray InvitationCodec::encode(const Invitation& invitation) {
 
 QString InvitationCodec::encodeText(const Invitation& invitation) {
     const auto raw = encodeCompact(invitation);
-    if (raw.isEmpty()) {
+    if (!raw) {
         return {};
     }
     return "tmc0:" + QString::fromLatin1(
-                         qCompress(raw, 9).toBase64(QByteArray::Base64UrlEncoding |
-                                                    QByteArray::OmitTrailingEquals));
+                         qCompress(raw.value(), 9).toBase64(QByteArray::Base64UrlEncoding |
+                                                            QByteArray::OmitTrailingEquals));
 }
 
 QString InvitationCodec::encodeLink(const Invitation& invitation) {

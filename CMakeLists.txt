@@ -31,7 +31,6 @@ target_sources(tmc_core
         src/core/logger.cpp
         src/identity/peer_identity.cpp
         src/identity/identity_manager.cpp
-        src/signaling/invitation_codec.cpp
         src/protocol/packet.cpp
         src/protocol/packet_codec.cpp
         src/protocol/packet_dispatcher.cpp
@@ -47,8 +46,6 @@ target_sources(tmc_core
             include/tmc/core/voice_frame_timing.h
             include/tmc/identity/identity_manager.h
             include/tmc/identity/peer_identity.h
-            include/tmc/signaling/invitation.h
-            include/tmc/signaling/invitation_codec.h
             include/tmc/protocol/packet.h
             include/tmc/protocol/packet_codec.h
             include/tmc/protocol/packet_dispatcher.h
@@ -61,6 +58,7 @@ add_library(tmc_transport STATIC)
 target_sources(tmc_transport
     PRIVATE
         src/network/peer_connection.cpp
+        src/network/sdp_description_codec.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -69,10 +67,13 @@ target_sources(tmc_transport
             include/tmc/network/connection_policy.h
             include/tmc/network/connection_state.h
             include/tmc/network/peer_connection.h
+            include/tmc/network/sdp_description_codec.h
 )
 target_link_libraries(tmc_transport
     PUBLIC tmc_core Qt6::Core
-    PRIVATE LibDataChannel::LibDataChannel
+    PRIVATE
+        Qt6::Network
+        LibDataChannel::LibDataChannel
 )
 
 add_library(tmc_audio STATIC)
@@ -123,6 +124,7 @@ target_sources(tmc_application
         src/app/signaling_router.cpp
         src/app/topology_controller.cpp
         src/app/voice_session.cpp
+        src/signaling/invitation_codec.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -138,6 +140,8 @@ target_sources(tmc_application
             include/tmc/app/signaling_router.h
             include/tmc/app/topology_controller.h
             include/tmc/app/voice_session.h
+            include/tmc/signaling/invitation.h
+            include/tmc/signaling/invitation_codec.h
 )
 target_link_libraries(tmc_application
     PUBLIC
