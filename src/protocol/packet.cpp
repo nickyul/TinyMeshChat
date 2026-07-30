@@ -65,18 +65,13 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
             if constexpr (std::is_same_v<T, EmptyPayload>) {
                 return {};
             } else if constexpr (std::is_same_v<T, HelloPayload>) {
-                return {{"display_name", value.displayName},
-                        {"device_id", value.deviceId},
-                        {"identity_created_at",
-                         value.identityCreatedAt.toUTC().toString(Qt::ISODateWithMs)}};
+                return {{"display_name", value.displayName}};
             } else if constexpr (std::is_same_v<T, PeerSnapshotPayload>) {
                 return {{"revision", value.revision}, {"peers", value.peers}};
             } else if constexpr (std::is_same_v<T, PeerAnnouncePayload>) {
                 const QJsonObject peer{
                     {"id", value.peer.peerId},
-                    {"name", value.peer.displayName},
-                    {"device", value.peer.deviceId},
-                    {"created_at", value.peer.createdAt.toUTC().toString(Qt::ISODateWithMs)}};
+                    {"name", value.peer.displayName}};
                 return {{"peer", peer}, {"epoch", value.epoch}, {"hops", value.hops}};
             } else if constexpr (std::is_same_v<T, PeerLeavePayload>) {
                 return {{"reason", value.reason}};

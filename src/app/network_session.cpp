@@ -515,10 +515,7 @@ bool NetworkSession::sendPacket(const QString& connectionId, const Packet& packe
 
 void NetworkSession::sendHello(const QString& connectionId) {
     sendPacket(connectionId,
-               basePacket(PacketType::PeerHello,
-                          HelloPayload{app_.identity().displayName,
-                                       app_.identity().deviceId,
-                                       app_.identity().createdAt}));
+               basePacket(PacketType::PeerHello, HelloPayload{app_.identity().displayName}));
 }
 
 void NetworkSession::sendPing(const QString& connectionId) {

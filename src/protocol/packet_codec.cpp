@@ -8,7 +8,12 @@ namespace tmc {
 namespace {
 
 bool validUuid(const QJsonValue& value) {
-    return value.isString() && !QUuid::fromString(value.toString()).isNull();
+    if (!value.isString()) {
+        return false;
+    }
+    const auto text = value.toString();
+    const auto uuid = QUuid::fromString(text);
+    return !uuid.isNull() && uuid.toString(QUuid::WithoutBraces) == text;
 }
 
 bool validTimestamp(const QJsonValue& value) {
@@ -20,10 +25,7 @@ Result<PeerIdentity> decodeIdentity(const QJsonValue& value) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
     }
     const auto object = value.toObject();
-    PeerIdentity identity{
-        object.value("id").toString(), object.value("name").toString(),
-        object.value("device").toString(),
-        QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
+    PeerIdentity identity{object.value("id").toString(), object.value("name").toString()};
     if (!identity.isValid() || identity.displayName.size() > 128) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
     }
@@ -34,15 +36,10 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
     switch (type) {
     case PacketType::PeerHello: {
         const auto displayName = payload.value("display_name").toString();
-        const auto identityCreatedAt = payload.value("identity_created_at");
-        if (displayName.trimmed().isEmpty() || displayName.size() > 128 ||
-            !validUuid(payload.value("device_id")) || !validTimestamp(identityCreatedAt)) {
+        if (displayName.trimmed().isEmpty() || displayName.size() > 128) {
             break;
         }
-        return Result<PacketPayload>::success(
-            HelloPayload{displayName, payload.value("device_id").toString(),
-                         QDateTime::fromString(identityCreatedAt.toString(),
-                                               Qt::ISODateWithMs)});
+        return Result<PacketPayload>::success(HelloPayload{displayName});
     }
     case PacketType::PeerSnapshot: {
         if (!payload.value("peers").isArray()) {

@@ -1,6 +1,5 @@
 #include "tmc/app/mesh_coordinator.h"
 
-#include <QDateTime>
 #include <QJsonObject>
 #include <QRandomGenerator>
 #include <QTimer>
@@ -10,16 +9,11 @@ namespace tmc {
 namespace {
 
 QJsonObject identityJson(const PeerIdentity& identity) {
-    return {{"id", identity.peerId},
-            {"name", identity.displayName},
-            {"device", identity.deviceId},
-            {"created_at", identity.createdAt.toUTC().toString(Qt::ISODateWithMs)}};
+    return {{"id", identity.peerId}, {"name", identity.displayName}};
 }
 
 PeerIdentity identityFromJson(const QJsonObject& object) {
-    return {object.value("id").toString(), object.value("name").toString(),
-            object.value("device").toString(),
-            QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
+    return {object.value("id").toString(), object.value("name").toString()};
 }
 
 } // namespace

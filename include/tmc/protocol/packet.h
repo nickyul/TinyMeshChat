@@ -35,8 +35,6 @@ struct EmptyPayload {};
 
 struct HelloPayload {
     QString displayName;
-    QString deviceId;
-    QDateTime identityCreatedAt;
 };
 
 struct PeerSnapshotPayload {

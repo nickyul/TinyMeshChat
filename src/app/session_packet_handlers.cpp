@@ -80,8 +80,6 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
         if (!payload.displayName.isEmpty()) {
             remote.displayName = payload.displayName;
         }
-        remote.deviceId = payload.deviceId;
-        remote.createdAt = payload.identityCreatedAt;
         connections_.setRemote(context.connectionId, remote);
         mesh_.rememberPeer(remote);
         callbacks_.peerChanged(remote.peerId, remote.displayName, true);

@@ -10,12 +10,14 @@ namespace tmc {
 
 namespace {
 
+constexpr qsizetype MaxDisplayNameLength = 128;
+
 Result<QString> normalizeDisplayName(const QString& name) {
     const auto normalized = name.trimmed();
     if (normalized.isEmpty()) {
         return Result<QString>::failure("Display name is required");
     }
-    if (normalized.size() > 128) {
+    if (normalized.size() > MaxDisplayNameLength) {
         return Result<QString>::failure("Display name must not exceed 128 characters");
     }
     for (const auto ch : normalized) {
@@ -27,11 +29,8 @@ Result<QString> normalizeDisplayName(const QString& name) {
 }
 
 Result<void> saveIdentity(const QString& path, const PeerIdentity& identity) {
-    const QJsonObject object{
-        {"peer_id", identity.peerId},
-        {"display_name", identity.displayName},
-        {"device_id", identity.deviceId},
-        {"created_at", identity.createdAt.toUTC().toString(Qt::ISODateWithMs)}};
+    const QJsonObject object{{"peer_id", identity.peerId},
+                             {"display_name", identity.displayName}};
     QSaveFile out(path);
     if (!out.open(QIODevice::WriteOnly) || out.write(QJsonDocument(object).toJson()) < 0 ||
         !out.commit()) {
@@ -55,10 +54,8 @@ Result<PeerIdentity> IdentityManager::load(const QString& path) {
     }
 
     const auto object = document.object();
-    PeerIdentity identity{
-        object.value("peer_id").toString(), object.value("display_name").toString(),
-        object.value("device_id").toString(),
-        QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs)};
+    PeerIdentity identity{object.value("peer_id").toString(),
+                          object.value("display_name").toString()};
     const auto displayName = normalizeDisplayName(identity.displayName);
     if (!identity.isValid() || !displayName) {
         return Result<PeerIdentity>::failure("Stored identity is invalid");
@@ -76,9 +73,7 @@ Result<PeerIdentity> IdentityManager::create(const QString& path, const QString&
         return Result<PeerIdentity>::failure(normalized.error());
     }
 
-    PeerIdentity identity{QUuid::createUuid().toString(QUuid::WithoutBraces), normalized.value(),
-                          QUuid::createUuid().toString(QUuid::WithoutBraces),
-                          QDateTime::currentDateTimeUtc()};
+    PeerIdentity identity{QUuid::createUuid().toString(QUuid::WithoutBraces), normalized.value()};
     const auto saved = saveIdentity(path, identity);
     if (!saved) {
         return Result<PeerIdentity>::failure(saved.error());

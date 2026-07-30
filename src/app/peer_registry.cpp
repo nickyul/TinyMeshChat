@@ -11,9 +11,6 @@ bool PeerRegistry::remember(const PeerIdentity& peer) {
     if (normalized.displayName.isEmpty()) {
         normalized.displayName = normalized.peerId.left(8);
     }
-    if (normalized.deviceId.isEmpty()) {
-        normalized.deviceId = "unknown";
-    }
     peers_.insert(normalized.peerId, normalized);
     return added;
 }

@@ -4,13 +4,17 @@
 
 namespace tmc {
 
-static bool uuid(const QString& s) {
-    return !QUuid::fromString(s).isNull();
+namespace {
+
+bool isCanonicalUuid(const QString& value) {
+    const auto uuid = QUuid::fromString(value);
+    return !uuid.isNull() && uuid.toString(QUuid::WithoutBraces) == value;
 }
 
+} // namespace
+
 bool PeerIdentity::isValid() const {
-    return uuid(peerId) && uuid(deviceId) && !displayName.trimmed().isEmpty() &&
-           createdAt.isValid();
+    return isCanonicalUuid(peerId) && !displayName.trimmed().isEmpty();
 }
 
 } // namespace tmc
