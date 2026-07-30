@@ -6,7 +6,6 @@
 #include "tmc/app/signaling_router.h"
 #include "tmc/app/voice_session.h"
 #include "tmc/core/logger.h"
-#include "tmc/protocol/packet_dispatcher.h"
 
 #include <utility>
 
@@ -20,55 +19,45 @@ SessionPacketHandlers::SessionPacketHandlers(ConnectionManager& connections, Mes
       voice_(voice), policy_(policy), callbacks_(std::move(callbacks)) {
 }
 
-void SessionPacketHandlers::registerWith(PacketDispatcher& dispatcher) {
-    const auto membership = [this](const PacketContext& context, const Packet& packet) {
-        handleMembership(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::PeerHello, membership);
-    dispatcher.registerHandler(PacketType::PeerSnapshot, membership);
-    dispatcher.registerHandler(PacketType::PeerAnnounce, membership);
-    dispatcher.registerHandler(PacketType::PeerLeave, membership);
-
-    const auto messaging = [this](const PacketContext& context, const Packet& packet) {
-        handleMessaging(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::ChatMessage, messaging);
-    dispatcher.registerHandler(PacketType::ChatAck, messaging);
-
-    const auto voice = [this](const PacketContext& context, const Packet& packet) {
-        handleVoice(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::VoiceState, voice);
-    dispatcher.registerHandler(PacketType::VoiceQuality, voice);
-
-    const auto routing = [this](const PacketContext& context, const Packet& packet) {
-        handleRouting(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::RouteRequest, routing);
-    dispatcher.registerHandler(PacketType::RouteReply, routing);
-
-    const auto meshSignaling = [this](const PacketContext& context, const Packet& packet) {
-        handleMeshSignaling(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::LinkOffer, meshSignaling);
-    dispatcher.registerHandler(PacketType::LinkAnswer, meshSignaling);
-
-    const auto sessionSignaling = [this](const PacketContext& context, const Packet& packet) {
-        handleSessionSignaling(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::SessionOffer, sessionSignaling);
-    dispatcher.registerHandler(PacketType::SessionAnswer, sessionSignaling);
-
-    const auto heartbeat = [this](const PacketContext& context, const Packet& packet) {
-        handleHeartbeat(context, packet);
-    };
-    dispatcher.registerHandler(PacketType::Ping, heartbeat);
-    dispatcher.registerHandler(PacketType::Pong, heartbeat);
+bool SessionPacketHandlers::handle(const QString& connectionId, const Packet& packet) {
+    switch (packet.type) {
+    case PacketType::PeerHello:
+    case PacketType::PeerSnapshot:
+    case PacketType::PeerAnnounce:
+    case PacketType::PeerLeave:
+        handleMembership(connectionId, packet);
+        return true;
+    case PacketType::ChatMessage:
+    case PacketType::ChatAck:
+        handleMessaging(connectionId, packet);
+        return true;
+    case PacketType::VoiceState:
+    case PacketType::VoiceQuality:
+        handleVoice(packet);
+        return true;
+    case PacketType::RouteRequest:
+    case PacketType::RouteReply:
+        handleRouting(connectionId, packet);
+        return true;
+    case PacketType::LinkOffer:
+    case PacketType::LinkAnswer:
+        handleMeshSignaling(connectionId, packet);
+        return true;
+    case PacketType::SessionOffer:
+    case PacketType::SessionAnswer:
+        handleSessionSignaling(connectionId, packet);
+        return true;
+    case PacketType::Ping:
+    case PacketType::Pong:
+        handleHeartbeat(connectionId, packet);
+        return true;
+    }
+    return false;
 }
 
-void SessionPacketHandlers::handleMembership(const PacketContext& context, const Packet& packet) {
+void SessionPacketHandlers::handleMembership(const QString& connectionId, const Packet& packet) {
     if (packet.type == PacketType::PeerHello) {
-        const auto connection = connections_.info(context.connectionId);
+        const auto connection = connections_.info(connectionId);
         if (!connection) {
             return;
         }
@@ -80,10 +69,10 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
         if (!payload.displayName.isEmpty()) {
             remote.displayName = payload.displayName;
         }
-        connections_.setRemote(context.connectionId, remote);
+        connections_.setRemote(connectionId, remote);
         mesh_.rememberPeer(remote);
         callbacks_.peerChanged(remote.peerId, remote.displayName, true);
-        connections_.markHelloReceived(context.connectionId, remote);
+        connections_.markHelloReceived(connectionId, remote);
         return;
     }
 
@@ -95,7 +84,7 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
         if (payload.peer.peerId != packet.senderId) {
             return;
         }
-        router_.observeRoute(packet.senderId, context.connectionId, payload.hops + 1);
+        router_.observeRoute(packet.senderId, connectionId, payload.hops + 1);
         mesh_.routeAvailable(packet.senderId);
         mesh_.rememberPeer(payload.peer);
         if (packet.ttl > 1) {
@@ -103,7 +92,7 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
             --forwarded.ttl;
             ++payload.hops;
             forwarded.payload = payload;
-            callbacks_.broadcastService(forwarded, context.connectionId);
+            callbacks_.broadcastService(forwarded, connectionId);
         }
         callbacks_.ensureDynamicMesh();
         callbacks_.updateMesh();
@@ -114,7 +103,7 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
         if (router_.rememberPacket(packet.packetId) && packet.ttl > 1) {
             auto forwarded = packet;
             --forwarded.ttl;
-            callbacks_.broadcastService(forwarded, context.connectionId);
+            callbacks_.broadcastService(forwarded, connectionId);
         }
         const auto leaving = mesh_.peer(packet.senderId);
         const auto direct = connections_.infoForPeer(packet.senderId);
@@ -133,45 +122,45 @@ void SessionPacketHandlers::handleMembership(const PacketContext& context, const
     const auto& payload = std::get<PeerSnapshotPayload>(packet.payload);
     const bool changed =
         mesh_.ingestPeerList(payload.peers, callbacks_.localIdentity().peerId);
-    router_.observeDirect(packet.senderId, context.connectionId);
+    router_.observeDirect(packet.senderId, connectionId);
     for (const auto& peer : mesh_.peers()) {
         if (peer.peerId == callbacks_.localIdentity().peerId) {
             continue;
         }
         const auto direct = connections_.infoForPeer(peer.peerId);
         if (peer.peerId != packet.senderId && (!direct || !direct->open)) {
-            router_.observeRoute(peer.peerId, context.connectionId, 2);
+            router_.observeRoute(peer.peerId, connectionId, 2);
         }
         callbacks_.peerChanged(peer.peerId, peer.displayName, direct && direct->open);
     }
     if (changed) {
-        callbacks_.broadcastPeerList(context.connectionId);
+        callbacks_.broadcastPeerList(connectionId);
     }
     callbacks_.ensureDynamicMesh();
     callbacks_.updateMesh();
 }
 
-void SessionPacketHandlers::handleRouting(const PacketContext& context, const Packet& packet) {
+void SessionPacketHandlers::handleRouting(const QString& connectionId, const Packet& packet) {
     const auto payload = std::get<RoutePayload>(packet.payload);
     if (!router_.rememberPacket(packet.packetId)) {
         return;
     }
-    router_.observeRoute(packet.senderId, context.connectionId, payload.hops + 1);
+    router_.observeRoute(packet.senderId, connectionId, payload.hops + 1);
 
     if (packet.type == PacketType::RouteRequest) {
-        router_.rememberReverseRoute(payload.requestId, context.connectionId);
+        router_.rememberReverseRoute(payload.requestId, connectionId);
         if (packet.targetId == callbacks_.localIdentity().peerId) {
             auto reply =
                 callbacks_.makePacket(PacketType::RouteReply, RoutePayload{payload.requestId, 0});
             reply.targetId = packet.senderId;
             reply.ttl = policy_.maxPeers;
             router_.rememberPacket(reply.packetId);
-            callbacks_.sendPacket(context.connectionId, reply);
+            callbacks_.sendPacket(connectionId, reply);
         } else if (packet.ttl > 1) {
             auto forwarded = packet;
             --forwarded.ttl;
             forwarded.payload = RoutePayload{payload.requestId, payload.hops + 1};
-            callbacks_.broadcastService(forwarded, context.connectionId);
+            callbacks_.broadcastService(forwarded, connectionId);
         }
         return;
     }
@@ -181,7 +170,7 @@ void SessionPacketHandlers::handleRouting(const PacketContext& context, const Pa
         return;
     }
     const auto reverse = router_.reverseHop(payload.requestId);
-    if (reverse && *reverse != context.connectionId && packet.ttl > 1) {
+    if (reverse && *reverse != connectionId && packet.ttl > 1) {
         auto forwarded = packet;
         --forwarded.ttl;
         forwarded.payload = RoutePayload{payload.requestId, payload.hops + 1};
@@ -189,7 +178,7 @@ void SessionPacketHandlers::handleRouting(const PacketContext& context, const Pa
     }
 }
 
-void SessionPacketHandlers::handleMessaging(const PacketContext& context, const Packet& packet) {
+void SessionPacketHandlers::handleMessaging(const QString& connectionId, const Packet& packet) {
     if (packet.type == PacketType::ChatMessage) {
         const auto& payload = std::get<ChatMessagePayload>(packet.payload);
         auto received = messaging_.receiveMessage(packet);
@@ -201,7 +190,7 @@ void SessionPacketHandlers::handleMessaging(const PacketContext& context, const 
             callbacks_.messageReceived(*received.value(), false);
         }
         callbacks_.sendPacket(
-            context.connectionId,
+            connectionId,
             callbacks_.makePacket(PacketType::ChatAck, ChatAckPayload{payload.messageId}));
         return;
     }
@@ -213,7 +202,7 @@ void SessionPacketHandlers::handleMessaging(const PacketContext& context, const 
     }
 }
 
-void SessionPacketHandlers::handleVoice(const PacketContext&, const Packet& packet) {
+void SessionPacketHandlers::handleVoice(const Packet& packet) {
     if (packet.type == PacketType::VoiceQuality) {
         if (!packet.targetId.isEmpty() && packet.targetId != callbacks_.localIdentity().peerId) {
             return;
@@ -226,7 +215,7 @@ void SessionPacketHandlers::handleVoice(const PacketContext&, const Packet& pack
     voice_.updatePeer(packet.senderId, payload.joined, payload.muted);
 }
 
-void SessionPacketHandlers::handleMeshSignaling(const PacketContext& context,
+void SessionPacketHandlers::handleMeshSignaling(const QString& connectionId,
                                                 const Packet& packet) {
     const auto& payload = std::get<LinkSignalingPayload>(packet.payload);
     if (!router_.rememberPacket(packet.packetId)) {
@@ -238,14 +227,14 @@ void SessionPacketHandlers::handleMeshSignaling(const PacketContext& context,
             .arg(toString(packet.type), payload.connectionId.left(8))
             .arg(payload.generation)
             .arg(packet.senderId.left(8), packet.targetId.left(8),
-                 context.connectionId.left(8))
+                 connectionId.left(8))
             .arg(packet.ttl));
-    router_.observeRoute(packet.senderId, context.connectionId, 2);
+    router_.observeRoute(packet.senderId, connectionId, 2);
     if (packet.targetId != callbacks_.localIdentity().peerId) {
         if (packet.ttl > 1) {
             auto forwarded = packet;
             --forwarded.ttl;
-            callbacks_.broadcastService(forwarded, context.connectionId);
+            callbacks_.broadcastService(forwarded, connectionId);
         }
         return;
     }
@@ -297,38 +286,38 @@ void SessionPacketHandlers::handleMeshSignaling(const PacketContext& context,
     }
 }
 
-void SessionPacketHandlers::handleHeartbeat(const PacketContext& context, const Packet& packet) {
+void SessionPacketHandlers::handleHeartbeat(const QString& connectionId, const Packet& packet) {
     if (packet.type == PacketType::Ping) {
         callbacks_.sendPacket(
-            context.connectionId,
+            connectionId,
             callbacks_.makePacket(PacketType::Pong,
                                   std::get<HeartbeatPayload>(packet.payload)));
         return;
     }
-    callbacks_.receivePong(context.connectionId, std::get<HeartbeatPayload>(packet.payload));
+    callbacks_.receivePong(connectionId, std::get<HeartbeatPayload>(packet.payload));
 }
 
-void SessionPacketHandlers::handleSessionSignaling(const PacketContext& context,
+void SessionPacketHandlers::handleSessionSignaling(const QString& connectionId,
                                                    const Packet& packet) {
     const auto& payload = std::get<SessionSignalingPayload>(packet.payload);
-    const auto connection = connections_.info(context.connectionId);
-    if (!connection || !connection->open || payload.connectionId != context.connectionId ||
+    const auto connection = connections_.info(connectionId);
+    if (!connection || !connection->open || payload.connectionId != connectionId ||
         (!packet.targetId.isEmpty() &&
          packet.targetId != callbacks_.localIdentity().peerId)) {
         return;
     }
     if (packet.type == PacketType::SessionOffer) {
-        callbacks_.rememberAudioNegotiation(context.connectionId, payload.negotiation);
-        const auto accepted = connections_.acceptAudioOffer(context.connectionId, payload.sdp);
+        callbacks_.rememberAudioNegotiation(connectionId, payload.negotiation);
+        const auto accepted = connections_.acceptAudioOffer(connectionId, payload.sdp);
         if (!accepted) {
             callbacks_.errorOccurred("Не удалось применить audio offer: " + accepted.error());
         }
         return;
     }
-    if (!callbacks_.isCurrentAudioNegotiation(context.connectionId, payload.negotiation)) {
+    if (!callbacks_.isCurrentAudioNegotiation(connectionId, payload.negotiation)) {
         return;
     }
-    const auto accepted = connections_.acceptAudioAnswer(context.connectionId, payload.sdp);
+    const auto accepted = connections_.acceptAudioAnswer(connectionId, payload.sdp);
     if (!accepted) {
         callbacks_.errorOccurred("Не удалось применить audio answer: " + accepted.error());
     }

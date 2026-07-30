@@ -3,8 +3,7 @@
 #include "tmc/identity/peer_identity.h"
 
 #include <QDateTime>
-#include <QJsonArray>
-#include <QJsonObject>
+#include <QList>
 #include <QString>
 
 #include <optional>
@@ -31,15 +30,13 @@ enum class PacketType {
     Pong
 };
 
-struct EmptyPayload {};
-
 struct HelloPayload {
     QString displayName;
 };
 
 struct PeerSnapshotPayload {
     qint64 revision{0};
-    QJsonArray peers;
+    QList<PeerIdentity> peers;
 };
 
 struct PeerAnnouncePayload {
@@ -97,10 +94,10 @@ struct HeartbeatPayload {
 };
 
 using PacketPayload =
-    std::variant<EmptyPayload, HelloPayload, PeerSnapshotPayload, PeerAnnouncePayload,
-                 PeerLeavePayload, ChatMessagePayload, ChatAckPayload, VoiceStatePayload,
-                 VoiceQualityPayload, RoutePayload, LinkSignalingPayload,
-                 SessionSignalingPayload, HeartbeatPayload>;
+    std::variant<HelloPayload, PeerSnapshotPayload, PeerAnnouncePayload, PeerLeavePayload,
+                 ChatMessagePayload, ChatAckPayload, VoiceStatePayload, VoiceQualityPayload,
+                 RoutePayload, LinkSignalingPayload, SessionSignalingPayload,
+                 HeartbeatPayload>;
 
 struct Packet {
     PacketType type{PacketType::PeerHello};
@@ -115,6 +112,5 @@ struct Packet {
 
 QString toString(PacketType type);
 std::optional<PacketType> packetTypeFromString(const QString& type);
-QJsonObject payloadToJson(const PacketPayload& payload);
 
 } // namespace tmc

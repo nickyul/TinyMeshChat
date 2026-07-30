@@ -4,7 +4,6 @@
 #include "tmc/app/peer_registry.h"
 #include "tmc/network/connection_policy.h"
 
-#include <QJsonArray>
 #include <QObject>
 #include <QSet>
 
@@ -25,8 +24,8 @@ public:
 
     bool rememberPeer(const PeerIdentity& peer);
     bool forgetPeer(const QString& peerId);
-    bool ingestPeerList(const QJsonArray& peers, const QString& localPeerId);
-    QJsonArray peerList() const;
+    bool ingestPeerList(const QList<PeerIdentity>& peers, const QString& localPeerId);
+    QList<PeerIdentity> peerList() const;
 
     bool canAttemptLink(const QString& peerId) const;
 

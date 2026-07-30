@@ -24,7 +24,6 @@
 namespace tmc {
 
 class ApplicationController;
-class PacketDispatcher;
 class SessionPacketHandlers;
 class VoiceSession;
 
@@ -120,7 +119,6 @@ private:
     ApplicationController& app_;
     ConnectionPolicy policy_;
     std::unique_ptr<ConnectionManager> connections_;
-    std::unique_ptr<PacketDispatcher> packetDispatcher_;
     std::unique_ptr<SessionPacketHandlers> packetHandlers_;
     MeshCoordinator mesh_;
     SignalingRouter router_;

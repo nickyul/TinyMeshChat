@@ -11,8 +11,6 @@ namespace tmc {
 class ConnectionManager;
 class MeshCoordinator;
 class MessagingService;
-class PacketDispatcher;
-struct PacketContext;
 class SignalingRouter;
 class VoiceSession;
 
@@ -42,16 +40,16 @@ public:
                           SignalingRouter& router, MessagingService& messaging,
                           VoiceSession& voice, ConnectionPolicy policy, Callbacks callbacks);
 
-    void registerWith(PacketDispatcher& dispatcher);
+    bool handle(const QString& connectionId, const Packet& packet);
 
 private:
-    void handleMembership(const PacketContext& context, const Packet& packet);
-    void handleMessaging(const PacketContext& context, const Packet& packet);
-    void handleVoice(const PacketContext& context, const Packet& packet);
-    void handleRouting(const PacketContext& context, const Packet& packet);
-    void handleMeshSignaling(const PacketContext& context, const Packet& packet);
-    void handleSessionSignaling(const PacketContext& context, const Packet& packet);
-    void handleHeartbeat(const PacketContext& context, const Packet& packet);
+    void handleMembership(const QString& connectionId, const Packet& packet);
+    void handleMessaging(const QString& connectionId, const Packet& packet);
+    void handleVoice(const Packet& packet);
+    void handleRouting(const QString& connectionId, const Packet& packet);
+    void handleMeshSignaling(const QString& connectionId, const Packet& packet);
+    void handleSessionSignaling(const QString& connectionId, const Packet& packet);
+    void handleHeartbeat(const QString& connectionId, const Packet& packet);
 
     ConnectionManager& connections_;
     MeshCoordinator& mesh_;

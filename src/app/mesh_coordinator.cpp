@@ -1,22 +1,9 @@
 #include "tmc/app/mesh_coordinator.h"
 
-#include <QJsonObject>
 #include <QRandomGenerator>
 #include <QTimer>
 
 namespace tmc {
-
-namespace {
-
-QJsonObject identityJson(const PeerIdentity& identity) {
-    return {{"id", identity.peerId}, {"name", identity.displayName}};
-}
-
-PeerIdentity identityFromJson(const QJsonObject& object) {
-    return {object.value("id").toString(), object.value("name").toString()};
-}
-
-} // namespace
 
 MeshCoordinator::MeshCoordinator(ConnectionPolicy policy, QObject* parent)
     : QObject(parent), policy_(policy) {
@@ -111,14 +98,14 @@ bool MeshCoordinator::forgetPeer(const QString& peerId) {
     return true;
 }
 
-bool MeshCoordinator::ingestPeerList(const QJsonArray& peers, const QString& localPeerId) {
+bool MeshCoordinator::ingestPeerList(const QList<PeerIdentity>& peers,
+                                     const QString& localPeerId) {
     bool changed = false;
     QSet<QString> knownIds;
     for (const auto& known : peers_.peers()) {
         knownIds.insert(known.peerId);
     }
-    for (const auto& value : peers) {
-        const auto candidate = identityFromJson(value.toObject());
+    for (const auto& candidate : peers) {
         if (candidate.peerId == localPeerId) {
             continue;
         }
@@ -136,12 +123,8 @@ bool MeshCoordinator::ingestPeerList(const QJsonArray& peers, const QString& loc
     return changed;
 }
 
-QJsonArray MeshCoordinator::peerList() const {
-    QJsonArray result;
-    for (const auto& peer : peers_.peers()) {
-        result.append(identityJson(peer));
-    }
-    return result;
+QList<PeerIdentity> MeshCoordinator::peerList() const {
+    return peers_.peers();
 }
 
 bool MeshCoordinator::canAttemptLink(const QString& peerId) const {

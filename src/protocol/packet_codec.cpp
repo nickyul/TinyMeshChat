@@ -3,7 +3,11 @@
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
+
+#include <type_traits>
 
 namespace tmc {
 
@@ -17,6 +21,10 @@ bool validTimestamp(const QJsonValue& value) {
     return value.isString() && QDateTime::fromString(value.toString(), Qt::ISODateWithMs).isValid();
 }
 
+QJsonObject identityToJson(const PeerIdentity& identity) {
+    return {{"id", identity.peerId}, {"name", identity.displayName}};
+}
+
 Result<PeerIdentity> decodeIdentity(const QJsonValue& value) {
     if (!value.isObject()) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
@@ -28,6 +36,93 @@ Result<PeerIdentity> decodeIdentity(const QJsonValue& value) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
     }
     return Result<PeerIdentity>::success(identity);
+}
+
+bool payloadMatchesType(PacketType type, const PacketPayload& payload) {
+    switch (type) {
+    case PacketType::PeerHello:
+        return std::holds_alternative<HelloPayload>(payload);
+    case PacketType::PeerSnapshot:
+        return std::holds_alternative<PeerSnapshotPayload>(payload);
+    case PacketType::PeerAnnounce:
+        return std::holds_alternative<PeerAnnouncePayload>(payload);
+    case PacketType::PeerLeave:
+        return std::holds_alternative<PeerLeavePayload>(payload);
+    case PacketType::ChatMessage:
+        return std::holds_alternative<ChatMessagePayload>(payload);
+    case PacketType::ChatAck:
+        return std::holds_alternative<ChatAckPayload>(payload);
+    case PacketType::VoiceState:
+        return std::holds_alternative<VoiceStatePayload>(payload);
+    case PacketType::VoiceQuality:
+        return std::holds_alternative<VoiceQualityPayload>(payload);
+    case PacketType::RouteRequest:
+    case PacketType::RouteReply:
+        return std::holds_alternative<RoutePayload>(payload);
+    case PacketType::LinkOffer:
+    case PacketType::LinkAnswer:
+        return std::holds_alternative<LinkSignalingPayload>(payload);
+    case PacketType::SessionOffer:
+    case PacketType::SessionAnswer:
+        return std::holds_alternative<SessionSignalingPayload>(payload);
+    case PacketType::Ping:
+    case PacketType::Pong:
+        return std::holds_alternative<HeartbeatPayload>(payload);
+    }
+    return false;
+}
+
+QJsonObject payloadToJson(const PacketPayload& payload) {
+    return std::visit(
+        [](const auto& value) -> QJsonObject {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, HelloPayload>) {
+                return {{"display_name", value.displayName}};
+            } else if constexpr (std::is_same_v<T, PeerSnapshotPayload>) {
+                QJsonArray peers;
+                for (const auto& peer : value.peers) {
+                    peers.append(identityToJson(peer));
+                }
+                return {{"revision", value.revision}, {"peers", peers}};
+            } else if constexpr (std::is_same_v<T, PeerAnnouncePayload>) {
+                return {{"peer", identityToJson(value.peer)},
+                        {"epoch", value.epoch},
+                        {"hops", value.hops}};
+            } else if constexpr (std::is_same_v<T, PeerLeavePayload>) {
+                return {{"reason", value.reason}};
+            } else if constexpr (std::is_same_v<T, ChatMessagePayload>) {
+                return {{"message_id", value.messageId},
+                        {"text", value.text},
+                        {"logical_clock", value.logicalClock}};
+            } else if constexpr (std::is_same_v<T, ChatAckPayload>) {
+                return {{"message_id", value.messageId}};
+            } else if constexpr (std::is_same_v<T, VoiceStatePayload>) {
+                return {{"joined", value.joined}, {"muted", value.muted}};
+            } else if constexpr (std::is_same_v<T, VoiceQualityPayload>) {
+                return {{"loss_percent", value.packetLossPercent},
+                        {"jitter_ms", value.jitterMs},
+                        {"buffer_ms", value.bufferMs}};
+            } else if constexpr (std::is_same_v<T, RoutePayload>) {
+                return {{"request", value.requestId}, {"hops", value.hops}};
+            } else if constexpr (std::is_same_v<T, LinkSignalingPayload>) {
+                return {{"link", value.connectionId},
+                        {"generation", static_cast<qint64>(value.generation)},
+                        {"sdp", value.sdp}};
+            } else if constexpr (std::is_same_v<T, SessionSignalingPayload>) {
+                QJsonObject result{{"link", value.connectionId},
+                                   {"negotiation", static_cast<qint64>(value.negotiation)},
+                                   {"sdp", value.sdp}};
+                if (!value.reason.isEmpty()) {
+                    result.insert("reason", value.reason);
+                }
+                return result;
+            } else {
+                static_assert(std::is_same_v<T, HeartbeatPayload>);
+                return {{"nonce", value.nonce},
+                        {"sent_at", value.sentAt.toUTC().toString(Qt::ISODateWithMs)}};
+            }
+        },
+        payload);
 }
 
 Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload) {
@@ -44,18 +139,21 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
         if (!payload.value("peers").isArray()) {
             break;
         }
-        const auto peers = payload.value("peers").toArray();
+        const auto peersJson = payload.value("peers").toArray();
         const auto revision = payload.value("revision").toInteger(-1);
-        if (peers.isEmpty() || peers.size() > 16 || revision < 0) {
+        if (peersJson.isEmpty() || peersJson.size() > 16 || revision < 0) {
             break;
         }
+        QList<PeerIdentity> peers;
+        peers.reserve(peersJson.size());
         QSet<QString> unique;
-        for (const auto& peer : peers) {
+        for (const auto& peer : peersJson) {
             const auto decoded = decodeIdentity(peer);
             if (!decoded || unique.contains(decoded.value().peerId)) {
                 return Result<PacketPayload>::failure("Invalid peer.snapshot payload");
             }
             unique.insert(decoded.value().peerId);
+            peers.append(decoded.value());
         }
         return Result<PacketPayload>::success(PeerSnapshotPayload{revision, peers});
     }
@@ -157,17 +255,18 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
 
 } // namespace
 
-const QSet<QString>& PacketCodec::knownTypes() {
-    static const QSet<QString> types{
-        "peer.hello",     "peer.snapshot",  "peer.announce",
-        "peer.leave",     "chat.message",   "chat.ack",     "voice.state",
-        "voice.quality",
-        "route.request",  "route.reply",    "link.offer",   "link.answer",
-        "session.offer",  "session.answer", "ping",         "pong"};
-    return types;
-}
-
-QByteArray PacketCodec::encode(const Packet& packet) {
+Result<QByteArray> PacketCodec::encode(const Packet& packet) {
+    if (!payloadMatchesType(packet.type, packet.payload)) {
+        return Result<QByteArray>::failure("Packet type does not match its payload");
+    }
+    if (!isCanonicalUuid(packet.packetId) || !isCanonicalUuid(packet.meshId) ||
+        !isCanonicalUuid(packet.senderId) || !packet.createdAt.isValid()) {
+        return Result<QByteArray>::failure("Packet contains invalid fields");
+    }
+    if ((!packet.targetId.isEmpty() && !isCanonicalUuid(packet.targetId)) ||
+        packet.ttl < 0 || packet.ttl > 16) {
+        return Result<QByteArray>::failure("Packet contains invalid routing fields");
+    }
     QJsonObject object{{"v", 0},
                        {"type", toString(packet.type)},
                        {"id", packet.packetId},
@@ -181,11 +280,14 @@ QByteArray PacketCodec::encode(const Packet& packet) {
     if (packet.ttl > 0) {
         object.insert("ttl", packet.ttl);
     }
-    return QJsonDocument(object).toJson(QJsonDocument::Compact);
+    auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (bytes.size() > MaxBytes) {
+        return Result<QByteArray>::failure("Packet exceeds 64 KiB");
+    }
+    return Result<QByteArray>::success(std::move(bytes));
 }
 
-Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expectedMesh,
-                                   const QSet<QString>& allowedSenders) {
+Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expectedMesh) {
     if (bytes.size() > MaxBytes) {
         return Result<Packet>::failure("Packet exceeds 64 KiB");
     }
@@ -204,30 +306,25 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
         !object.value("body").isObject()) {
         return Result<Packet>::failure("Packet contains invalid fields");
     }
-    Packet packet{*type,
-                  object.value("id").toString(),
-                  object.value("mesh").toString(),
-                  object.value("from").toString(),
-                  QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs),
-                  EmptyPayload{},
-                  object.value("to").toString(),
-                  object.value("ttl").toInt(0)};
-    if ((!packet.targetId.isEmpty() && !isCanonicalUuid(packet.targetId)) ||
-        packet.ttl < 0 || packet.ttl > 16) {
+    const auto packetId = object.value("id").toString();
+    const auto meshId = object.value("mesh").toString();
+    const auto senderId = object.value("from").toString();
+    const auto createdAt =
+        QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs);
+    const auto targetId = object.value("to").toString();
+    const auto ttl = object.value("ttl").toInt(0);
+    if ((!targetId.isEmpty() && !isCanonicalUuid(targetId)) || ttl < 0 || ttl > 16) {
         return Result<Packet>::failure("Packet contains invalid routing fields");
     }
-    if (!expectedMesh.isEmpty() && packet.meshId != expectedMesh) {
+    if (!expectedMesh.isEmpty() && meshId != expectedMesh) {
         return Result<Packet>::failure("Packet belongs to another mesh");
     }
-    if (!allowedSenders.isEmpty() && !allowedSenders.contains(packet.senderId)) {
-        return Result<Packet>::failure("Packet sender is not a mesh participant");
-    }
-    const auto payload = decodePayload(packet.type, object.value("body").toObject());
+    const auto payload = decodePayload(*type, object.value("body").toObject());
     if (!payload) {
         return Result<Packet>::failure(payload.error());
     }
-    packet.payload = payload.value();
-    return Result<Packet>::success(packet);
+    return Result<Packet>::success(
+        {*type, packetId, meshId, senderId, createdAt, payload.value(), targetId, ttl});
 }
 
 } // namespace tmc

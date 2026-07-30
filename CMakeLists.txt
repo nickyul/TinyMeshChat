@@ -34,7 +34,6 @@ target_sources(tmc_core
         src/identity/identity_manager.cpp
         src/protocol/packet.cpp
         src/protocol/packet_codec.cpp
-        src/protocol/packet_dispatcher.cpp
         src/messaging/chat_message.cpp
         src/messaging/delivery_tracker.cpp
     PUBLIC
@@ -50,7 +49,6 @@ target_sources(tmc_core
             include/tmc/identity/peer_identity.h
             include/tmc/protocol/packet.h
             include/tmc/protocol/packet_codec.h
-            include/tmc/protocol/packet_dispatcher.h
             include/tmc/messaging/chat_message.h
             include/tmc/messaging/delivery_tracker.h
 )

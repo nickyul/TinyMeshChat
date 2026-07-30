@@ -4,7 +4,6 @@
 #include "tmc/protocol/packet.h"
 
 #include <QByteArray>
-#include <QSet>
 
 namespace tmc {
 
@@ -12,10 +11,8 @@ class PacketCodec {
 public:
     static constexpr qsizetype MaxBytes = 64 * 1024;
 
-    static QByteArray encode(const Packet&);
-    static Result<Packet> decode(const QByteArray&, const QString& expectedMesh = {},
-                                 const QSet<QString>& allowedSenders = {});
-    static const QSet<QString>& knownTypes();
+    static Result<QByteArray> encode(const Packet&);
+    static Result<Packet> decode(const QByteArray&, const QString& expectedMesh = {});
 };
 
 } // namespace tmc

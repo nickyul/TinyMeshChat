@@ -7,7 +7,6 @@
 #include "tmc/core/uuid.h"
 #include "tmc/protocol/packet.h"
 #include "tmc/protocol/packet_codec.h"
-#include "tmc/protocol/packet_dispatcher.h"
 #include "tmc/signaling/invitation_codec.h"
 
 #include <QDateTime>
@@ -33,7 +32,6 @@ qint64 monotonicNs() {
 NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy policy, QObject* parent)
     : QObject(parent), app_(app), policy_(policy),
       connections_(std::make_unique<ConnectionManager>(app.config().stunServers, policy)),
-      packetDispatcher_(std::make_unique<PacketDispatcher>()),
       mesh_(policy), voice_(std::make_unique<VoiceSession>(app.config().audio)) {
     Q_ASSERT(policy_.isValid());
     qRegisterMetaType<ChatMessage>();
@@ -88,7 +86,6 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
         };
     packetHandlers_ = std::make_unique<SessionPacketHandlers>(
         *connections_, mesh_, router_, messaging_, *voice_, policy_, std::move(handlerCallbacks));
-    packetHandlers_->registerWith(*packetDispatcher_);
 
     connect(connections_.get(), &ConnectionManager::localDescriptionReady, this,
             &NetworkSession::emitSignaling);
@@ -493,7 +490,17 @@ Packet NetworkSession::basePacket(PacketType type, PacketPayload payload) const 
 }
 
 bool NetworkSession::sendPacket(const QString& connectionId, const Packet& packet) {
-    const auto bytes = PacketCodec::encode(packet);
+    const auto encoded = PacketCodec::encode(packet);
+    if (!encoded) {
+        Logger::instance().log(
+            QtWarningMsg, "protocol",
+            QString("encode_failed type=%1 connection=%2 target=%3 error=%4")
+                .arg(toString(packet.type), connectionId.left(8), packet.targetId.left(8),
+                     encoded.error()));
+        emit errorOccurred("Не удалось подготовить сетевой пакет: " + encoded.error());
+        return false;
+    }
+    const auto& bytes = encoded.value();
     const bool chatPacket =
         packet.type == PacketType::ChatMessage || packet.type == PacketType::ChatAck;
     const bool sent = chatPacket ? connections_->sendChat(connectionId, QString::fromUtf8(bytes))
@@ -541,7 +548,7 @@ void NetworkSession::receivePong(const QString& connectionId,
 void NetworkSession::handleIncoming(const QString& connectionId, const QString& text,
                                     bool chatChannel) {
     const auto connection = connections_->info(connectionId);
-    auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId(), {});
+    auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId());
     if (!decoded) {
         Logger::instance().log(QtWarningMsg, "protocol", decoded.error());
         emit errorOccurred("Получен некорректный сетевой пакет: " + decoded.error());
@@ -567,7 +574,7 @@ void NetworkSession::handleIncoming(const QString& connectionId, const QString& 
         emit errorOccurred("До завершения handshake разрешён только peer.hello.");
         return;
     }
-    if (!packetDispatcher_->dispatch({connectionId}, decoded.value())) {
+    if (!packetHandlers_->handle(connectionId, decoded.value())) {
         emit errorOccurred("Для типа пакета не зарегистрирован обработчик: " +
                            toString(decoded.value().type));
     }
