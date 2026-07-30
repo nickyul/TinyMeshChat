@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QQueue>
 #include <QSet>
 #include <QString>
 
@@ -8,15 +9,21 @@ namespace tmc {
 
 class DeliveryTracker {
 public:
-    void track(const QString&, const QSet<QString>&);
-    bool acknowledge(const QString&, const QString&);
+    void clear();
+    void track(const QString& messageId, const QSet<QString>& expectedPeers);
+    bool acknowledge(const QString& messageId, const QString& peerId);
 
-    int deliveredCount(const QString&) const;
-    int expectedCount(const QString&) const;
-    bool fullyDelivered(const QString&) const;
+    int deliveredCount(const QString& messageId) const;
+    int expectedCount(const QString& messageId) const;
 
 private:
-    QHash<QString, QSet<QString>> expected_, acks_;
+    struct DeliveryState {
+        QSet<QString> expectedPeers;
+        QSet<QString> acknowledgedPeers;
+    };
+
+    QHash<QString, DeliveryState> states_;
+    QQueue<QString> insertionOrder_;
 };
 
 } // namespace tmc

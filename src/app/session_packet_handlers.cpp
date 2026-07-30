@@ -192,21 +192,22 @@ void SessionPacketHandlers::handleRouting(const PacketContext& context, const Pa
 void SessionPacketHandlers::handleMessaging(const PacketContext& context, const Packet& packet) {
     if (packet.type == PacketType::ChatMessage) {
         const auto& payload = std::get<ChatMessagePayload>(packet.payload);
-        auto received = messaging_.receiveMessage(
-            packet, callbacks_.makePacket(PacketType::ChatAck, ChatAckPayload{payload.messageId}));
+        auto received = messaging_.receiveMessage(packet);
         if (!received) {
             callbacks_.errorOccurred(received.error());
             return;
         }
-        if (received.value().message) {
-            callbacks_.messageReceived(*received.value().message, false);
+        if (received.value()) {
+            callbacks_.messageReceived(*received.value(), false);
         }
-        callbacks_.sendPacket(context.connectionId, received.value().acknowledgement);
+        callbacks_.sendPacket(
+            context.connectionId,
+            callbacks_.makePacket(PacketType::ChatAck, ChatAckPayload{payload.messageId}));
         return;
     }
 
     const auto& payload = std::get<ChatAckPayload>(packet.payload);
-    if (messaging_.receiveAcknowledgement(packet)) {
+    if (messaging_.receiveAcknowledgement(payload.messageId, packet.senderId)) {
         const auto counts = messaging_.deliveryCounts(payload.messageId);
         callbacks_.deliveryChanged(payload.messageId, counts.first, counts.second);
     }

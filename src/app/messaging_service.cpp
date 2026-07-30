@@ -2,14 +2,22 @@
 
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
-#include "tmc/protocol/packet_codec.h"
 
 #include <QDateTime>
 
+#include <limits>
+
 namespace tmc {
 
+namespace {
+
+constexpr qsizetype MaxSeenMessages = 4096;
+constexpr qint64 MaxLogicalClock = std::numeric_limits<qint64>::max();
+
+} // namespace
+
 void MessagingService::clear() {
-    delivery_ = {};
+    delivery_.clear();
     logicalClock_ = 0;
     seenMessageIds_.clear();
     seenMessageOrder_.clear();
@@ -18,7 +26,7 @@ void MessagingService::clear() {
 Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
                                                             const QString& meshId,
                                                             const QString& senderId,
-                                                            const QSet<QString>& targets) {
+                                                            const QSet<QString>& expectedPeers) {
     const auto normalized = text.trimmed();
     if (normalized.isEmpty()) {
         return Result<OutgoingChatMessage>::failure("Сообщение пустое.");
@@ -27,42 +35,56 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
         return Result<OutgoingChatMessage>::failure(
             "Максимальная длина сообщения — 4096 символов.");
     }
+    if (!isCanonicalUuid(meshId) || !isCanonicalUuid(senderId)) {
+        return Result<OutgoingChatMessage>::failure(
+            "Некорректные идентификаторы сообщения.");
+    }
+    if (logicalClock_ == MaxLogicalClock) {
+        return Result<OutgoingChatMessage>::failure(
+            "Исчерпан диапазон логических часов.");
+    }
 
     const auto now = QDateTime::currentDateTimeUtc();
     ChatMessage message{createUuid(), senderId, normalized, ++logicalClock_, now};
+    if (!message.isValid()) {
+        return Result<OutgoingChatMessage>::failure("Не удалось создать сообщение.");
+    }
     rememberMessage(message.messageId);
-    delivery_.track(message.messageId, targets);
+    delivery_.track(message.messageId, expectedPeers);
     Packet packet{PacketType::ChatMessage,
                   createUuid(),
                   meshId,
                   senderId,
                   now,
                   ChatMessagePayload{message.messageId, message.text, message.logicalClock}};
-    return Result<OutgoingChatMessage>::success(
-        {message, packet, static_cast<int>(targets.size())});
+    return Result<OutgoingChatMessage>::success({message, packet});
 }
 
-Result<IncomingChatMessage> MessagingService::receiveMessage(const Packet& packet,
-                                                             const Packet& acknowledgement) {
+Result<std::optional<ChatMessage>> MessagingService::receiveMessage(const Packet& packet) {
     const auto& payload = std::get<ChatMessagePayload>(packet.payload);
     const auto remoteClock = payload.logicalClock;
-    logicalClock_ = qMax(logicalClock_, remoteClock) + 1;
     ChatMessage message{payload.messageId, packet.senderId, payload.text, remoteClock,
                         packet.createdAt};
     if (!message.isValid()) {
-        return Result<IncomingChatMessage>::failure("Получено некорректное сообщение.");
+        return Result<std::optional<ChatMessage>>::failure(
+            "Получено некорректное сообщение.");
     }
-    IncomingChatMessage result;
-    if (rememberMessage(message.messageId)) {
-        result.message = message;
+    if (seenMessageIds_.contains(message.messageId)) {
+        return Result<std::optional<ChatMessage>>::success(std::nullopt);
     }
-    result.acknowledgement = acknowledgement;
-    return Result<IncomingChatMessage>::success(result);
+    const auto currentClock = qMax(logicalClock_, remoteClock);
+    if (currentClock == MaxLogicalClock) {
+        return Result<std::optional<ChatMessage>>::failure(
+            "Исчерпан диапазон логических часов.");
+    }
+    logicalClock_ = currentClock + 1;
+    rememberMessage(message.messageId);
+    return Result<std::optional<ChatMessage>>::success(std::move(message));
 }
 
-bool MessagingService::receiveAcknowledgement(const Packet& packet) {
-    return delivery_.acknowledge(std::get<ChatAckPayload>(packet.payload).messageId,
-                                 packet.senderId);
+bool MessagingService::receiveAcknowledgement(const QString& messageId,
+                                              const QString& peerId) {
+    return delivery_.acknowledge(messageId, peerId);
 }
 
 QPair<int, int> MessagingService::deliveryCounts(const QString& messageId) const {
@@ -73,7 +95,6 @@ bool MessagingService::rememberMessage(const QString& messageId) {
     if (seenMessageIds_.contains(messageId)) {
         return false;
     }
-    constexpr qsizetype MaxSeenMessages = 4096;
     if (seenMessageOrder_.size() >= MaxSeenMessages) {
         seenMessageIds_.remove(seenMessageOrder_.dequeue());
     }

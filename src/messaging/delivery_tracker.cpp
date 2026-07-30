@@ -2,35 +2,50 @@
 
 namespace tmc {
 
-void DeliveryTracker::track(const QString& m, const QSet<QString>& p) {
-    if (!expected_.contains(m) && expected_.size() >= 4096) {
-        const auto oldest = expected_.constBegin().key();
-        expected_.remove(oldest);
-        acks_.remove(oldest);
-    }
-    expected_[m].unite(p);
-    acks_[m];
+namespace {
+
+constexpr qsizetype MaxTrackedMessages = 4096;
+
+} // namespace
+
+void DeliveryTracker::clear() {
+    states_.clear();
+    insertionOrder_.clear();
 }
 
-bool DeliveryTracker::acknowledge(const QString& m, const QString& p) {
-    if (!expected_.contains(m) || !expected_[m].contains(p)) {
+void DeliveryTracker::track(const QString& messageId,
+                            const QSet<QString>& expectedPeers) {
+    const auto existing = states_.find(messageId);
+    if (existing != states_.end()) {
+        existing->expectedPeers.unite(expectedPeers);
+        return;
+    }
+
+    if (states_.size() >= MaxTrackedMessages) {
+        states_.remove(insertionOrder_.dequeue());
+    }
+    states_.insert(messageId, DeliveryState{expectedPeers, {}});
+    insertionOrder_.enqueue(messageId);
+}
+
+bool DeliveryTracker::acknowledge(const QString& messageId, const QString& peerId) {
+    const auto state = states_.find(messageId);
+    if (state == states_.end() || !state->expectedPeers.contains(peerId) ||
+        state->acknowledgedPeers.contains(peerId)) {
         return false;
     }
-    auto n = acks_[m].size();
-    acks_[m].insert(p);
-    return acks_[m].size() != n;
+    state->acknowledgedPeers.insert(peerId);
+    return true;
 }
 
-int DeliveryTracker::deliveredCount(const QString& m) const {
-    return acks_.value(m).size();
+int DeliveryTracker::deliveredCount(const QString& messageId) const {
+    const auto state = states_.constFind(messageId);
+    return state == states_.cend() ? 0 : state->acknowledgedPeers.size();
 }
 
-int DeliveryTracker::expectedCount(const QString& m) const {
-    return expected_.value(m).size();
-}
-
-bool DeliveryTracker::fullyDelivered(const QString& m) const {
-    return expected_.contains(m) && acks_.value(m) == expected_.value(m);
+int DeliveryTracker::expectedCount(const QString& messageId) const {
+    const auto state = states_.constFind(messageId);
+    return state == states_.cend() ? 0 : state->expectedPeers.size();
 }
 
 } // namespace tmc

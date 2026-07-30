@@ -725,7 +725,7 @@ Result<void> NetworkSession::sendMessage(const QString& text) {
     }
     emit messageReceived(outgoing.value().message, true);
     emit deliveryChanged(outgoing.value().message.messageId, 0,
-                         outgoing.value().expectedDeliveries);
+                         static_cast<int>(targets.size()));
     for (const auto& connectionId : connections_->openConnectionIds()) {
         sendPacket(connectionId, outgoing.value().packet);
     }
