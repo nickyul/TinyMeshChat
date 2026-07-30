@@ -16,7 +16,11 @@ namespace {
 constexpr quint8 CompactVersion = 0;
 
 bool writeUuid(QDataStream& stream, const QString& text) {
-    const auto bytes = QUuid::fromString(text).toRfc4122();
+    const auto id = QUuid::fromString(text);
+    if (id.isNull()) {
+        return false;
+    }
+    const auto bytes = id.toRfc4122();
     return bytes.size() == 16 &&
            stream.writeRawData(bytes.constData(), bytes.size()) == bytes.size();
 }
@@ -34,7 +38,22 @@ bool readUuid(QDataStream& stream, QString& text) {
     return true;
 }
 
+Result<Invitation> validate(Invitation invitation) {
+    const bool offer = invitation.kind == Invitation::Kind::Offer;
+    if ((offer && QUuid::fromString(invitation.meshId).isNull()) ||
+        QUuid::fromString(invitation.connectionId).isNull() || invitation.sdp.isEmpty() ||
+        invitation.sdp.toUtf8().size() > InvitationCodec::MaxBytes) {
+        return Result<Invitation>::failure("Signaling payload has missing or invalid fields");
+    }
+    return Result<Invitation>::success(std::move(invitation));
+}
+
 Result<QByteArray> encodeCompact(const Invitation& invitation) {
+    const auto validated = validate(invitation);
+    if (!validated) {
+        return Result<QByteArray>::failure(validated.error());
+    }
+
     auto description = SdpDescriptionCodec::pack(invitation.sdp);
     if (!description) {
         return Result<QByteArray>::failure(description.error());
@@ -55,16 +74,6 @@ Result<QByteArray> encodeCompact(const Invitation& invitation) {
         return Result<QByteArray>::failure("Failed to encode compact signaling payload");
     }
     return Result<QByteArray>::success(std::move(raw));
-}
-
-Result<Invitation> validate(Invitation invitation) {
-    const bool offer = invitation.kind == Invitation::Kind::Offer;
-    if ((offer && QUuid::fromString(invitation.meshId).isNull()) ||
-        QUuid::fromString(invitation.connectionId).isNull() || invitation.sdp.isEmpty() ||
-        invitation.sdp.toUtf8().size() > InvitationCodec::MaxBytes) {
-        return Result<Invitation>::failure("Signaling payload has missing or invalid fields");
-    }
-    return Result<Invitation>::success(std::move(invitation));
 }
 
 Result<Invitation> decodeCompact(const QByteArray& raw) {

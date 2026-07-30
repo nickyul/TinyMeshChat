@@ -6,7 +6,86 @@
 #include <QJsonObject>
 #include <QSaveFile>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+
 namespace tmc {
+
+namespace {
+
+constexpr qsizetype MaxStunUriLength = 512;
+
+Result<QStringList> normalizeStunServers(const QStringList& servers) {
+    if (servers.isEmpty()) {
+        return Result<QStringList>::failure("At least one STUN URI is required");
+    }
+
+    QStringList normalized;
+    normalized.reserve(servers.size());
+    for (const auto& server : servers) {
+        const auto uri = server.trimmed();
+        if (!uri.startsWith("stun:") || uri.size() <= QString("stun:").size() ||
+            uri.size() > MaxStunUriLength ||
+            std::any_of(uri.cbegin(), uri.cend(), [](QChar character) {
+                return character.isSpace();
+            })) {
+            return Result<QStringList>::failure("Every ICE server must be a valid stun: URI");
+        }
+        if (normalized.contains(uri)) {
+            return Result<QStringList>::failure("STUN URIs must not contain duplicates");
+        }
+        normalized.append(uri);
+    }
+    return Result<QStringList>::success(std::move(normalized));
+}
+
+Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
+    AudioPreferences preferences;
+    if (!root.contains("audio")) {
+        return Result<AudioPreferences>::success(std::move(preferences));
+    }
+    if (!root.value("audio").isObject()) {
+        return Result<AudioPreferences>::failure("audio must be an object");
+    }
+
+    const auto audio = root.value("audio").toObject();
+    constexpr std::array fields{
+        std::pair{"capture_device", QJsonValue::String},
+        std::pair{"playback_device", QJsonValue::String},
+        std::pair{"echo_cancellation", QJsonValue::Bool},
+        std::pair{"noise_suppression", QJsonValue::Bool},
+        std::pair{"automatic_gain_control", QJsonValue::Bool},
+        std::pair{"output_volume", QJsonValue::Double},
+        std::pair{"quality_kbps", QJsonValue::Double},
+    };
+    for (const auto& [name, type] : fields) {
+        const auto key = QString::fromLatin1(name);
+        if (audio.contains(key) && audio.value(key).type() != type) {
+            return Result<AudioPreferences>::failure("audio." + key + " has an invalid type");
+        }
+    }
+
+    preferences.captureDevice = audio.value("capture_device").toString();
+    preferences.playbackDevice = audio.value("playback_device").toString();
+    preferences.echoCancellation = audio.value("echo_cancellation").toBool(false);
+    preferences.noiseSuppression = audio.value("noise_suppression").toBool(true);
+    preferences.automaticGainControl = audio.value("automatic_gain_control").toBool(true);
+    const auto outputVolume = audio.value("output_volume").toDouble(100);
+    const auto qualityKbps = audio.value("quality_kbps").toDouble(48);
+    if (outputVolume != std::floor(outputVolume) || outputVolume < 0 || outputVolume > 200 ||
+        (qualityKbps != 24 && qualityKbps != 32 && qualityKbps != 48)) {
+        return Result<AudioPreferences>::failure("Invalid audio settings");
+    }
+    preferences.outputVolume = static_cast<int>(outputVolume);
+    preferences.qualityKbps = static_cast<int>(qualityKbps);
+    if (!preferences.isValid()) {
+        return Result<AudioPreferences>::failure("Invalid audio settings");
+    }
+    return Result<AudioPreferences>::success(std::move(preferences));
+}
+
+} // namespace
 
 bool AudioPreferences::isValid() const {
     return outputVolume >= 0 && outputVolume <= 200 &&
@@ -20,61 +99,53 @@ Result<AppConfig> AppConfig::load(const QString& path) {
     }
     QJsonParseError e;
     const auto d = QJsonDocument::fromJson(f.readAll(), &e);
-    if (e.error != QJsonParseError::NoError || !d.isObject()) {
+    if (e.error != QJsonParseError::NoError) {
         return Result<AppConfig>::failure("Invalid configuration JSON: " + e.errorString());
     }
+    if (!d.isObject()) {
+        return Result<AppConfig>::failure("Configuration root must be an object");
+    }
+
     AppConfig c;
     const auto root = d.object();
-    auto serverValue = root.value("stun_servers");
-    if (!serverValue.isArray()) {
-        serverValue = root.value("ice").toObject().value("stun_servers");
-    }
+    const auto serverValue = root.value("stun_servers");
     if (!serverValue.isArray()) {
         return Result<AppConfig>::failure("stun_servers must be an array");
     }
-    c.stunServers.clear();
+
+    QStringList servers;
     for (const auto& value : serverValue.toArray()) {
         if (!value.isString()) {
-            continue;
+            return Result<AppConfig>::failure("Every stun_servers item must be a string");
         }
-        const auto server = value.toString().trimmed();
-        if (server.startsWith("stun:") && server.size() <= 512 && !c.stunServers.contains(server)) {
-            c.stunServers.append(server);
-        }
+        servers.append(value.toString());
     }
-    if (c.stunServers.isEmpty()) {
-        return Result<AppConfig>::failure("At least one STUN URI is required");
+    auto normalizedServers = normalizeStunServers(servers);
+    if (!normalizedServers) {
+        return Result<AppConfig>::failure(normalizedServers.error());
     }
-    const auto audio = root.value("audio").toObject();
-    if (!audio.isEmpty()) {
-        c.audio.captureDevice = audio.value("capture_device").toString();
-        c.audio.playbackDevice = audio.value("playback_device").toString();
-        c.audio.echoCancellation = audio.value("echo_cancellation").toBool(false);
-        c.audio.noiseSuppression = audio.value("noise_suppression").toBool(true);
-        c.audio.automaticGainControl = audio.value("automatic_gain_control").toBool(true);
-        c.audio.outputVolume = audio.value("output_volume").toInt(100);
-        c.audio.qualityKbps = audio.value("quality_kbps").toInt(48);
-        if (!c.audio.isValid()) {
-            return Result<AppConfig>::failure("Invalid audio settings");
-        }
+    c.stunServers = std::move(normalizedServers.value());
+
+    auto audio = parseAudioPreferences(root);
+    if (!audio) {
+        return Result<AppConfig>::failure(audio.error());
     }
-    return Result<AppConfig>::success(c);
+    c.audio = std::move(audio.value());
+    return Result<AppConfig>::success(std::move(c));
 }
 
 Result<void> AppConfig::save(const QString& path) const {
-    if (stunServers.isEmpty()) {
-        return Result<void>::failure("At least one STUN URI is required");
+    auto normalizedServers = normalizeStunServers(stunServers);
+    if (!normalizedServers) {
+        return Result<void>::failure(normalizedServers.error());
     }
     if (!audio.isValid()) {
         return Result<void>::failure("Audio settings are invalid");
     }
+
     QJsonArray servers;
-    for (const auto& server : stunServers) {
-        const auto normalized = server.trimmed();
-        if (!normalized.startsWith("stun:") || normalized.size() > 512) {
-            return Result<void>::failure("Every ICE server must be a valid stun: URI");
-        }
-        servers.append(normalized);
+    for (const auto& server : normalizedServers.value()) {
+        servers.append(server);
     }
     const QJsonObject audioObject{{"capture_device", audio.captureDevice},
                                   {"playback_device", audio.playbackDevice},

@@ -44,15 +44,14 @@ struct Logger::State {
     void run(std::stop_token token) {
         QFile file;
         QString openedPath;
-        while (!token.stop_requested()) {
+        while (true) {
             std::vector<QString> lines;
             QString requestedPath;
+            bool stopRequested;
             {
                 std::unique_lock lock(mutex);
                 condition.wait(lock, token, [this] { return !pending.empty() || pathChanged; });
-                if (token.stop_requested()) {
-                    break;
-                }
+                stopRequested = token.stop_requested();
                 requestedPath = filePath;
                 pathChanged = false;
                 while (!pending.empty()) {
@@ -64,26 +63,31 @@ struct Logger::State {
             if (requestedPath != openedPath) {
                 file.close();
                 openedPath = requestedPath;
-                if (!openedPath.isEmpty()) {
-                    file.setFileName(openedPath);
-                    file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
-                }
-            }
-            if (!file.isOpen()) {
-                continue;
-            }
-            if (file.size() >= MaxLogBytes) {
-                file.close();
-                QFile::remove(openedPath + ".1");
-                QFile::rename(openedPath, openedPath + ".1");
                 file.setFileName(openedPath);
-                file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
             }
-            for (const auto& line : lines) {
-                file.write(line.toUtf8());
-                file.write("\n");
+
+            if (!openedPath.isEmpty() && !file.isOpen()) {
+                file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
             }
-            file.flush();
+
+            if (file.isOpen()) {
+                if (file.size() >= MaxLogBytes) {
+                    file.close();
+                    QFile::remove(openedPath + ".1");
+                    QFile::rename(openedPath, openedPath + ".1");
+                    file.setFileName(openedPath);
+                    file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
+                }
+                for (const auto& line : lines) {
+                    file.write(line.toUtf8());
+                    file.write("\n");
+                }
+                file.flush();
+            }
+
+            if (stopRequested) {
+                break;
+            }
         }
     }
 
