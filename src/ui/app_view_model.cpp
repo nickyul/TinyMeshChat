@@ -632,9 +632,18 @@ void AppViewModel::updateAudioPreferences(const QString& captureDevice,
     if (session_) {
         const auto applied = session_->applyAudioPreferences(preferences);
         if (!applied) {
-            controller_.updateAudioPreferences(previous);
-            session_->applyAudioPreferences(previous);
-            reportError(applied.error());
+            auto error = applied.error();
+            const auto configRollback = controller_.updateAudioPreferences(previous);
+            if (!configRollback) {
+                error += "\nНе удалось восстановить сохранённые настройки: " +
+                         configRollback.error();
+            }
+            const auto audioRollback = session_->applyAudioPreferences(previous);
+            if (!audioRollback) {
+                error += "\nНе удалось восстановить состояние аудиодвижка: " +
+                         audioRollback.error();
+            }
+            reportError(error);
             return;
         }
     }

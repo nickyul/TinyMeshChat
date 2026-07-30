@@ -476,8 +476,12 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
 
     const auto document = InvitationCodec::encode(invitation);
     const auto text = InvitationCodec::encodeText(invitation);
+    if (!text) {
+        emit errorOccurred("Не удалось создать код приглашения: " + text.error());
+        return;
+    }
     const auto kind = invitation.kind == Invitation::Kind::Offer ? "offer" : "answer";
-    emit signalingReady(kind, text, document);
+    emit signalingReady(kind, text.value(), document);
     emit statusChanged(invitation.kind == Invitation::Kind::Offer
                            ? "Приглашение готово. Ожидание answer."
                            : "Answer готов. Отправьте его пригласившему участнику.");

@@ -3,10 +3,11 @@
 #include <QString>
 
 #include <optional>
+#include <utility>
 
 namespace tmc {
 
-template <class T> class Result {
+template <class T> class [[nodiscard]] Result {
 public:
     static Result success(T value) {
         return Result(std::move(value), {});
@@ -41,7 +42,7 @@ private:
     QString error_;
 };
 
-template <> class Result<void> {
+template <> class [[nodiscard]] Result<void> {
 public:
     static Result success() {
         return Result(true, {});

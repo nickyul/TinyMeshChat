@@ -122,19 +122,23 @@ QByteArray InvitationCodec::encode(const Invitation& invitation) {
     return QJsonDocument(object).toJson(QJsonDocument::Compact);
 }
 
-QString InvitationCodec::encodeText(const Invitation& invitation) {
+Result<QString> InvitationCodec::encodeText(const Invitation& invitation) {
     const auto raw = encodeCompact(invitation);
     if (!raw) {
-        return {};
+        return Result<QString>::failure(raw.error());
     }
-    return "tmc0:" + QString::fromLatin1(
-                         qCompress(raw.value(), 9).toBase64(QByteArray::Base64UrlEncoding |
-                                                            QByteArray::OmitTrailingEquals));
+    return Result<QString>::success(
+        "tmc0:" +
+        QString::fromLatin1(qCompress(raw.value(), 9).toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)));
 }
 
-QString InvitationCodec::encodeLink(const Invitation& invitation) {
+Result<QString> InvitationCodec::encodeLink(const Invitation& invitation) {
     const auto text = encodeText(invitation);
-    return text.isEmpty() ? QString{} : "tinymesh://signal/0/" + text.sliced(5);
+    if (!text) {
+        return Result<QString>::failure(text.error());
+    }
+    return Result<QString>::success("tinymesh://signal/0/" + text.value().sliced(5));
 }
 
 Result<Invitation> InvitationCodec::decode(const QByteArray& bytes) {
