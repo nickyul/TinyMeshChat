@@ -1,13 +1,14 @@
 #include "tmc/messaging/chat_message.h"
 
-#include <QUuid>
+#include "tmc/core/limits.h"
+#include "tmc/core/uuid.h"
 
 namespace tmc {
 
 bool ChatMessage::isValid() const {
-    return !QUuid::fromString(messageId).isNull() && !QUuid::fromString(meshId).isNull() &&
-           !senderId.isEmpty() && logicalClock > 0 && text.size() <= 4096 && createdAt.isValid() &&
-           receivedAt.isValid();
+    return isCanonicalUuid(messageId) && isCanonicalUuid(senderId) && logicalClock > 0 &&
+           !text.trimmed().isEmpty() && text.size() <= limits::MaxChatMessageLength &&
+           createdAt.isValid();
 }
 
 } // namespace tmc

@@ -1,15 +1,21 @@
 #pragma once
 
 #include <QDateTime>
+#include <QMetaType>
 #include <QString>
 
 namespace tmc {
 
 struct ChatMessage {
-    QString messageId, meshId, senderId, text;
+    QString messageId;
+    QString senderId;
+    QString text;
     qint64 logicalClock{0};
-    QDateTime createdAt, receivedAt;
+    QDateTime createdAt;
+
     bool isValid() const;
 };
 
 } // namespace tmc
+
+Q_DECLARE_METATYPE(tmc::ChatMessage)

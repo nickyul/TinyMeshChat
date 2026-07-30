@@ -10,7 +10,8 @@ namespace tmc {
 
 class PacketCodec {
 public:
-    static constexpr qsizetype MaxBytes = 64 * 1024, MaxTextChars = 4096;
+    static constexpr qsizetype MaxBytes = 64 * 1024;
+
     static QByteArray encode(const Packet&);
     static Result<Packet> decode(const QByteArray&, const QString& expectedMesh = {},
                                  const QSet<QString>& allowedSenders = {});

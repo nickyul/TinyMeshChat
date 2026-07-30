@@ -29,6 +29,7 @@ target_sources(tmc_core
     PRIVATE
         src/core/app_config.cpp
         src/core/logger.cpp
+        src/core/uuid.cpp
         src/identity/peer_identity.cpp
         src/identity/identity_manager.cpp
         src/protocol/packet.cpp
@@ -41,8 +42,10 @@ target_sources(tmc_core
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
         FILES
             include/tmc/core/app_config.h
+            include/tmc/core/limits.h
             include/tmc/core/logger.h
             include/tmc/core/result.h
+            include/tmc/core/uuid.h
             include/tmc/identity/identity_manager.h
             include/tmc/identity/peer_identity.h
             include/tmc/protocol/packet.h

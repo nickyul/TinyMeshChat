@@ -193,8 +193,7 @@ void SessionPacketHandlers::handleMessaging(const PacketContext& context, const 
     if (packet.type == PacketType::ChatMessage) {
         const auto& payload = std::get<ChatMessagePayload>(packet.payload);
         auto received = messaging_.receiveMessage(
-            packet, mesh_.meshId(),
-            callbacks_.makePacket(PacketType::ChatAck, ChatAckPayload{payload.messageId}));
+            packet, callbacks_.makePacket(PacketType::ChatAck, ChatAckPayload{payload.messageId}));
         if (!received) {
             callbacks_.errorOccurred(received.error());
             return;

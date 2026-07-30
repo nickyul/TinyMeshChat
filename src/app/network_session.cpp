@@ -4,6 +4,7 @@
 #include "tmc/app/session_packet_handlers.h"
 #include "tmc/app/voice_session.h"
 #include "tmc/core/logger.h"
+#include "tmc/core/uuid.h"
 #include "tmc/protocol/packet.h"
 #include "tmc/protocol/packet_codec.h"
 #include "tmc/protocol/packet_dispatcher.h"
@@ -13,7 +14,6 @@
 #include <QJsonObject>
 #include <QNetworkInformation>
 #include <QSet>
-#include <QUuid>
 
 #include <chrono>
 #include <utility>
@@ -21,10 +21,6 @@
 namespace tmc {
 
 namespace {
-
-QString uuid() {
-    return QUuid::createUuid().toString(QUuid::WithoutBraces);
-}
 
 qint64 monotonicNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -297,7 +293,7 @@ Result<void> NetworkSession::createMesh() {
         return Result<void>::failure("Сначала покиньте текущую mesh-сессию.");
     }
     clearSessionData();
-    mesh_.create(app_.identity(), uuid());
+    mesh_.create(app_.identity(), createUuid());
     emit statusChanged("Mesh создан. Теперь можно пригласить участника.");
     updateMesh();
     return Result<void>::success();
@@ -337,7 +333,7 @@ Result<void> NetworkSession::createInvitation() {
             "Исходящее приглашение уже создаётся или ожидает answer. Отмените его перед повтором.");
     }
 
-    const auto connectionId = uuid();
+    const auto connectionId = createUuid();
     auto created = connections_->create(connectionId, {}, true, false);
     if (!created) {
         return created;
@@ -489,7 +485,7 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& t
 
 Packet NetworkSession::basePacket(PacketType type, PacketPayload payload) const {
     return {type,
-            uuid(),
+            createUuid(),
             mesh_.meshId(),
             app_.identity().peerId,
             QDateTime::currentDateTimeUtc(),
@@ -519,7 +515,7 @@ void NetworkSession::sendHello(const QString& connectionId) {
 }
 
 void NetworkSession::sendPing(const QString& connectionId) {
-    const auto nonce = uuid();
+    const auto nonce = createUuid();
     pendingPings_.insert(connectionId, PendingPing{nonce, monotonicNs()});
     sendPacket(connectionId,
                basePacket(PacketType::Ping,
@@ -640,7 +636,7 @@ void NetworkSession::startMeshOffer(const PeerIdentity& peer) {
         connections_->discard(existing->connectionId);
     }
 
-    const auto connectionId = uuid();
+    const auto connectionId = createUuid();
     const auto generation = mesh_.nextLinkGeneration(peer.peerId);
     auto created = connections_->create(connectionId, peer, true, true, generation);
     if (!created) {
@@ -691,7 +687,7 @@ void NetworkSession::requestRoute(const QString& peerId) {
     if (peerId.isEmpty() || routeRequests_.contains(peerId)) {
         return;
     }
-    const auto requestId = uuid();
+    const auto requestId = createUuid();
     routeRequests_.insert(peerId, requestId);
     auto request = basePacket(PacketType::RouteRequest, RoutePayload{requestId, 0});
     request.targetId = peerId;

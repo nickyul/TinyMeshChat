@@ -1,23 +1,23 @@
 #include "tmc/identity/identity_manager.h"
 
+#include "tmc/core/limits.h"
+#include "tmc/core/uuid.h"
+
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
-#include <QUuid>
 
 namespace tmc {
 
 namespace {
-
-constexpr qsizetype MaxDisplayNameLength = 128;
 
 Result<QString> normalizeDisplayName(const QString& name) {
     const auto normalized = name.trimmed();
     if (normalized.isEmpty()) {
         return Result<QString>::failure("Display name is required");
     }
-    if (normalized.size() > MaxDisplayNameLength) {
+    if (normalized.size() > limits::MaxDisplayNameLength) {
         return Result<QString>::failure("Display name must not exceed 128 characters");
     }
     for (const auto ch : normalized) {
@@ -73,7 +73,7 @@ Result<PeerIdentity> IdentityManager::create(const QString& path, const QString&
         return Result<PeerIdentity>::failure(normalized.error());
     }
 
-    PeerIdentity identity{QUuid::createUuid().toString(QUuid::WithoutBraces), normalized.value()};
+    PeerIdentity identity{createUuid(), normalized.value()};
     const auto saved = saveIdentity(path, identity);
     if (!saved) {
         return Result<PeerIdentity>::failure(saved.error());

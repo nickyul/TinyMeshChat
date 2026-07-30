@@ -30,7 +30,7 @@ public:
     Result<OutgoingChatMessage> createMessage(const QString& text, const QString& meshId,
                                               const QString& senderId,
                                               const QSet<QString>& targets);
-    Result<IncomingChatMessage> receiveMessage(const Packet& packet, const QString& meshId,
+    Result<IncomingChatMessage> receiveMessage(const Packet& packet,
                                                const Packet& acknowledgement);
     bool receiveAcknowledgement(const Packet& packet);
 

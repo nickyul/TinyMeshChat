@@ -1,19 +1,12 @@
 #include "tmc/app/messaging_service.h"
 
+#include "tmc/core/limits.h"
+#include "tmc/core/uuid.h"
 #include "tmc/protocol/packet_codec.h"
 
 #include <QDateTime>
-#include <QUuid>
 
 namespace tmc {
-
-namespace {
-
-QString uuid() {
-    return QUuid::createUuid().toString(QUuid::WithoutBraces);
-}
-
-} // namespace
 
 void MessagingService::clear() {
     delivery_ = {};
@@ -30,17 +23,17 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
     if (normalized.isEmpty()) {
         return Result<OutgoingChatMessage>::failure("Сообщение пустое.");
     }
-    if (normalized.size() > PacketCodec::MaxTextChars) {
+    if (normalized.size() > limits::MaxChatMessageLength) {
         return Result<OutgoingChatMessage>::failure(
             "Максимальная длина сообщения — 4096 символов.");
     }
 
     const auto now = QDateTime::currentDateTimeUtc();
-    ChatMessage message{uuid(), meshId, senderId, normalized, ++logicalClock_, now, now};
+    ChatMessage message{createUuid(), senderId, normalized, ++logicalClock_, now};
     rememberMessage(message.messageId);
     delivery_.track(message.messageId, targets);
     Packet packet{PacketType::ChatMessage,
-                  uuid(),
+                  createUuid(),
                   meshId,
                   senderId,
                   now,
@@ -50,14 +43,12 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
 }
 
 Result<IncomingChatMessage> MessagingService::receiveMessage(const Packet& packet,
-                                                             const QString& meshId,
                                                              const Packet& acknowledgement) {
     const auto& payload = std::get<ChatMessagePayload>(packet.payload);
     const auto remoteClock = payload.logicalClock;
     logicalClock_ = qMax(logicalClock_, remoteClock) + 1;
-    const auto now = QDateTime::currentDateTimeUtc();
-    ChatMessage message{payload.messageId, meshId, packet.senderId, payload.text, remoteClock,
-                        packet.createdAt,  now};
+    ChatMessage message{payload.messageId, packet.senderId, payload.text, remoteClock,
+                        packet.createdAt};
     if (!message.isValid()) {
         return Result<IncomingChatMessage>::failure("Получено некорректное сообщение.");
     }

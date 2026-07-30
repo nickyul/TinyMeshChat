@@ -140,5 +140,3 @@ private:
 };
 
 } // namespace tmc
-
-Q_DECLARE_METATYPE(tmc::ChatMessage)

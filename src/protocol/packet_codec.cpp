@@ -1,19 +1,16 @@
 #include "tmc/protocol/packet_codec.h"
 
+#include "tmc/core/limits.h"
+#include "tmc/core/uuid.h"
+
 #include <QJsonDocument>
-#include <QUuid>
 
 namespace tmc {
 
 namespace {
 
 bool validUuid(const QJsonValue& value) {
-    if (!value.isString()) {
-        return false;
-    }
-    const auto text = value.toString();
-    const auto uuid = QUuid::fromString(text);
-    return !uuid.isNull() && uuid.toString(QUuid::WithoutBraces) == text;
+    return value.isString() && isCanonicalUuid(value.toString());
 }
 
 bool validTimestamp(const QJsonValue& value) {
@@ -26,7 +23,8 @@ Result<PeerIdentity> decodeIdentity(const QJsonValue& value) {
     }
     const auto object = value.toObject();
     PeerIdentity identity{object.value("id").toString(), object.value("name").toString()};
-    if (!identity.isValid() || identity.displayName.size() > 128) {
+    if (!identity.isValid() ||
+        identity.displayName.size() > limits::MaxDisplayNameLength) {
         return Result<PeerIdentity>::failure("Invalid peer identity");
     }
     return Result<PeerIdentity>::success(identity);
@@ -36,7 +34,8 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
     switch (type) {
     case PacketType::PeerHello: {
         const auto displayName = payload.value("display_name").toString();
-        if (displayName.trimmed().isEmpty() || displayName.size() > 128) {
+        if (displayName.trimmed().isEmpty() ||
+            displayName.size() > limits::MaxDisplayNameLength) {
             break;
         }
         return Result<PacketPayload>::success(HelloPayload{displayName});
@@ -80,15 +79,15 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
         const auto messageId = payload.value("message_id").toString();
         const auto text = payload.value("text").toString();
         const auto clock = payload.value("logical_clock").toInteger();
-        if (QUuid::fromString(messageId).isNull() || text.trimmed().isEmpty() ||
-            text.size() > PacketCodec::MaxTextChars || clock <= 0) {
+        if (!isCanonicalUuid(messageId) || text.trimmed().isEmpty() ||
+            text.size() > limits::MaxChatMessageLength || clock <= 0) {
             break;
         }
         return Result<PacketPayload>::success(ChatMessagePayload{messageId, text, clock});
     }
     case PacketType::ChatAck: {
         const auto messageId = payload.value("message_id").toString();
-        if (!QUuid::fromString(messageId).isNull()) {
+        if (isCanonicalUuid(messageId)) {
             return Result<PacketPayload>::success(ChatAckPayload{messageId});
         }
         break;
@@ -113,7 +112,7 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
     case PacketType::RouteReply: {
         const auto requestId = payload.value("request").toString();
         const auto hops = payload.value("hops").toInt(-1);
-        if (!QUuid::fromString(requestId).isNull() && hops >= 0 && hops <= 16) {
+        if (isCanonicalUuid(requestId) && hops >= 0 && hops <= 16) {
             return Result<PacketPayload>::success(RoutePayload{requestId, hops});
         }
         break;
@@ -123,7 +122,7 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
         const auto connectionId = payload.value("link").toString();
         const auto generation = payload.value("generation").toInteger(-1);
         const auto sdp = payload.value("sdp").toString();
-        if (QUuid::fromString(connectionId).isNull() || generation < 0 || sdp.isEmpty() ||
+        if (!isCanonicalUuid(connectionId) || generation < 0 || sdp.isEmpty() ||
             sdp.toUtf8().size() >= PacketCodec::MaxBytes) {
             break;
         }
@@ -136,7 +135,7 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
         const auto negotiation = payload.value("negotiation").toInteger(-1);
         const auto reason = payload.value("reason").toString();
         const auto sdp = payload.value("sdp").toString();
-        if (!QUuid::fromString(connectionId).isNull() && negotiation >= 0 && reason.size() <= 64 &&
+        if (isCanonicalUuid(connectionId) && negotiation >= 0 && reason.size() <= 64 &&
             !sdp.isEmpty() &&
             sdp.toUtf8().size() < PacketCodec::MaxBytes) {
             return Result<PacketPayload>::success(SessionSignalingPayload{
@@ -213,7 +212,7 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
                   EmptyPayload{},
                   object.value("to").toString(),
                   object.value("ttl").toInt(0)};
-    if ((!packet.targetId.isEmpty() && QUuid::fromString(packet.targetId).isNull()) ||
+    if ((!packet.targetId.isEmpty() && !isCanonicalUuid(packet.targetId)) ||
         packet.ttl < 0 || packet.ttl > 16) {
         return Result<Packet>::failure("Packet contains invalid routing fields");
     }

@@ -1,5 +1,6 @@
 #include "tmc/signaling/invitation_codec.h"
 
+#include "tmc/core/uuid.h"
 #include "tmc/network/sdp_description_codec.h"
 
 #include <QDataStream>
@@ -16,10 +17,10 @@ namespace {
 constexpr quint8 CompactVersion = 0;
 
 bool writeUuid(QDataStream& stream, const QString& text) {
-    const auto id = QUuid::fromString(text);
-    if (id.isNull()) {
+    if (!isCanonicalUuid(text)) {
         return false;
     }
+    const auto id = QUuid::fromString(text);
     const auto bytes = id.toRfc4122();
     return bytes.size() == 16 &&
            stream.writeRawData(bytes.constData(), bytes.size()) == bytes.size();
@@ -40,8 +41,8 @@ bool readUuid(QDataStream& stream, QString& text) {
 
 Result<Invitation> validate(Invitation invitation) {
     const bool offer = invitation.kind == Invitation::Kind::Offer;
-    if ((offer && QUuid::fromString(invitation.meshId).isNull()) ||
-        QUuid::fromString(invitation.connectionId).isNull() || invitation.sdp.isEmpty() ||
+    if ((offer && !isCanonicalUuid(invitation.meshId)) ||
+        !isCanonicalUuid(invitation.connectionId) || invitation.sdp.isEmpty() ||
         invitation.sdp.toUtf8().size() > InvitationCodec::MaxBytes) {
         return Result<Invitation>::failure("Signaling payload has missing or invalid fields");
     }
