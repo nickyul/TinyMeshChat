@@ -205,9 +205,8 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     connect(&mesh_, &MeshCoordinator::retryRequested, this, &NetworkSession::startMeshOffer);
 
     connect(voice_.get(), &VoiceSession::encodedFrameReady, this,
-            [this](quint32 sequence, const QByteArray& payload, const VoiceFrameTiming& timing) {
+            [this](quint32 sequence, const QByteArray& payload) {
                 if (voice_->active() && !voice_->muted()) {
-                    Q_UNUSED(timing)
                     connections_->sendAudioFrameToOpen(sequence, payload);
                 }
             });

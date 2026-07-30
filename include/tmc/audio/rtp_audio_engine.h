@@ -2,7 +2,6 @@
 
 #include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
-#include "tmc/core/voice_frame_timing.h"
 
 #include <QByteArray>
 #include <QObject>
@@ -45,7 +44,7 @@ public:
     void removePeer(const QString& peerId);
 
 signals:
-    void encodedFrameReady(quint32 sequence, QByteArray opusPayload, tmc::VoiceFrameTiming timing);
+    void encodedFrameReady(quint32 sequence, QByteArray opusPayload);
     void microphoneLevelChanged(double level);
     void microphoneTestPlaybackFinished();
     void networkStatsChanged(QString peerId, double packetLossPercent, int jitterMs, int bufferMs);

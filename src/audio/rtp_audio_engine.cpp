@@ -54,10 +54,6 @@ qint64 monotonicNs() {
         .count();
 }
 
-double elapsedMs(qint64 startNs, qint64 endNs) {
-    return static_cast<double>(endNs - startNs) / 1'000'000.0;
-}
-
 template <typename T, size_t Capacity> class SpscRing {
 public:
     size_t available() const {
@@ -234,12 +230,10 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
         }
         processIncoming();
         while (captureRing.available() >= FrameSamples) {
-            const auto captureAvailable = captureRing.available();
             captureRing.pop(capture.data(), capture.size());
             const auto renderCount = renderRing.pop(render.data(), render.size());
             std::fill(render.begin() + static_cast<ptrdiff_t>(renderCount), render.end(), 0);
 
-            const auto dspStartedAtNs = monotonicNs();
             const auto rms = [](const auto& samples) {
                 double energy = 0.0;
                 for (const auto sample : samples) {
@@ -264,7 +258,6 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
                 processed = capture;
                 processedLevel = rawLevel;
             }
-            const auto dspFinishedAtNs = monotonicNs();
 
             const auto levelDb = 20.0 * std::log10((std::max)(processedLevel, 1e-9));
             const auto meterTarget =
@@ -291,23 +284,16 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
                 const auto count = (std::min)(available, processed.size());
                 testSamples.insert(testSamples.end(), processed.begin(), processed.begin() + count);
             }
-            const auto encodeStartedAtNs = monotonicNs();
             const auto encodedSize = opus_encode(encoder, processed.data(), FrameSamples,
                                                  encoded.data(), encoded.size());
-            const auto encodedAtNs = monotonicNs();
             if (encodedSize > 0) {
                 const QByteArray packet(reinterpret_cast<const char*>(encoded.data()), encodedSize);
                 const auto sequence = nextSequence++;
-                const VoiceFrameTiming timing{encodedAtNs,
-                                              static_cast<double>(captureAvailable - FrameSamples) *
-                                                  1000.0 / SampleRate,
-                                              elapsedMs(dspStartedAtNs, dspFinishedAtNs),
-                                              elapsedMs(encodeStartedAtNs, encodedAtNs)};
                 QMetaObject::invokeMethod(
                     owner,
-                    [target, sequence, packet, timing] {
+                    [target, sequence, packet] {
                         if (target) {
-                            emit target->encodedFrameReady(sequence, packet, timing);
+                            emit target->encodedFrameReady(sequence, packet);
                         }
                     },
                     Qt::QueuedConnection);

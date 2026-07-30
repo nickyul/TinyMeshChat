@@ -43,7 +43,6 @@ target_sources(tmc_core
             include/tmc/core/app_config.h
             include/tmc/core/logger.h
             include/tmc/core/result.h
-            include/tmc/core/voice_frame_timing.h
             include/tmc/identity/identity_manager.h
             include/tmc/identity/peer_identity.h
             include/tmc/protocol/packet.h

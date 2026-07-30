@@ -2,7 +2,6 @@
 
 #include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
-#include "tmc/core/voice_frame_timing.h"
 
 #include <QByteArray>
 #include <QHash>
@@ -44,7 +43,7 @@ public:
     bool microphoneTest() const;
 
 signals:
-    void encodedFrameReady(quint32 sequence, QByteArray payload, tmc::VoiceFrameTiming timing);
+    void encodedFrameReady(quint32 sequence, QByteArray payload);
     void stateChanged(bool active, bool muted);
     void peerChanged(QString peerId, bool joined, bool muted);
     void errorOccurred(QString message);

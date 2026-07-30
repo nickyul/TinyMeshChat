@@ -1,6 +1,5 @@
 #pragma once
 
-#include "tmc/core/voice_frame_timing.h"
 #include "tmc/network/connection_state.h"
 
 #include <QByteArray>

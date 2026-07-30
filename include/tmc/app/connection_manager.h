@@ -1,7 +1,6 @@
 #pragma once
 
 #include "tmc/core/result.h"
-#include "tmc/core/voice_frame_timing.h"
 #include "tmc/identity/peer_identity.h"
 #include "tmc/network/connection_attempt_state.h"
 #include "tmc/network/connection_policy.h"
