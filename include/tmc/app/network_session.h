@@ -4,8 +4,8 @@
 #include "tmc/app/mesh_coordinator.h"
 #include "tmc/app/mesh_session_state.h"
 #include "tmc/app/messaging_service.h"
+#include "tmc/app/negotiation_policy.h"
 #include "tmc/app/signaling_router.h"
-#include "tmc/app/topology_controller.h"
 #include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
 #include "tmc/messaging/chat_message.h"
@@ -122,7 +122,6 @@ private:
     std::unique_ptr<SessionPacketHandlers> packetHandlers_;
     MeshCoordinator mesh_;
     SignalingRouter router_;
-    TopologyController topology_;
     MessagingService messaging_;
     std::unique_ptr<VoiceSession> voice_;
     QTimer* keepalive_{};

@@ -119,10 +119,9 @@ target_sources(tmc_application
         src/app/mesh_coordinator.cpp
         src/app/messaging_service.cpp
         src/app/network_session.cpp
-        src/app/peer_registry.cpp
         src/app/session_packet_handlers.cpp
         src/app/signaling_router.cpp
-        src/app/topology_controller.cpp
+        src/app/negotiation_policy.cpp
         src/app/voice_session.cpp
         src/signaling/invitation_codec.cpp
     PUBLIC
@@ -135,10 +134,9 @@ target_sources(tmc_application
             include/tmc/app/mesh_coordinator.h
             include/tmc/app/messaging_service.h
             include/tmc/app/network_session.h
-            include/tmc/app/peer_registry.h
             include/tmc/app/session_packet_handlers.h
             include/tmc/app/signaling_router.h
-            include/tmc/app/topology_controller.h
+            include/tmc/app/negotiation_policy.h
             include/tmc/app/voice_session.h
             include/tmc/signaling/invitation.h
             include/tmc/signaling/invitation_codec.h

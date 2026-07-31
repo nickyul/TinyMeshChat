@@ -83,11 +83,9 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
                 for (const auto& peer : value.peers) {
                     peers.append(identityToJson(peer));
                 }
-                return {{"revision", value.revision}, {"peers", peers}};
+                return {{"peers", peers}};
             } else if constexpr (std::is_same_v<T, PeerAnnouncePayload>) {
-                return {{"peer", identityToJson(value.peer)},
-                        {"epoch", value.epoch},
-                        {"hops", value.hops}};
+                return {{"peer", identityToJson(value.peer)}, {"hops", value.hops}};
             } else if constexpr (std::is_same_v<T, PeerLeavePayload>) {
                 return {{"reason", value.reason}};
             } else if constexpr (std::is_same_v<T, ChatMessagePayload>) {
@@ -140,8 +138,7 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
             break;
         }
         const auto peersJson = payload.value("peers").toArray();
-        const auto revision = payload.value("revision").toInteger(-1);
-        if (peersJson.isEmpty() || peersJson.size() > 16 || revision < 0) {
+        if (peersJson.isEmpty() || peersJson.size() > 16) {
             break;
         }
         QList<PeerIdentity> peers;
@@ -155,14 +152,13 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
             unique.insert(decoded.value().peerId);
             peers.append(decoded.value());
         }
-        return Result<PacketPayload>::success(PeerSnapshotPayload{revision, peers});
+        return Result<PacketPayload>::success(PeerSnapshotPayload{peers});
     }
     case PacketType::PeerAnnounce: {
         const auto peer = decodeIdentity(payload.value("peer"));
-        const auto epoch = payload.value("epoch").toInteger(-1);
         const auto hops = payload.value("hops").toInt(-1);
-        if (peer && epoch >= 0 && hops >= 0 && hops <= 16) {
-            return Result<PacketPayload>::success(PeerAnnouncePayload{peer.value(), epoch, hops});
+        if (peer && hops >= 0 && hops <= 16) {
+            return Result<PacketPayload>::success(PeerAnnouncePayload{peer.value(), hops});
         }
         break;
     }

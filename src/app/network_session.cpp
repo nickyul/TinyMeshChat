@@ -147,7 +147,7 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
                 announceLocalPeer();
                 ensureDynamicMesh();
                 sendPing(connectionId);
-                if (topology_.shouldInitiateLink(app_.identity().peerId, remote.peerId)) {
+                if (shouldInitiateNegotiation(app_.identity().peerId, remote.peerId)) {
                     const auto audio = connections_->startAudioOffer(connectionId);
                     if (!audio) {
                         emit errorOccurred("Не удалось начать согласование audio Track: " +
@@ -318,7 +318,7 @@ void NetworkSession::leaveMesh() {
 }
 
 Result<void> NetworkSession::createInvitation() {
-    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+    if (mesh_.meshId().isEmpty() || !mesh_.joined()) {
         return Result<void>::failure("Сначала создайте mesh или завершите подключение.");
     }
     if (knownPeerCount() >= policy_.maxPeers) {
@@ -396,7 +396,7 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
         const bool joiningMesh = mesh_.meshId().isEmpty();
         if (joiningMesh) {
             clearSessionData();
-            mesh_.beginJoin(app_.identity(), {}, invitation.meshId);
+            mesh_.beginJoin(app_.identity(), invitation.meshId);
         }
 
         auto created = connections_->create(invitation.connectionId, {}, false, false);
@@ -582,13 +582,12 @@ void NetworkSession::handleIncoming(const QString& connectionId, const QString& 
 
 void NetworkSession::sendPeerList(const QString& connectionId) {
     sendPacket(connectionId,
-               basePacket(PacketType::PeerSnapshot,
-                          PeerSnapshotPayload{mesh_.revision(), mesh_.peerList()}));
+               basePacket(PacketType::PeerSnapshot, PeerSnapshotPayload{mesh_.peers()}));
 }
 
 void NetworkSession::announceLocalPeer(const QString& excludedConnection) {
     auto packet = basePacket(PacketType::PeerAnnounce,
-                             PeerAnnouncePayload{app_.identity(), mesh_.revision(), 0});
+                             PeerAnnouncePayload{app_.identity(), 0});
     packet.ttl = policy_.maxPeers;
     router_.rememberPacket(packet.packetId);
     broadcastService(packet, excludedConnection);
@@ -616,7 +615,7 @@ void NetworkSession::broadcastPeerList(const QString& excludedConnection) {
 void NetworkSession::ensureDynamicMesh() {
     for (const auto& peer : mesh_.peers()) {
         if (peer.peerId == app_.identity().peerId ||
-            !topology_.shouldInitiateLink(app_.identity().peerId, peer.peerId) ||
+            !shouldInitiateNegotiation(app_.identity().peerId, peer.peerId) ||
             !mesh_.canAttemptLink(peer.peerId)) {
             continue;
         }
@@ -717,7 +716,7 @@ void NetworkSession::flushRouted(const QString& peerId) {
 }
 
 Result<void> NetworkSession::sendMessage(const QString& text) {
-    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+    if (mesh_.meshId().isEmpty() || !mesh_.joined()) {
         return Result<void>::failure("Сначала войдите в mesh.");
     }
     QSet<QString> targets;
@@ -743,7 +742,7 @@ Result<void> NetworkSession::startCall() {
     if (voice_->active()) {
         return Result<void>::success();
     }
-    if (mesh_.meshId().isEmpty() || !mesh_.established()) {
+    if (mesh_.meshId().isEmpty() || !mesh_.joined()) {
         return Result<void>::failure("Сначала войдите в mesh.");
     }
     if (connectedPeerCount() == 0) {

@@ -18,157 +18,136 @@ MeshSessionState MeshCoordinator::state() const {
     return state_;
 }
 
-bool MeshCoordinator::established() const {
-    return established_;
+bool MeshCoordinator::joined() const {
+    return joined_;
 }
 
 int MeshCoordinator::peerCount() const {
     return peers_.size();
 }
 
-qint64 MeshCoordinator::revision() const {
-    return revision_;
-}
-
 PeerIdentity MeshCoordinator::peer(const QString& peerId) const {
-    return peers_.peer(peerId);
+    return peers_.value(peerId);
 }
 
 QList<PeerIdentity> MeshCoordinator::peers() const {
-    return peers_.peers();
+    return peers_.values();
 }
 
 void MeshCoordinator::create(const PeerIdentity& localIdentity, const QString& meshId) {
-    ++sessionGeneration_;
     resetRuntime();
     meshId_ = meshId;
-    established_ = true;
-    peers_.remember(localIdentity);
-    revision_ = 1;
+    joined_ = true;
+    rememberPeer(localIdentity);
     updateState();
 }
 
-void MeshCoordinator::beginJoin(const PeerIdentity& localIdentity, const PeerIdentity& inviter,
-                                const QString& meshId) {
-    ++sessionGeneration_;
+void MeshCoordinator::beginJoin(const PeerIdentity& localIdentity, const QString& meshId) {
     resetRuntime();
     meshId_ = meshId;
-    established_ = false;
-    peers_.remember(localIdentity);
-    peers_.remember(inviter);
-    revision_ = 2;
+    joined_ = false;
+    rememberPeer(localIdentity);
     updateState();
 }
 
 void MeshCoordinator::leave() {
-    ++sessionGeneration_;
     resetRuntime();
     meshId_.clear();
-    established_ = false;
-    updateState();
-}
-
-void MeshCoordinator::markEstablished() {
-    established_ = true;
+    joined_ = false;
     updateState();
 }
 
 bool MeshCoordinator::rememberPeer(const PeerIdentity& peer) {
-    if (meshId_.isEmpty()) {
+    if (meshId_.isEmpty() || !peer.isValid()) {
         return false;
     }
-    const bool added = peers_.remember(peer);
-    if (added) {
-        ++revision_;
+    const auto existing = peers_.find(peer.peerId);
+    if (existing == peers_.end()) {
+        if (peers_.size() >= policy_.maxPeers) {
+            return false;
+        }
+        peers_.insert(peer.peerId, peer);
+        return true;
     }
-    return added;
+    if (existing->displayName == peer.displayName) {
+        return false;
+    }
+    *existing = peer;
+    return true;
 }
 
 bool MeshCoordinator::forgetPeer(const QString& peerId) {
-    if (!peers_.remove(peerId)) {
+    if (peers_.remove(peerId) == 0) {
         return false;
     }
-    retryCounts_.remove(peerId);
-    retryScheduled_.remove(peerId);
-    degradedPeers_.remove(peerId);
-    ++retryGenerations_[peerId];
+    retryStates_.remove(peerId);
     linkGenerations_.remove(peerId);
-    ++revision_;
     updateState();
     return true;
 }
 
-bool MeshCoordinator::ingestPeerList(const QList<PeerIdentity>& peers,
-                                     const QString& localPeerId) {
+bool MeshCoordinator::ingestPeerList(const QList<PeerIdentity>& peers, const QString& localPeerId) {
     bool changed = false;
-    QSet<QString> knownIds;
-    for (const auto& known : peers_.peers()) {
-        knownIds.insert(known.peerId);
-    }
     for (const auto& candidate : peers) {
         if (candidate.peerId == localPeerId) {
             continue;
         }
-        if (!knownIds.contains(candidate.peerId) && knownIds.size() >= policy_.maxPeers) {
-            continue;
-        }
-        if (peers_.remember(candidate)) {
+        if (rememberPeer(candidate)) {
             changed = true;
-            knownIds.insert(candidate.peerId);
         }
-    }
-    if (changed) {
-        ++revision_;
     }
     return changed;
 }
 
-QList<PeerIdentity> MeshCoordinator::peerList() const {
-    return peers_.peers();
-}
-
 bool MeshCoordinator::canAttemptLink(const QString& peerId) const {
-    return !retryScheduled_.contains(peerId);
+    if (meshId_.isEmpty() || !peers_.contains(peerId)) {
+        return false;
+    }
+    const auto retry = retryStates_.constFind(peerId);
+    return retry == retryStates_.cend() || !retry->scheduled;
 }
 
 void MeshCoordinator::connectionOpened(const PeerIdentity& peer) {
-    established_ = true;
-    if (!peer.peerId.isEmpty()) {
-        retryCounts_.remove(peer.peerId);
-        retryScheduled_.remove(peer.peerId);
-        degradedPeers_.remove(peer.peerId);
-        ++retryGenerations_[peer.peerId];
+    if (!peer.isValid()) {
+        return;
     }
+    joined_ = true;
+    retryStates_.remove(peer.peerId);
     updateState();
 }
 
 void MeshCoordinator::scheduleRetry(const PeerIdentity& peer) {
-    if (peer.peerId.isEmpty() || meshId_.isEmpty() || retryScheduled_.contains(peer.peerId)) {
+    if (meshId_.isEmpty() || !peer.isValid() || !peers_.contains(peer.peerId)) {
         return;
     }
-    const int retryIndex = retryCounts_.value(peer.peerId);
-    int delay{};
-    if (retryIndex >= static_cast<int>(policy_.meshRetryDelaysSeconds.size())) {
-        degradedPeers_.insert(peer.peerId);
-        updateState();
-        delay = QRandomGenerator::global()->bounded(120, 301);
-    } else {
-        delay = policy_.meshRetryDelaysSeconds[retryIndex];
+    auto& retry = retryStates_[peer.peerId];
+    if (retry.scheduled) {
+        return;
     }
 
-    retryCounts_.insert(peer.peerId, retryIndex + 1);
-    retryScheduled_.insert(peer.peerId);
-    const auto retryGeneration = ++retryGenerations_[peer.peerId];
-    const auto sessionGeneration = sessionGeneration_;
+    int delay{};
+    if (retry.attempts >= static_cast<int>(policy_.meshRetryDelaysSeconds.size())) {
+        retry.degraded = true;
+        updateState();
+        delay = QRandomGenerator::global()->bounded(policy_.degradedRetryMinSeconds,
+                                                     policy_.degradedRetryMaxSeconds + 1);
+    } else {
+        delay = policy_.meshRetryDelaysSeconds[retry.attempts];
+    }
+
+    ++retry.attempts;
+    retry.scheduled = true;
+    retry.token = ++nextRetryToken_;
+    const auto token = retry.token;
     emit statusChanged(QString("Повторная попытка прямого канала с %1 через %2 с.")
                            .arg(peer.displayName)
                            .arg(delay));
-    QTimer::singleShot(delay * 1000, this, [this, peer, retryGeneration, sessionGeneration] {
-        if (sessionGeneration_ != sessionGeneration ||
-            retryGenerations_.value(peer.peerId) != retryGeneration) {
+    QTimer::singleShot(delay * 1000, this, [this, peer, token] {
+        auto retry = retryStates_.find(peer.peerId);
+        if (retry == retryStates_.end() || retry->token != token) {
             return;
         }
-        retryScheduled_.remove(peer.peerId);
+        retry->scheduled = false;
         emit retryRequested(peer);
     });
 }
@@ -178,7 +157,7 @@ quint64 MeshCoordinator::nextLinkGeneration(const QString& peerId) {
 }
 
 bool MeshCoordinator::acceptLinkGeneration(const QString& peerId, quint64 generation) {
-    if (peerId.isEmpty() || generation == 0 || generation < linkGenerations_.value(peerId)) {
+    if (peerId.isEmpty() || generation == 0 || generation <= linkGenerations_.value(peerId)) {
         return false;
     }
     linkGenerations_.insert(peerId, generation);
@@ -186,43 +165,39 @@ bool MeshCoordinator::acceptLinkGeneration(const QString& peerId, quint64 genera
 }
 
 void MeshCoordinator::resetRetryBackoff() {
-    for (auto iterator = retryGenerations_.begin(); iterator != retryGenerations_.end();
-         ++iterator) {
-        ++iterator.value();
-    }
-    retryCounts_.clear();
-    retryScheduled_.clear();
-    degradedPeers_.clear();
+    retryStates_.clear();
     updateState();
 }
 
 void MeshCoordinator::routeAvailable(const QString& peerId) {
-    if (peerId.isEmpty() || !degradedPeers_.contains(peerId)) {
+    const auto retry = retryStates_.find(peerId);
+    if (retry == retryStates_.end() || !retry->degraded) {
         return;
     }
-    retryCounts_.remove(peerId);
-    retryScheduled_.remove(peerId);
-    degradedPeers_.remove(peerId);
-    ++retryGenerations_[peerId];
+    retryStates_.erase(retry);
     updateState();
 }
 
 void MeshCoordinator::resetRuntime() {
     peers_.clear();
-    retryCounts_.clear();
-    retryGenerations_.clear();
+    retryStates_.clear();
     linkGenerations_.clear();
-    retryScheduled_.clear();
-    degradedPeers_.clear();
-    revision_ = 0;
 }
 
 void MeshCoordinator::updateState() {
+    bool hasDegradedPeer = false;
+    for (const auto& retry : retryStates_) {
+        if (retry.degraded) {
+            hasDegradedPeer = true;
+            break;
+        }
+    }
+
     if (meshId_.isEmpty()) {
         setState(MeshSessionState::Disconnected);
-    } else if (!degradedPeers_.isEmpty()) {
+    } else if (hasDegradedPeer) {
         setState(MeshSessionState::Degraded);
-    } else if (established_) {
+    } else if (joined_) {
         setState(MeshSessionState::InMesh);
     } else {
         setState(MeshSessionState::Connecting);

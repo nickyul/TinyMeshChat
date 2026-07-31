@@ -13,6 +13,8 @@ struct ConnectionPolicy {
     int livenessTimeoutSeconds{35};
     int maxPeers{6};
     std::array<int, 5> meshRetryDelaysSeconds{1, 3, 10, 30, 60};
+    int degradedRetryMinSeconds{120};
+    int degradedRetryMaxSeconds{300};
 
     constexpr bool isValid() const {
         return iceGatheringTimeoutSeconds > 0 && connectionTimeoutSeconds > 0 &&
@@ -23,7 +25,9 @@ struct ConnectionPolicy {
                meshRetryDelaysSeconds[1] >= meshRetryDelaysSeconds[0] &&
                meshRetryDelaysSeconds[2] >= meshRetryDelaysSeconds[1] &&
                meshRetryDelaysSeconds[3] >= meshRetryDelaysSeconds[2] &&
-               meshRetryDelaysSeconds[4] >= meshRetryDelaysSeconds[3];
+               meshRetryDelaysSeconds[4] >= meshRetryDelaysSeconds[3] &&
+               degradedRetryMinSeconds >= meshRetryDelaysSeconds[4] &&
+               degradedRetryMaxSeconds >= degradedRetryMinSeconds;
     }
 };
 

@@ -35,13 +35,11 @@ struct HelloPayload {
 };
 
 struct PeerSnapshotPayload {
-    qint64 revision{0};
     QList<PeerIdentity> peers;
 };
 
 struct PeerAnnouncePayload {
     PeerIdentity peer;
-    qint64 epoch{0};
     int hops{0};
 };
 
