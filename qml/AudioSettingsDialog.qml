@@ -48,114 +48,118 @@ Dialog {
 
     onAccepted: control.viewModel.updateAudioPreferences(captureCombo.currentText, playbackCombo.currentText, aecSwitch.checked, nsSwitch.checked, agcSwitch.checked, Math.round(volumeSlider.value), qualityCombo.currentValue)
 
-    ColumnLayout {
+    ScrollView {
+        id: settingsScroll
+
         anchors.fill: parent
-        spacing: 10
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Label {
-            text: qsTr("Микрофон")
-        }
+        ColumnLayout {
+            width: settingsScroll.availableWidth
+            spacing: 10
 
-        ComboBox {
-            id: captureCombo
-
-            Layout.fillWidth: true
-            model: control.viewModel.captureDevices
-        }
-
-        Label {
-            text: qsTr("Динамики")
-        }
-
-        ComboBox {
-            id: playbackCombo
-
-            Layout.fillWidth: true
-            model: control.viewModel.playbackDevices
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-
-            Button {
-                text: control.viewModel.microphoneTest ? qsTr("Остановить и прослушать") : qsTr("Проверить микрофон")
-                onClicked: control.viewModel.toggleMicrophoneTest()
+            Label {
+                text: qsTr("Микрофон")
             }
 
-            ProgressBar {
+            ComboBox {
+                id: captureCombo
+
+                Layout.fillWidth: true
+                model: control.viewModel.captureDevices
+            }
+
+            Label {
+                text: qsTr("Динамики")
+            }
+
+            ComboBox {
+                id: playbackCombo
+
+                Layout.fillWidth: true
+                model: control.viewModel.playbackDevices
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+
+                Button {
+                    text: control.viewModel.microphoneTest ? qsTr("Остановить и прослушать") : qsTr("Проверить микрофон")
+                    onClicked: control.viewModel.toggleMicrophoneTest()
+                }
+
+                ProgressBar {
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 1
+                    value: control.viewModel.microphoneLevel
+                }
+            }
+
+            Switch {
+                id: aecSwitch
+
+                text: qsTr("Подавление эха (AEC)")
+            }
+
+            Switch {
+                id: nsSwitch
+
+                text: qsTr("Подавление шума")
+            }
+
+            Switch {
+                id: agcSwitch
+
+                text: qsTr("Автоматическая громкость микрофона")
+            }
+
+            Label {
+                text: qsTr("Общая громкость: %1%").arg(Math.round(volumeSlider.value))
+            }
+
+            Slider {
+                id: volumeSlider
+
                 Layout.fillWidth: true
                 from: 0
-                to: 1
-                value: control.viewModel.microphoneLevel
+                to: 200
+                stepSize: 5
             }
-        }
 
-        Switch {
-            id: aecSwitch
+            Label {
+                text: qsTr("Качество Opus")
+            }
 
-            text: qsTr("Подавление эха (AEC)")
-        }
+            ComboBox {
+                id: qualityCombo
 
-        Switch {
-            id: nsSwitch
+                Layout.fillWidth: true
+                textRole: "text"
+                valueRole: "value"
+                model: [
+                    {
+                        text: qsTr("Экономное — 24 кбит/с"),
+                        value: 24
+                    },
+                    {
+                        text: qsTr("Сбалансированное — 32 кбит/с"),
+                        value: 32
+                    },
+                    {
+                        text: qsTr("Высокое — 48 кбит/с"),
+                        value: 48
+                    }
+                ]
+            }
 
-            text: qsTr("Подавление шума")
-        }
-
-        Switch {
-            id: agcSwitch
-
-            text: qsTr("Автоматическая громкость микрофона")
-        }
-
-        Label {
-            text: qsTr("Общая громкость: %1%").arg(Math.round(volumeSlider.value))
-        }
-
-        Slider {
-            id: volumeSlider
-
-            Layout.fillWidth: true
-            from: 0
-            to: 200
-            stepSize: 5
-        }
-
-        Label {
-            text: qsTr("Качество Opus")
-        }
-
-        ComboBox {
-            id: qualityCombo
-
-            Layout.fillWidth: true
-            textRole: "text"
-            valueRole: "value"
-            model: [
-                {
-                    text: qsTr("Экономное — 24 кбит/с"),
-                    value: 24
-                },
-                {
-                    text: qsTr("Сбалансированное — 32 кбит/с"),
-                    value: 32
-                },
-                {
-                    text: qsTr("Высокое — 48 кбит/с"),
-                    value: 48
-                }
-            ]
-        }
-
-        Label {
-            Layout.fillWidth: true
-            text: qsTr("Микрофон передаётся постоянно, пока вы в звонке и он не выключен. " + "Opus DTX уменьшает трафик во время тишины.")
-            wrapMode: Text.WordWrap
-            color: control.palette.placeholderText
-        }
-
-        Item {
-            Layout.fillHeight: true
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Микрофон передаётся постоянно, пока вы в звонке и он не выключен. " + "Opus DTX уменьшает трафик во время тишины.")
+                wrapMode: Text.WordWrap
+                color: control.palette.placeholderText
+            }
         }
     }
 }
