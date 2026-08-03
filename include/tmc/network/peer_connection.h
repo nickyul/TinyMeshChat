@@ -68,15 +68,20 @@ signals:
     void errorOccurred(QString);
 
 private:
+    enum class TextChannel {
+        Control,
+        Chat,
+    };
+
     struct State;
 
     void configureControlChannel(const std::shared_ptr<rtc::DataChannel>&);
     void configureChatChannel(const std::shared_ptr<rtc::DataChannel>&);
-    void configureTextChannel(const std::shared_ptr<rtc::DataChannel>&, bool control);
+    void configureTextChannel(const std::shared_ptr<rtc::DataChannel>&, TextChannel);
     void configureAudioTrack(const std::shared_ptr<rtc::Track>&);
     bool sendText(const std::shared_ptr<rtc::DataChannel>& channel, const QString& text,
-                  bool control);
-    void flushTextQueue(bool control);
+                  TextChannel);
+    void flushTextQueue(TextChannel);
 
     std::shared_ptr<State> state_;
 };

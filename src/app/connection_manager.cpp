@@ -11,23 +11,36 @@
 
 namespace tmc {
 
+namespace {
+
+constexpr qsizetype MaxRecentAttempts = 8;
+
+} // namespace
+
 struct ConnectionManager::Link {
+    // Identity and owned transport.
     QString connectionId;
     PeerIdentity remote;
     std::shared_ptr<PeerConnection> transport;
+    qint64 createdAtMs{0};
+    qint64 lastActivityMs{0};
     bool open{false};
-    bool everOpened{false};
+
+    // Signaling role and progress.
+    ConnectionKind kind{ConnectionKind::ManualOffer};
+    bool answerApplied{false};
+    bool signalingProduced{false};
+    quint64 generation{0};
+
+    // Transport and handshake readiness.
     bool transportOpen{false};
     bool controlChannelOpen{false};
     bool chatChannelOpen{false};
     bool helloReceived{false};
-    bool localOffer{false};
-    bool answerApplied{false};
-    bool signalingProduced{false};
-    bool meshManaged{false};
-    quint64 generation{0};
-    qint64 lastActivityMs{0};
-    qint64 createdAtMs{0};
+    ConnectionState transportState{ConnectionState::Disconnected};
+    ConnectionAttemptState attemptState{ConnectionAttemptState::Gathering};
+
+    // ICE and connection diagnostics.
     QString iceState{"new"};
     QString selectedCandidatePair;
     QString lastError;
@@ -35,8 +48,8 @@ struct ConnectionManager::Link {
     int serverReflexiveCandidates{0};
     int relayCandidates{0};
     int roundTripTimeMs{-1};
-    ConnectionState transportState{ConnectionState::Disconnected};
-    ConnectionAttemptState attemptState{ConnectionAttemptState::Gathering};
+
+    // Deadline and delayed-disconnect guards.
     QTimer* deadline{};
     quint64 deadlineGeneration{0};
     quint64 disconnectGeneration{0};
@@ -66,15 +79,14 @@ int ConnectionManager::recordRoundTripTime(const QString& connectionId, int samp
 }
 
 Result<void> ConnectionManager::create(const QString& connectionId, const PeerIdentity& remote,
-                                       bool localOffer, bool meshManaged, quint64 generation) {
+                                       ConnectionKind kind, quint64 generation) {
     if (connectionId.isEmpty() || links_.contains(connectionId)) {
         return Result<void>::failure("Соединение с таким идентификатором уже существует.");
     }
     auto link = std::make_shared<Link>();
     link->connectionId = connectionId;
     link->remote = remote;
-    link->localOffer = localOffer;
-    link->meshManaged = meshManaged;
+    link->kind = kind;
     link->generation = generation;
     link->createdAtMs = QDateTime::currentMSecsSinceEpoch();
     link->transport = std::make_shared<PeerConnection>(stunServers_);
@@ -133,7 +145,7 @@ Result<void> ConnectionManager::acceptAnswer(const QString& connectionId, const 
         link->transport->acceptAnswer(sdp);
     } catch (const std::exception& e) {
         link->answerApplied = false;
-        if (link->meshManaged) {
+        if (isMeshManaged(link->kind)) {
             setAttemptState(link, ConnectionAttemptState::Failed);
             remove(link);
         } else {
@@ -189,14 +201,8 @@ Result<void> ConnectionManager::acceptAudioAnswer(const QString& connectionId,
     }
 }
 
-void ConnectionManager::setRemote(const QString& connectionId, const PeerIdentity& remote) {
-    if (const auto link = current(connectionId)) {
-        link->remote = remote;
-    }
-}
-
 void ConnectionManager::markHelloReceived(const QString& connectionId,
-                                          const PeerIdentity& remote) {
+                                           const PeerIdentity& remote) {
     const auto link = current(connectionId);
     if (!link) {
         return;
@@ -220,14 +226,12 @@ void ConnectionManager::discard(const QString& connectionId) {
     remove(link);
 }
 
-void ConnectionManager::discardStale(const QString& peerId) {
-    const auto snapshot = links_.values();
-    for (const auto& link : snapshot) {
-        const bool samePeer = !peerId.isEmpty() && link->remote.peerId == peerId;
-        if (!link->open && (peerId.isEmpty() || samePeer)) {
-            discard(link->connectionId);
-        }
+void ConnectionManager::markTimedOut(const QString& connectionId, const QString& message) {
+    const auto link = current(connectionId);
+    if (!link || !link->open) {
+        return;
     }
+    fail(link, ConnectionAttemptState::TimedOut, message);
 }
 
 bool ConnectionManager::contains(const QString& connectionId) const {
@@ -332,6 +336,14 @@ bool ConnectionManager::isCurrent(const std::shared_ptr<Link>& link) const {
 }
 
 void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
+    connectIceSignals(link);
+    connectSignalingSignals(link);
+    connectTransportSignals(link);
+    connectChannelSignals(link);
+    connectDataSignals(link);
+}
+
+void ConnectionManager::connectIceSignals(const std::shared_ptr<Link>& link) {
     connect(link->transport.get(), &PeerConnection::gatheringStateChanged, this,
             [this, link](const QString& state) {
                 if (!isCurrent(link)) {
@@ -373,26 +385,30 @@ void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
                 }
                 link->selectedCandidatePair = localType + " -> " + remoteType;
                 Logger::instance().log(QtInfoMsg, "ice",
-                                       link->connectionId.left(8) +
-                                           " selected=" + link->selectedCandidatePair);
+                                        link->connectionId.left(8) +
+                                            " selected=" + link->selectedCandidatePair);
             });
+}
+
+void ConnectionManager::connectSignalingSignals(const std::shared_ptr<Link>& link) {
     connect(
         link->transport.get(), &PeerConnection::localDescriptionReady, this,
-        [this, link](const QString& type, const QString& sdp) {
+        [this, link](const QString&, const QString& sdp) {
             if (!isCurrent(link) || link->signalingProduced) {
                 return;
             }
             cancelDeadline(link);
             link->signalingProduced = true;
-            setAttemptState(link, link->localOffer ? ConnectionAttemptState::AwaitingAnswer
-                                                   : ConnectionAttemptState::AwaitingConnection);
+            setAttemptState(
+                link, isOffer(link->kind) ? ConnectionAttemptState::AwaitingAnswer
+                                          : ConnectionAttemptState::AwaitingConnection);
             startDeadline(link,
-                          link->meshManaged ? policy_.connectionTimeoutSeconds
-                                            : policy_.manualSignalingTimeoutSeconds,
-                          link->localOffer
+                          isMeshManaged(link->kind) ? policy_.connectionTimeoutSeconds
+                                                    : policy_.manualSignalingTimeoutSeconds,
+                          isOffer(link->kind)
                               ? "Истёк срок ожидания answer. Создайте новое приглашение."
                               : "Истёк срок ожидания подключения. Импортируйте offer повторно.");
-            emit localDescriptionReady(link->connectionId, type, sdp);
+            emit localDescriptionReady(link->connectionId, sdp);
         });
     connect(link->transport.get(), &PeerConnection::audioDescriptionReady, this,
             [this, link](const QString& type, const QString& sdp) {
@@ -400,6 +416,9 @@ void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
                     emit audioDescriptionReady(link->connectionId, type, sdp);
                 }
             });
+}
+
+void ConnectionManager::connectTransportSignals(const std::shared_ptr<Link>& link) {
     connect(link->transport.get(), &PeerConnection::stateChanged, this,
             [this, link](ConnectionState state) {
                 if (!isCurrent(link)) {
@@ -432,6 +451,21 @@ void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
                 emit statusChanged("Соединение " + link->connectionId.left(8) + ": " +
                                    toString(state));
             });
+    connect(link->transport.get(), &PeerConnection::errorOccurred, this,
+            [this, link](const QString& error) {
+                if (!isCurrent(link)) {
+                    return;
+                }
+                if (!link->open) {
+                    fail(link, ConnectionAttemptState::Failed,
+                         "Ошибка P2P-транспорта: " + error);
+                    return;
+                }
+                emit statusChanged("Ошибка P2P-транспорта: " + error);
+            });
+}
+
+void ConnectionManager::connectChannelSignals(const std::shared_ptr<Link>& link) {
     connect(link->transport.get(), &PeerConnection::controlChannelOpened, this, [this, link] {
         if (!isCurrent(link)) {
             return;
@@ -465,6 +499,9 @@ void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
             [channelClosed] { channelClosed(true); });
     connect(link->transport.get(), &PeerConnection::chatChannelClosed, this,
             [channelClosed] { channelClosed(false); });
+}
+
+void ConnectionManager::connectDataSignals(const std::shared_ptr<Link>& link) {
     connect(link->transport.get(), &PeerConnection::controlTextReceived, this,
             [this, link](const QString& text) {
                 if (!isCurrent(link)) {
@@ -489,17 +526,6 @@ void ConnectionManager::configure(const std::shared_ptr<Link>& link) {
                 link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
                 emit audioFrameReceived(link->connectionId, timestamp, payload, receivedAtNs);
             });
-    connect(link->transport.get(), &PeerConnection::errorOccurred, this,
-            [this, link](const QString& error) {
-                if (!isCurrent(link)) {
-                    return;
-                }
-                if (!link->open) {
-                    fail(link, ConnectionAttemptState::Failed, "Ошибка P2P-транспорта: " + error);
-                    return;
-                }
-                emit statusChanged("Ошибка P2P-транспорта: " + error);
-            });
 }
 
 void ConnectionManager::updateTransportReadiness(const std::shared_ptr<Link>& link) {
@@ -523,7 +549,6 @@ void ConnectionManager::updateHandshakeReadiness(const std::shared_ptr<Link>& li
     }
     cancelDeadline(link);
     link->open = true;
-    link->everOpened = true;
     link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     setAttemptState(link, ConnectionAttemptState::Connected);
     emit linkOpened(link->connectionId, link->remote);
@@ -580,14 +605,16 @@ void ConnectionManager::suspect(const std::shared_ptr<Link>& link, QString messa
     setAttemptState(link, ConnectionAttemptState::Suspect);
     const auto generation = ++link->disconnectGeneration;
     std::weak_ptr<Link> weak = link;
-    QTimer::singleShot(3000, this, [this, weak, generation, message = std::move(message)] {
-        const auto pending = weak.lock();
-        if (!isCurrent(pending) || pending->disconnectGeneration != generation ||
-            pending->attemptState != ConnectionAttemptState::Suspect) {
-            return;
-        }
-        fail(pending, ConnectionAttemptState::Failed, message);
-    });
+    QTimer::singleShot(
+        policy_.disconnectGracePeriodSeconds * 1000, this,
+        [this, weak, generation, message = std::move(message)] {
+            const auto pending = weak.lock();
+            if (!isCurrent(pending) || pending->disconnectGeneration != generation ||
+                pending->attemptState != ConnectionAttemptState::Suspect) {
+                return;
+            }
+            fail(pending, ConnectionAttemptState::Failed, message);
+        });
 }
 
 void ConnectionManager::fail(const std::shared_ptr<Link>& link, ConnectionAttemptState state,
@@ -596,13 +623,12 @@ void ConnectionManager::fail(const std::shared_ptr<Link>& link, ConnectionAttemp
         return;
     }
     const auto remote = link->remote;
-    const bool meshManaged = link->meshManaged;
-    const bool localOffer = link->localOffer;
+    const auto kind = link->kind;
     link->lastError = message;
     setAttemptState(link, state);
     emit statusChanged(message);
     remove(link);
-    emit attemptFailed(remote, meshManaged, localOffer, message);
+    emit attemptFailed(remote, kind, message);
 }
 
 void ConnectionManager::remove(const std::shared_ptr<Link>& link) {
@@ -615,7 +641,7 @@ void ConnectionManager::remove(const std::shared_ptr<Link>& link) {
     const auto remote = link->remote;
     const auto connectionId = link->connectionId;
     recentAttempts_.prepend(snapshot(link));
-    while (recentAttempts_.size() > 8) {
+    while (recentAttempts_.size() > MaxRecentAttempts) {
         recentAttempts_.removeLast();
     }
     links_.remove(connectionId);
@@ -631,24 +657,20 @@ ConnectionInfo ConnectionManager::snapshot(const std::shared_ptr<Link>& link) co
     const auto transport = link->transport ? link->transport->snapshot() : PeerConnectionSnapshot{};
     info.connectionId = link->connectionId;
     info.remote = link->remote;
+    info.createdAtMs = link->createdAtMs;
     info.open = link->open;
-    info.everOpened = link->everOpened;
-    info.transportOpen = link->transportOpen;
+
+    info.kind = link->kind;
+    info.answerApplied = link->answerApplied;
+    info.generation = link->generation;
+
     info.controlChannelOpen = transport.controlOpen;
     info.chatChannelOpen = transport.chatOpen;
     info.audioTrackOpen = transport.audioTrackOpen;
-    info.audioFramesAttempted = transport.audioFramesAttempted;
-    info.audioFramesSent = transport.audioFramesSent;
-    info.audioFramesReceived = transport.audioFramesReceived;
     info.helloReceived = link->helloReceived;
-    info.localOffer = link->localOffer;
-    info.meshManaged = link->meshManaged;
-    info.answerApplied = link->answerApplied;
-    info.generation = link->generation;
     info.transportState = link->transportState;
     info.attemptState = link->attemptState;
-    info.lastActivityMs = link->lastActivityMs;
-    info.createdAtMs = link->createdAtMs;
+
     info.iceState = link->iceState;
     info.selectedCandidatePair = link->selectedCandidatePair;
     info.lastError = link->lastError;
@@ -656,6 +678,10 @@ ConnectionInfo ConnectionManager::snapshot(const std::shared_ptr<Link>& link) co
     info.serverReflexiveCandidates = link->serverReflexiveCandidates;
     info.relayCandidates = link->relayCandidates;
     info.roundTripTimeMs = link->roundTripTimeMs;
+
+    info.audioFramesAttempted = transport.audioFramesAttempted;
+    info.audioFramesSent = transport.audioFramesSent;
+    info.audioFramesReceived = transport.audioFramesReceived;
     info.controlBufferedBytes = transport.controlBufferedBytes;
     info.chatBufferedBytes = transport.chatBufferedBytes;
     info.queuedControlBytes = transport.queuedControlBytes;

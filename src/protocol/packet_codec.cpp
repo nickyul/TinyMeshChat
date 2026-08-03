@@ -107,13 +107,9 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
                         {"generation", static_cast<qint64>(value.generation)},
                         {"sdp", value.sdp}};
             } else if constexpr (std::is_same_v<T, SessionSignalingPayload>) {
-                QJsonObject result{{"link", value.connectionId},
-                                   {"negotiation", static_cast<qint64>(value.negotiation)},
-                                   {"sdp", value.sdp}};
-                if (!value.reason.isEmpty()) {
-                    result.insert("reason", value.reason);
-                }
-                return result;
+                return {{"link", value.connectionId},
+                        {"negotiation", static_cast<qint64>(value.negotiation)},
+                        {"sdp", value.sdp}};
             } else {
                 static_assert(std::is_same_v<T, HeartbeatPayload>);
                 return {{"nonce", value.nonce},
@@ -227,13 +223,11 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
     case PacketType::SessionAnswer: {
         const auto connectionId = payload.value("link").toString();
         const auto negotiation = payload.value("negotiation").toInteger(-1);
-        const auto reason = payload.value("reason").toString();
         const auto sdp = payload.value("sdp").toString();
-        if (isCanonicalUuid(connectionId) && negotiation >= 0 && reason.size() <= 64 &&
-            !sdp.isEmpty() &&
+        if (isCanonicalUuid(connectionId) && negotiation >= 0 && !sdp.isEmpty() &&
             sdp.toUtf8().size() < PacketCodec::MaxBytes) {
             return Result<PacketPayload>::success(SessionSignalingPayload{
-                connectionId, static_cast<quint64>(negotiation), reason, sdp});
+                connectionId, static_cast<quint64>(negotiation), sdp});
         }
         break;
     }

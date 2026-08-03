@@ -82,7 +82,6 @@ struct LinkSignalingPayload {
 struct SessionSignalingPayload {
     QString connectionId;
     quint64 negotiation{0};
-    QString reason;
     QString sdp;
 };
 

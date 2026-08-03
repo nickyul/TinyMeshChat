@@ -4,7 +4,6 @@
 #include "tmc/app/mesh_coordinator.h"
 #include "tmc/app/mesh_session_state.h"
 #include "tmc/app/messaging_service.h"
-#include "tmc/app/negotiation_policy.h"
 #include "tmc/app/signaling_router.h"
 #include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
@@ -24,7 +23,6 @@
 namespace tmc {
 
 class ApplicationController;
-class SessionPacketHandlers;
 class VoiceSession;
 
 class NetworkSession final : public QObject {
@@ -89,10 +87,41 @@ signals:
     void errorOccurred(QString message);
 
 private:
-    Result<Invitation> decodeSignaling(const QByteArray& document) const;
-    void emitSignaling(const QString& connectionId, const QString& type, const QString& sdp);
+    enum class PacketChannel {
+        Control,
+        Chat,
+    };
 
-    void handleIncoming(const QString& connectionId, const QString& text, bool chatChannel);
+    void connectConnectionSignals();
+    void connectMeshSignals();
+    void connectVoiceSignals();
+    void configureKeepalive();
+    void connectApplicationSignals();
+
+    void handleLinkOpened(const QString& connectionId, const PeerIdentity& remote);
+    void handleLinkRemoved(const QString& connectionId, const PeerIdentity& remote, bool wasOpen);
+    void handleKeepaliveTimeout();
+    void emitSignaling(const QString& connectionId, const QString& sdp);
+
+    void handleIncoming(const QString& connectionId, const QString& text, PacketChannel channel);
+    void handlePacket(const QString& connectionId, const Packet& packet);
+    void handlePeerHello(const QString& connectionId, const Packet& packet);
+    void handlePeerSnapshot(const QString& connectionId, const Packet& packet);
+    void handlePeerAnnounce(const QString& connectionId, const Packet& packet);
+    void handlePeerLeave(const QString& connectionId, const Packet& packet);
+    void handleChatMessage(const QString& connectionId, const Packet& packet);
+    void handleChatAck(const Packet& packet);
+    void handleVoiceState(const Packet& packet);
+    void handleVoiceQuality(const Packet& packet);
+    void handleRouteRequest(const QString& connectionId, const Packet& packet);
+    void handleRouteReply(const QString& connectionId, const Packet& packet);
+    void handleLinkOffer(const QString& connectionId, const Packet& packet);
+    void handleLinkAnswer(const QString& connectionId, const Packet& packet);
+    void handleSessionOffer(const QString& connectionId, const Packet& packet);
+    void handleSessionAnswer(const QString& connectionId, const Packet& packet);
+    void handlePing(const QString& connectionId, const Packet& packet);
+    void handlePong(const QString& connectionId, const Packet& packet);
+    bool routeLinkSignaling(const QString& connectionId, const Packet& packet);
 
     bool sendPacket(const QString& connectionId, const Packet& packet);
     Packet basePacket(PacketType type, PacketPayload payload) const;
@@ -118,21 +147,24 @@ private:
 
     ApplicationController& app_;
     ConnectionPolicy policy_;
+
     std::unique_ptr<ConnectionManager> connections_;
-    std::unique_ptr<SessionPacketHandlers> packetHandlers_;
     MeshCoordinator mesh_;
     SignalingRouter router_;
     MessagingService messaging_;
     std::unique_ptr<VoiceSession> voice_;
+
     QTimer* keepalive_{};
     QString manualInvitationConnectionId_;
     QHash<QString, QList<Packet>> pendingRouted_;
     QHash<QString, QString> routeRequests_;
     QHash<QString, quint64> audioNegotiations_;
+
     struct PendingPing {
         QString nonce;
         qint64 sentAtNs{0};
     };
+
     QHash<QString, PendingPing> pendingPings_;
 };
 

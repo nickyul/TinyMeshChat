@@ -17,27 +17,37 @@
 
 namespace tmc {
 
+enum class ConnectionKind { ManualOffer, ManualAnswer, MeshOffer, MeshAnswer };
+
+constexpr bool isOffer(ConnectionKind kind) {
+    return kind == ConnectionKind::ManualOffer || kind == ConnectionKind::MeshOffer;
+}
+
+constexpr bool isMeshManaged(ConnectionKind kind) {
+    return kind == ConnectionKind::MeshOffer || kind == ConnectionKind::MeshAnswer;
+}
+
 struct ConnectionInfo {
+    // Identity and lifetime.
     QString connectionId;
     PeerIdentity remote;
+    qint64 createdAtMs{0};
     bool open{false};
-    bool everOpened{false};
-    bool transportOpen{false};
+
+    // Signaling role and progress.
+    ConnectionKind kind{ConnectionKind::ManualOffer};
+    bool answerApplied{false};
+    quint64 generation{0};
+
+    // Transport and handshake readiness.
     bool controlChannelOpen{false};
     bool chatChannelOpen{false};
     bool audioTrackOpen{false};
-    quint64 audioFramesAttempted{0};
-    quint64 audioFramesSent{0};
-    quint64 audioFramesReceived{0};
     bool helloReceived{false};
-    bool localOffer{false};
-    bool meshManaged{false};
-    bool answerApplied{false};
-    quint64 generation{0};
     ConnectionState transportState{ConnectionState::Disconnected};
     ConnectionAttemptState attemptState{ConnectionAttemptState::Gathering};
-    qint64 lastActivityMs{0};
-    qint64 createdAtMs{0};
+
+    // ICE and connection diagnostics.
     QString iceState{"new"};
     QString selectedCandidatePair;
     QString lastError;
@@ -45,6 +55,11 @@ struct ConnectionInfo {
     int serverReflexiveCandidates{0};
     int relayCandidates{0};
     int roundTripTimeMs{-1};
+
+    // Traffic diagnostics.
+    quint64 audioFramesAttempted{0};
+    quint64 audioFramesSent{0};
+    quint64 audioFramesReceived{0};
     quint64 controlBufferedBytes{0};
     quint64 chatBufferedBytes{0};
     quint64 queuedControlBytes{0};
@@ -58,19 +73,18 @@ public:
     ConnectionManager(QStringList stunServers, ConnectionPolicy policy, QObject* parent = nullptr);
     ~ConnectionManager() override;
 
-    Result<void> create(const QString& connectionId, const PeerIdentity& remote, bool localOffer,
-                        bool meshManaged, quint64 generation = 0);
+    Result<void> create(const QString& connectionId, const PeerIdentity& remote,
+                        ConnectionKind kind, quint64 generation = 0);
     Result<void> startOffer(const QString& connectionId);
     Result<void> acceptOffer(const QString& connectionId, const QString& sdp);
     Result<void> acceptAnswer(const QString& connectionId, const QString& sdp);
     Result<void> startAudioOffer(const QString& connectionId);
     Result<void> acceptAudioOffer(const QString& connectionId, const QString& sdp);
     Result<void> acceptAudioAnswer(const QString& connectionId, const QString& sdp);
-    void setRemote(const QString& connectionId, const PeerIdentity& remote);
     void markHelloReceived(const QString& connectionId, const PeerIdentity& remote);
 
     void discard(const QString& connectionId);
-    void discardStale(const QString& peerId = {});
+    void markTimedOut(const QString& connectionId, const QString& message);
 
     bool contains(const QString& connectionId) const;
     std::optional<ConnectionInfo> info(const QString& connectionId) const;
@@ -89,7 +103,7 @@ public:
     void sendAudioFrameToOpen(quint32 sequence, const QByteArray& payload);
 
 signals:
-    void localDescriptionReady(QString connectionId, QString type, QString sdp);
+    void localDescriptionReady(QString connectionId, QString sdp);
     void audioDescriptionReady(QString connectionId, QString type, QString sdp);
     void transportOpened(QString connectionId, tmc::PeerIdentity remote);
     void linkOpened(QString connectionId, tmc::PeerIdentity remote);
@@ -99,8 +113,7 @@ signals:
     void audioFrameReceived(QString connectionId, quint32 timestamp, QByteArray payload,
                             qint64 receivedAtNs);
     void attemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
-    void attemptFailed(tmc::PeerIdentity remote, bool meshManaged, bool localOffer,
-                       QString message);
+    void attemptFailed(tmc::PeerIdentity remote, tmc::ConnectionKind kind, QString message);
     void statusChanged(QString status);
 
 private:
@@ -110,6 +123,11 @@ private:
     bool isCurrent(const std::shared_ptr<Link>& link) const;
 
     void configure(const std::shared_ptr<Link>& link);
+    void connectIceSignals(const std::shared_ptr<Link>& link);
+    void connectSignalingSignals(const std::shared_ptr<Link>& link);
+    void connectTransportSignals(const std::shared_ptr<Link>& link);
+    void connectChannelSignals(const std::shared_ptr<Link>& link);
+    void connectDataSignals(const std::shared_ptr<Link>& link);
     void updateTransportReadiness(const std::shared_ptr<Link>& link);
     void updateHandshakeReadiness(const std::shared_ptr<Link>& link);
     void setAttemptState(const std::shared_ptr<Link>& link, ConnectionAttemptState state);
@@ -129,3 +147,5 @@ private:
 };
 
 } // namespace tmc
+
+Q_DECLARE_METATYPE(tmc::ConnectionKind)
