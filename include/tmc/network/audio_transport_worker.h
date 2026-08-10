@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 namespace rtc {
 
@@ -30,7 +31,8 @@ public:
     quint64 framesReceived() const;
 
 private:
-    std::atomic<std::shared_ptr<rtc::Track>> track_;
+    mutable std::mutex trackMutex_;
+    std::shared_ptr<rtc::Track> track_;
     std::atomic<quint64> framesAttempted_{0};
     std::atomic<quint64> framesSent_{0};
     std::atomic<quint64> framesReceived_{0};

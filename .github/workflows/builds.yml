@@ -35,6 +35,9 @@ jobs:
           target: desktop
           cache: true
 
+      - name: Install WebRTC build tools
+        run: brew install nasm
+
       - name: Cache vcpkg binaries
         id: cache_vcpkg_binaries_macos
         uses: actions/cache@v4

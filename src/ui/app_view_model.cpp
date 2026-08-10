@@ -76,20 +76,9 @@ public:
     }
 
     void add(const ChatMessage& message, QString author, bool local) {
-        int row = 0;
-        while (row < rows_.size()) {
-            const auto& current = rows_[row].message;
-            if (message.logicalClock < current.logicalClock ||
-                (message.logicalClock == current.logicalClock &&
-                 message.senderId < current.senderId) ||
-                (message.logicalClock == current.logicalClock &&
-                 message.senderId == current.senderId && message.messageId < current.messageId)) {
-                break;
-            }
-            ++row;
-        }
+        const int row = rows_.size();
         beginInsertRows({}, row, row);
-        rows_.insert(row, {message, std::move(author), 0, 0, local});
+        rows_.append({message, std::move(author), 0, 0, local});
         endInsertRows();
         constexpr int MaxVisibleMessages = 2000;
         if (rows_.size() > MaxVisibleMessages) {

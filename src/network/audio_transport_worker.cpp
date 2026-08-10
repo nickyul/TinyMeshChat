@@ -115,16 +115,22 @@ struct AudioTransportWorker::State {
 };
 
 void AudioTransportEndpoint::setTrack(std::shared_ptr<rtc::Track> track) {
-    track_.store(std::move(track), std::memory_order_release);
+    std::lock_guard lock(trackMutex_);
+    track_ = std::move(track);
 }
 
 void AudioTransportEndpoint::clearTrack() {
-    track_.store({}, std::memory_order_release);
+    std::lock_guard lock(trackMutex_);
+    track_.reset();
 }
 
 bool AudioTransportEndpoint::send(const OutgoingOpusAudioFrame& frame) {
     framesAttempted_.fetch_add(1, std::memory_order_relaxed);
-    const auto track = track_.load(std::memory_order_acquire);
+    std::shared_ptr<rtc::Track> track;
+    {
+        std::lock_guard lock(trackMutex_);
+        track = track_;
+    }
     if (!track || !track->isOpen() || frame.opusPayload.isEmpty()) {
         return false;
     }
@@ -141,7 +147,11 @@ bool AudioTransportEndpoint::send(const OutgoingOpusAudioFrame& frame) {
 }
 
 bool AudioTransportEndpoint::isOpen() const {
-    const auto track = track_.load(std::memory_order_acquire);
+    std::shared_ptr<rtc::Track> track;
+    {
+        std::lock_guard lock(trackMutex_);
+        track = track_;
+    }
     return track && track->isOpen();
 }
 
