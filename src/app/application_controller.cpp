@@ -43,22 +43,11 @@ Result<InitializationState> ApplicationController::initialize() {
         return Result<InitializationState>::failure("Cannot create the user configuration: " +
                                                     configPath);
     }
-    const auto configPermissions = QFile::permissions(configPath);
-    if (!(configPermissions & QFileDevice::WriteOwner) &&
-        !QFile::setPermissions(configPath, configPermissions | QFileDevice::WriteOwner |
-                                               QFileDevice::WriteUser)) {
-        return Result<InitializationState>::failure(
-            "Cannot make the user configuration writable: " + configPath);
-    }
     auto config = AppConfig::load(configPath);
     if (!config) {
         return Result<InitializationState>::failure(config.error());
     }
     config_ = config.value();
-    const auto normalizedConfig = config_.save(configPath);
-    if (!normalizedConfig) {
-        return Result<InitializationState>::failure(normalizedConfig.error());
-    }
     identityPath_ = dataDir_ + "/identity.json";
     if (!QFile::exists(identityPath_)) {
         return Result<InitializationState>::success(InitializationState::DisplayNameRequired);

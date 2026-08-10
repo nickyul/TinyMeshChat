@@ -1,6 +1,7 @@
 #include "tmc/app/connection_manager.h"
 
 #include "tmc/core/logger.h"
+#include "tmc/network/audio_transport_worker.h"
 #include "tmc/network/peer_connection.h"
 
 #include <QDateTime>
@@ -57,11 +58,15 @@ struct ConnectionManager::Link {
 
 ConnectionManager::ConnectionManager(QStringList stunServers, ConnectionPolicy policy,
                                      QObject* parent)
-    : QObject(parent), stunServers_(std::move(stunServers)), policy_(policy) {
+    : QObject(parent), stunServers_(std::move(stunServers)), policy_(policy),
+      audioTransport_(std::make_shared<AudioTransportWorker>()) {
     Q_ASSERT(policy_.isValid());
 }
 
-ConnectionManager::~ConnectionManager() = default;
+ConnectionManager::~ConnectionManager() {
+    audioTransport_->stop();
+    links_.clear();
+}
 
 void ConnectionManager::setStunServers(QStringList stunServers) {
     stunServers_ = std::move(stunServers);
@@ -72,9 +77,8 @@ int ConnectionManager::recordRoundTripTime(const QString& connectionId, int samp
     if (!link || sampleMs < 0) {
         return -1;
     }
-    link->roundTripTimeMs = link->roundTripTimeMs < 0
-                                ? sampleMs
-                                : (link->roundTripTimeMs * 3 + sampleMs) / 4;
+    link->roundTripTimeMs =
+        link->roundTripTimeMs < 0 ? sampleMs : (link->roundTripTimeMs * 3 + sampleMs) / 4;
     return link->roundTripTimeMs;
 }
 
@@ -89,7 +93,8 @@ Result<void> ConnectionManager::create(const QString& connectionId, const PeerId
     link->kind = kind;
     link->generation = generation;
     link->createdAtMs = QDateTime::currentMSecsSinceEpoch();
-    link->transport = std::make_shared<PeerConnection>(stunServers_);
+    link->transport = std::make_shared<PeerConnection>(stunServers_, connectionId, audioTransport_);
+    audioTransport_->registerConnection(connectionId, link->transport->audioEndpoint());
     links_.insert(connectionId, link);
     configure(link);
     emit attemptChanged(connectionId, link->attemptState);
@@ -173,8 +178,7 @@ Result<void> ConnectionManager::startAudioOffer(const QString& connectionId) {
     }
 }
 
-Result<void> ConnectionManager::acceptAudioOffer(const QString& connectionId,
-                                                 const QString& sdp) {
+Result<void> ConnectionManager::acceptAudioOffer(const QString& connectionId, const QString& sdp) {
     const auto link = current(connectionId);
     if (!link || !link->open) {
         return Result<void>::failure("Открытое соединение не найдено.");
@@ -187,8 +191,7 @@ Result<void> ConnectionManager::acceptAudioOffer(const QString& connectionId,
     }
 }
 
-Result<void> ConnectionManager::acceptAudioAnswer(const QString& connectionId,
-                                                  const QString& sdp) {
+Result<void> ConnectionManager::acceptAudioAnswer(const QString& connectionId, const QString& sdp) {
     const auto link = current(connectionId);
     if (!link || !link->open) {
         return Result<void>::failure("Открытое соединение не найдено.");
@@ -201,8 +204,7 @@ Result<void> ConnectionManager::acceptAudioAnswer(const QString& connectionId,
     }
 }
 
-void ConnectionManager::markHelloReceived(const QString& connectionId,
-                                           const PeerIdentity& remote) {
+void ConnectionManager::markHelloReceived(const QString& connectionId, const PeerIdentity& remote) {
     const auto link = current(connectionId);
     if (!link) {
         return;
@@ -210,6 +212,7 @@ void ConnectionManager::markHelloReceived(const QString& connectionId,
     link->remote = remote;
     link->helloReceived = true;
     link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+    audioTransport_->updateConnection(connectionId, remote.peerId, false);
     updateHandshakeReadiness(link);
 }
 
@@ -308,6 +311,10 @@ int ConnectionManager::connectedPeerCount() const {
     return peers.size();
 }
 
+std::shared_ptr<AudioTransportWorker> ConnectionManager::audioTransport() const {
+    return audioTransport_;
+}
+
 bool ConnectionManager::sendControl(const QString& connectionId, const QString& text) {
     const auto link = current(connectionId);
     return link && link->controlChannelOpen && link->transport->sendControl(text);
@@ -316,14 +323,6 @@ bool ConnectionManager::sendControl(const QString& connectionId, const QString& 
 bool ConnectionManager::sendChat(const QString& connectionId, const QString& text) {
     const auto link = current(connectionId);
     return link && link->open && link->chatChannelOpen && link->transport->sendChat(text);
-}
-
-void ConnectionManager::sendAudioFrameToOpen(quint32 sequence, const QByteArray& payload) {
-    for (const auto& link : links_) {
-        if (link->open) {
-            link->transport->sendAudioFrame(sequence, payload);
-        }
-    }
 }
 
 std::shared_ptr<ConnectionManager::Link>
@@ -385,8 +384,8 @@ void ConnectionManager::connectIceSignals(const std::shared_ptr<Link>& link) {
                 }
                 link->selectedCandidatePair = localType + " -> " + remoteType;
                 Logger::instance().log(QtInfoMsg, "ice",
-                                        link->connectionId.left(8) +
-                                            " selected=" + link->selectedCandidatePair);
+                                       link->connectionId.left(8) +
+                                           " selected=" + link->selectedCandidatePair);
             });
 }
 
@@ -399,9 +398,8 @@ void ConnectionManager::connectSignalingSignals(const std::shared_ptr<Link>& lin
             }
             cancelDeadline(link);
             link->signalingProduced = true;
-            setAttemptState(
-                link, isOffer(link->kind) ? ConnectionAttemptState::AwaitingAnswer
-                                          : ConnectionAttemptState::AwaitingConnection);
+            setAttemptState(link, isOffer(link->kind) ? ConnectionAttemptState::AwaitingAnswer
+                                                      : ConnectionAttemptState::AwaitingConnection);
             startDeadline(link,
                           isMeshManaged(link->kind) ? policy_.connectionTimeoutSeconds
                                                     : policy_.manualSignalingTimeoutSeconds,
@@ -457,8 +455,7 @@ void ConnectionManager::connectTransportSignals(const std::shared_ptr<Link>& lin
                     return;
                 }
                 if (!link->open) {
-                    fail(link, ConnectionAttemptState::Failed,
-                         "Ошибка P2P-транспорта: " + error);
+                    fail(link, ConnectionAttemptState::Failed, "Ошибка P2P-транспорта: " + error);
                     return;
                 }
                 emit statusChanged("Ошибка P2P-транспорта: " + error);
@@ -518,14 +515,6 @@ void ConnectionManager::connectDataSignals(const std::shared_ptr<Link>& link) {
                 link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
                 emit chatTextReceived(link->connectionId, text);
             });
-    connect(link->transport.get(), &PeerConnection::audioFrameReceived, this,
-            [this, link](quint32 timestamp, const QByteArray& payload, qint64 receivedAtNs) {
-                if (!isCurrent(link)) {
-                    return;
-                }
-                link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
-                emit audioFrameReceived(link->connectionId, timestamp, payload, receivedAtNs);
-            });
 }
 
 void ConnectionManager::updateTransportReadiness(const std::shared_ptr<Link>& link) {
@@ -550,6 +539,7 @@ void ConnectionManager::updateHandshakeReadiness(const std::shared_ptr<Link>& li
     cancelDeadline(link);
     link->open = true;
     link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+    audioTransport_->updateConnection(link->connectionId, link->remote.peerId, true);
     setAttemptState(link, ConnectionAttemptState::Connected);
     emit linkOpened(link->connectionId, link->remote);
 }
@@ -598,23 +588,21 @@ void ConnectionManager::cancelDeadline(const std::shared_ptr<Link>& link) {
 }
 
 void ConnectionManager::suspect(const std::shared_ptr<Link>& link, QString message) {
-    if (!isCurrent(link) || !link->open ||
-        link->attemptState == ConnectionAttemptState::Suspect) {
+    if (!isCurrent(link) || !link->open || link->attemptState == ConnectionAttemptState::Suspect) {
         return;
     }
     setAttemptState(link, ConnectionAttemptState::Suspect);
     const auto generation = ++link->disconnectGeneration;
     std::weak_ptr<Link> weak = link;
-    QTimer::singleShot(
-        policy_.disconnectGracePeriodSeconds * 1000, this,
-        [this, weak, generation, message = std::move(message)] {
-            const auto pending = weak.lock();
-            if (!isCurrent(pending) || pending->disconnectGeneration != generation ||
-                pending->attemptState != ConnectionAttemptState::Suspect) {
-                return;
-            }
-            fail(pending, ConnectionAttemptState::Failed, message);
-        });
+    QTimer::singleShot(policy_.disconnectGracePeriodSeconds * 1000, this,
+                       [this, weak, generation, message = std::move(message)] {
+                           const auto pending = weak.lock();
+                           if (!isCurrent(pending) || pending->disconnectGeneration != generation ||
+                               pending->attemptState != ConnectionAttemptState::Suspect) {
+                               return;
+                           }
+                           fail(pending, ConnectionAttemptState::Failed, message);
+                       });
 }
 
 void ConnectionManager::fail(const std::shared_ptr<Link>& link, ConnectionAttemptState state,
@@ -645,6 +633,7 @@ void ConnectionManager::remove(const std::shared_ptr<Link>& link) {
         recentAttempts_.removeLast();
     }
     links_.remove(connectionId);
+    audioTransport_->unregisterConnection(connectionId);
     if (link->transport) {
         QObject::disconnect(link->transport.get(), nullptr, this, nullptr);
         link->transport.reset();

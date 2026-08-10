@@ -2,5 +2,28 @@
   "stun_servers": [
     "stun:stun.l.google.com:19302",
     "stun:stun.cloudflare.com:3478"
-  ]
+  ],
+  "audio": {
+    "capture_device": "",
+    "playback_device": "",
+    "echo_cancellation": false,
+    "high_pass_filter": true,
+    "noise_suppression": true,
+    "noise_suppression_level": "moderate",
+    "automatic_gain_control": true,
+    "agc_target_level_dbfs": 3,
+    "agc_compression_gain_db": 9,
+    "agc_limiter": true,
+    "output_volume": 100,
+    "quality_kbps": 48,
+    "input_mode": "voice_activity",
+    "vad_threshold": 0.15,
+    "vad_hangover_ms": 200,
+    "ptt_binding": {
+      "type": "keyboard",
+      "platform": "",
+      "code": 86,
+      "name": "V"
+    }
+  }
 }

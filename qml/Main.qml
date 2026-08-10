@@ -544,6 +544,7 @@ ApplicationWindow {
                                     required property bool connected
                                     required property bool voiceJoined
                                     required property bool muted
+                                    required property bool talking
                                     required property bool isSelf
                                     required property string peerId
                                     required property int volume
@@ -556,6 +557,8 @@ ApplicationWindow {
                                     height: peerContent.implicitHeight + 8
                                     radius: 7
                                     color: peerDelegate.isSelf ? appPalette.participantSelfBackground : "transparent"
+                                    border.width: peerDelegate.talking ? 1 : 0
+                                    border.color: appPalette.success
 
                                     ColumnLayout {
                                         id: peerContent
@@ -594,10 +597,22 @@ ApplicationWindow {
                                             Layout.preferredHeight: 22
                                             spacing: 6
 
+                                            Rectangle {
+                                                Layout.preferredWidth: 8
+                                                Layout.preferredHeight: 8
+                                                visible: peerDelegate.voiceJoined
+                                                radius: width / 2
+                                                color: peerDelegate.talking ? appPalette.success : "transparent"
+                                                border.width: peerDelegate.talking ? 0 : 1
+                                                border.color: appPalette.inactive
+                                            }
+
                                             Label {
                                                 visible: peerDelegate.voiceJoined
-                                                text: peerDelegate.muted ? qsTr("Микрофон выкл.") : qsTr("В звонке")
-                                                color: peerDelegate.muted ? appPalette.warning : appPalette.success
+                                                text: peerDelegate.talking ? qsTr("Говорит")
+                                                                          : (peerDelegate.muted ? qsTr("Микрофон выкл.") : qsTr("В звонке"))
+                                                color: peerDelegate.talking ? appPalette.success
+                                                                            : (peerDelegate.muted ? appPalette.warning : appPalette.textSecondary)
                                                 font.pixelSize: 10
                                             }
 

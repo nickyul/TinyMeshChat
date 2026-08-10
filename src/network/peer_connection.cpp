@@ -1,20 +1,24 @@
 #include "tmc/network/peer_connection.h"
 
 #include "tmc/core/logger.h"
+#include "tmc/network/audio_transport_worker.h"
 
 #include <QPointer>
 #include <QQueue>
+#include <QRandomGenerator>
 #include <QThread>
 
 #include <atomic>
 #include <chrono>
-#include <stdexcept>
+#include <cstddef>
+#include <functional>
+#include <rtc/mediahandler.hpp>
 #include <rtc/rtc.hpp>
 #include <rtc/rtcpreceivingsession.hpp>
 #include <rtc/rtcpsrreporter.hpp>
-#include <rtc/rtpdepacketizer.hpp>
 #include <rtc/rtppacketizationconfig.hpp>
 #include <rtc/rtppacketizer.hpp>
+#include <stdexcept>
 
 namespace tmc {
 
@@ -30,11 +34,17 @@ enum class AudioNegotiationState {
 } // namespace
 
 struct PeerConnection::State {
+    QString connectionId;
+    std::weak_ptr<AudioTransportWorker> audioTransport;
+
     // WebRTC transports.
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> controlDc;
     std::shared_ptr<rtc::DataChannel> chatDc;
     std::shared_ptr<rtc::Track> audioTrack;
+    std::shared_ptr<AudioTransportEndpoint> audioEndpoint{
+        std::make_shared<AudioTransportEndpoint>()};
+    quint32 audioSsrc{0};
 
     // Text backpressure.
     QQueue<QByteArray> controlQueue;
@@ -44,9 +54,6 @@ struct PeerConnection::State {
 
     // Audio negotiation and diagnostics.
     std::atomic<AudioNegotiationState> audioNegotiation{AudioNegotiationState::Idle};
-    std::atomic<quint64> audioFramesAttempted{0};
-    std::atomic<quint64> audioFramesSent{0};
-    std::atomic<quint64> audioFramesReceived{0};
 };
 
 namespace {
@@ -55,8 +62,7 @@ constexpr size_t TextBufferedHighWater = 256 * 1024;
 constexpr size_t TextBufferedLowWater = 64 * 1024;
 constexpr quint64 MaxQueuedTextBytes = 512 * 1024;
 constexpr quint8 OpusPayloadType = 111;
-constexpr quint32 AudioSsrc = 0x544d4301;
-constexpr quint32 OpusFrameSamples = 960;
+constexpr size_t MaxOpusPayloadBytes = 4000;
 constexpr auto OpusProfile =
     "minptime=10;maxaveragebitrate=48000;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1";
 
@@ -65,6 +71,77 @@ qint64 monotonicNs() {
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+class OpusRtpFrameHandler final : public rtc::MediaHandler {
+public:
+    using Callback = std::function<void(quint32, quint16, quint32, QByteArray, qint64)>;
+
+    explicit OpusRtpFrameHandler(Callback callback) : callback_(std::move(callback)) {
+    }
+
+    void incoming(rtc::message_vector& messages, const rtc::message_callback&) override {
+        rtc::message_vector remaining;
+        for (auto& message : messages) {
+            if (message->type == rtc::Message::Control) {
+                remaining.push_back(std::move(message));
+                continue;
+            }
+            if (message->size() < 12) {
+                continue;
+            }
+            const auto byteAt = [&](size_t index) {
+                return std::to_integer<quint8>((*message)[index]);
+            };
+            const auto first = byteAt(0);
+            if ((first >> 6) != 2 || (byteAt(1) & 0x7f) != OpusPayloadType) {
+                continue;
+            }
+            size_t headerSize = 12 + static_cast<size_t>(first & 0x0f) * 4;
+            if (message->size() < headerSize) {
+                continue;
+            }
+            if ((first & 0x10) != 0) {
+                if (message->size() < headerSize + 4) {
+                    continue;
+                }
+                const auto extensionWords =
+                    static_cast<size_t>((byteAt(headerSize + 2) << 8) | byteAt(headerSize + 3));
+                headerSize += 4 + extensionWords * 4;
+                if (message->size() < headerSize) {
+                    continue;
+                }
+            }
+            auto payloadSize = message->size() - headerSize;
+            if ((first & 0x20) != 0) {
+                if (payloadSize == 0) {
+                    continue;
+                }
+                const auto padding = std::to_integer<quint8>(message->back());
+                if (padding == 0 || padding > payloadSize) {
+                    continue;
+                }
+                payloadSize -= padding;
+            }
+            if (payloadSize == 0 || payloadSize > MaxOpusPayloadBytes) {
+                continue;
+            }
+            const QByteArray payload(reinterpret_cast<const char*>(message->data() + headerSize),
+                                     static_cast<qsizetype>(payloadSize));
+            const auto sequenceNumber = static_cast<quint16>((byteAt(2) << 8) | byteAt(3));
+            const auto readU32 = [&](size_t offset) {
+                return (static_cast<quint32>(byteAt(offset)) << 24) |
+                       (static_cast<quint32>(byteAt(offset + 1)) << 16) |
+                       (static_cast<quint32>(byteAt(offset + 2)) << 8) |
+                       static_cast<quint32>(byteAt(offset + 3));
+            };
+            callback_(readU32(8), sequenceNumber, readU32(4), payload, monotonicNs());
+        }
+        messages.swap(remaining);
+    }
+
+private:
+    Callback callback_;
+};
 
 ConnectionState mapState(rtc::PeerConnection::State s) {
     switch (s) {
@@ -147,8 +224,14 @@ QString candidateTransportName(rtc::Candidate::TransportType type) {
 
 } // namespace
 
-PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
+PeerConnection::PeerConnection(const QStringList& stunServers, QString connectionId,
+                               std::weak_ptr<AudioTransportWorker> audioTransport, QObject* p)
     : QObject(p), state_(std::make_shared<State>()) {
+    state_->connectionId = std::move(connectionId);
+    state_->audioTransport = std::move(audioTransport);
+    do {
+        state_->audioSsrc = QRandomGenerator::global()->generate();
+    } while (state_->audioSsrc == 0);
     rtc::Configuration cfg;
     for (const auto& s : stunServers) {
         cfg.iceServers.emplace_back(s.toStdString());
@@ -175,8 +258,8 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
         } else {
             return;
         }
-        if (!state->audioNegotiation.compare_exchange_strong(
-                expectedState, nextState, std::memory_order_acq_rel)) {
+        if (!state->audioNegotiation.compare_exchange_strong(expectedState, nextState,
+                                                             std::memory_order_acq_rel)) {
             return;
         }
 
@@ -313,9 +396,8 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
                     } else if (dc->label() == "tiny-mesh-chat") {
                         self->configureChatChannel(dc);
                     } else {
-                        emit self->errorOccurred(
-                            "Unknown DataChannel received: " +
-                            QString::fromStdString(dc->label()));
+                        emit self->errorOccurred("Unknown DataChannel received: " +
+                                                 QString::fromStdString(dc->label()));
                         dc->close();
                     }
                 },
@@ -327,6 +409,7 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QObject* p)
 PeerConnection::~PeerConnection() {
     auto s = std::move(state_);
     if (s) {
+        s->audioEndpoint->clearTrack();
         if (s->audioTrack) {
             s->audioTrack->close();
         }
@@ -398,10 +481,10 @@ void PeerConnection::configureTextChannel(const std::shared_ptr<rtc::DataChannel
             self,
             [self, channel, message] {
                 if (self) {
-                    emit self->errorOccurred(
-                        QString(channel == TextChannel::Control ? "Control channel: "
-                                                                : "Chat channel: ") +
-                        message);
+                    emit self->errorOccurred(QString(channel == TextChannel::Control
+                                                         ? "Control channel: "
+                                                         : "Chat channel: ") +
+                                             message);
                 }
             },
             Qt::QueuedConnection);
@@ -457,21 +540,28 @@ void PeerConnection::configureAudioTrack(const std::shared_ptr<rtc::Track>& trac
         return;
     }
     state_->audioTrack = track;
+    state_->audioEndpoint->setTrack(track);
 
     const auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-        AudioSsrc,
-        "tiny-mesh-audio",
-        OpusPayloadType,
+        state_->audioSsrc, "tiny-mesh-audio", OpusPayloadType,
         rtc::OpusRtpPacketizer::DefaultClockRate);
     const auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(rtpConfig);
     packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfig));
-    packetizer->addToChain(std::make_shared<rtc::RtpDepacketizer>(
-        rtc::OpusRtpPacketizer::DefaultClockRate));
+    const auto endpoint = state_->audioEndpoint;
+    packetizer->addToChain(std::make_shared<OpusRtpFrameHandler>(
+        [connectionId = state_->connectionId, audioTransport = state_->audioTransport,
+         endpoint](quint32 ssrc, quint16 sequenceNumber, quint32 rtpTimestamp, QByteArray payload,
+                   qint64 receivedAtNs) {
+            endpoint->recordReceived();
+            if (const auto worker = audioTransport.lock()) {
+                worker->enqueueIncoming(connectionId, ssrc, sequenceNumber, rtpTimestamp,
+                                        std::move(payload), receivedAtNs);
+            }
+        }));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
     QPointer<PeerConnection> self(this);
-    std::weak_ptr<State> weak = state_;
     track->onError([self](const std::string& error) {
         if (!self) {
             return;
@@ -482,24 +572,6 @@ void PeerConnection::configureAudioTrack(const std::shared_ptr<rtc::Track>& trac
             [self, message] {
                 if (self) {
                     emit self->errorOccurred("Audio RTP track: " + message);
-                }
-            },
-            Qt::QueuedConnection);
-    });
-    track->onFrame([self, weak](rtc::binary bytes, rtc::FrameInfo info) {
-        const auto state = weak.lock();
-        if (!self || !state || bytes.empty()) {
-            return;
-        }
-        const auto receivedAtNs = monotonicNs();
-        state->audioFramesReceived.fetch_add(1, std::memory_order_relaxed);
-        const QByteArray payload(reinterpret_cast<const char*>(bytes.data()),
-                                 static_cast<qsizetype>(bytes.size()));
-        QMetaObject::invokeMethod(
-            self,
-            [self, timestamp = info.timestamp, payload, receivedAtNs] {
-                if (self) {
-                    emit self->audioFrameReceived(timestamp, payload, receivedAtNs);
                 }
             },
             Qt::QueuedConnection);
@@ -531,9 +603,7 @@ void PeerConnection::acceptAnswer(const QString& s) {
 void PeerConnection::createAudioOffer() {
     auto expectedState = AudioNegotiationState::Idle;
     if (!state_->audioNegotiation.compare_exchange_strong(
-            expectedState,
-            AudioNegotiationState::CreatingOffer,
-            std::memory_order_acq_rel)) {
+            expectedState, AudioNegotiationState::CreatingOffer, std::memory_order_acq_rel)) {
         throw std::runtime_error("Audio negotiation is already in progress.");
     }
 
@@ -541,13 +611,12 @@ void PeerConnection::createAudioOffer() {
         if (!state_->audioTrack) {
             rtc::Description::Audio audio("audio", rtc::Description::Direction::SendRecv);
             audio.addOpusCodec(OpusPayloadType, OpusProfile);
-            audio.addSSRC(AudioSsrc, "tiny-mesh-audio", "tiny-mesh-audio", "opus");
+            audio.addSSRC(state_->audioSsrc, "tiny-mesh-audio", "tiny-mesh-audio", "opus");
             configureAudioTrack(state_->pc->addTrack(audio));
         }
         state_->pc->setLocalDescription(rtc::Description::Type::Offer);
     } catch (...) {
-        state_->audioNegotiation.store(AudioNegotiationState::Idle,
-                                       std::memory_order_release);
+        state_->audioNegotiation.store(AudioNegotiationState::Idle, std::memory_order_release);
         throw;
     }
 }
@@ -555,9 +624,7 @@ void PeerConnection::createAudioOffer() {
 void PeerConnection::acceptAudioOffer(const QString& sdp) {
     auto expectedState = AudioNegotiationState::Idle;
     if (!state_->audioNegotiation.compare_exchange_strong(
-            expectedState,
-            AudioNegotiationState::CreatingAnswer,
-            std::memory_order_acq_rel)) {
+            expectedState, AudioNegotiationState::CreatingAnswer, std::memory_order_acq_rel)) {
         throw std::runtime_error("Audio negotiation is already in progress.");
     }
 
@@ -565,8 +632,7 @@ void PeerConnection::acceptAudioOffer(const QString& sdp) {
         state_->pc->setRemoteDescription(rtc::Description(sdp.toStdString(), "offer"));
         state_->pc->setLocalDescription(rtc::Description::Type::Answer);
     } catch (...) {
-        state_->audioNegotiation.store(AudioNegotiationState::Idle,
-                                       std::memory_order_release);
+        state_->audioNegotiation.store(AudioNegotiationState::Idle, std::memory_order_release);
         throw;
     }
 }
@@ -589,8 +655,8 @@ bool PeerConnection::sendChat(const QString& text) {
     return sendText(state_->chatDc, text, TextChannel::Chat);
 }
 
-bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel,
-                              const QString& text, TextChannel textChannel) {
+bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel, const QString& text,
+                              TextChannel textChannel) {
     Q_ASSERT(QThread::currentThread() == thread());
 
     if (!channel || !channel->isOpen()) {
@@ -601,10 +667,9 @@ bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel,
         return false;
     }
 
-    auto& queue = textChannel == TextChannel::Control ? state_->controlQueue
-                                                       : state_->chatQueue;
-    auto& queuedBytes = textChannel == TextChannel::Control ? state_->queuedControlBytes
-                                                             : state_->queuedChatBytes;
+    auto& queue = textChannel == TextChannel::Control ? state_->controlQueue : state_->chatQueue;
+    auto& queuedBytes =
+        textChannel == TextChannel::Control ? state_->queuedControlBytes : state_->queuedChatBytes;
     if (!queue.isEmpty() || channel->bufferedAmount() > TextBufferedHighWater) {
         if (queuedBytes + static_cast<quint64>(bytes.size()) > MaxQueuedTextBytes) {
             return false;
@@ -626,15 +691,13 @@ bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel,
 void PeerConnection::flushTextQueue(TextChannel textChannel) {
     Q_ASSERT(QThread::currentThread() == thread());
 
-    const auto channel = textChannel == TextChannel::Control ? state_->controlDc
-                                                              : state_->chatDc;
+    const auto channel = textChannel == TextChannel::Control ? state_->controlDc : state_->chatDc;
     if (!channel || !channel->isOpen()) {
         return;
     }
-    auto& queue = textChannel == TextChannel::Control ? state_->controlQueue
-                                                       : state_->chatQueue;
-    auto& queuedBytes = textChannel == TextChannel::Control ? state_->queuedControlBytes
-                                                             : state_->queuedChatBytes;
+    auto& queue = textChannel == TextChannel::Control ? state_->controlQueue : state_->chatQueue;
+    auto& queuedBytes =
+        textChannel == TextChannel::Control ? state_->queuedControlBytes : state_->queuedChatBytes;
     while (!queue.isEmpty() && channel->bufferedAmount() <= TextBufferedHighWater) {
         const auto& bytes = queue.head();
         try {
@@ -654,12 +717,10 @@ PeerConnectionSnapshot PeerConnection::snapshot() const {
     PeerConnectionSnapshot result;
     result.controlOpen = state_->controlDc && state_->controlDc->isOpen();
     result.chatOpen = state_->chatDc && state_->chatDc->isOpen();
-    result.audioTrackOpen = state_->audioTrack && state_->audioTrack->isOpen();
-    result.audioFramesAttempted =
-        state_->audioFramesAttempted.load(std::memory_order_relaxed);
-    result.audioFramesSent = state_->audioFramesSent.load(std::memory_order_relaxed);
-    result.audioFramesReceived =
-        state_->audioFramesReceived.load(std::memory_order_relaxed);
+    result.audioTrackOpen = state_->audioEndpoint->isOpen();
+    result.audioFramesAttempted = state_->audioEndpoint->framesAttempted();
+    result.audioFramesSent = state_->audioEndpoint->framesSent();
+    result.audioFramesReceived = state_->audioEndpoint->framesReceived();
     result.controlBufferedBytes =
         state_->controlDc ? static_cast<quint64>(state_->controlDc->bufferedAmount()) : 0;
     result.chatBufferedBytes =
@@ -669,22 +730,8 @@ PeerConnectionSnapshot PeerConnection::snapshot() const {
     return result;
 }
 
-bool PeerConnection::sendAudioFrame(quint32 sequence, const QByteArray& opusPayload) {
-    state_->audioFramesAttempted.fetch_add(1, std::memory_order_relaxed);
-    if (!state_->audioTrack || !state_->audioTrack->isOpen() || opusPayload.isEmpty()) {
-        return false;
-    }
-    rtc::binary frame(reinterpret_cast<const rtc::byte*>(opusPayload.constData()),
-                      reinterpret_cast<const rtc::byte*>(opusPayload.constData()) +
-                          opusPayload.size());
-    try {
-        state_->audioTrack->sendFrame(
-            std::move(frame), rtc::FrameInfo(sequence * OpusFrameSamples));
-        state_->audioFramesSent.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    } catch (const std::exception&) {
-        return false;
-    }
+std::shared_ptr<AudioTransportEndpoint> PeerConnection::audioEndpoint() const {
+    return state_->audioEndpoint;
 }
 
 } // namespace tmc

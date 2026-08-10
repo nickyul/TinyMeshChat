@@ -8,18 +8,13 @@ namespace tmc {
 
 VoiceSession::VoiceSession(AudioPreferences preferences, QObject* parent)
     : QObject(parent), audio_(std::make_unique<RtpAudioEngine>(std::move(preferences))) {
-    connect(audio_.get(), &RtpAudioEngine::encodedFrameReady, this,
-            &VoiceSession::encodedFrameReady);
     connect(audio_.get(), &RtpAudioEngine::errorOccurred, this, &VoiceSession::errorOccurred);
-    connect(audio_.get(), &RtpAudioEngine::microphoneLevelChanged, this,
-            &VoiceSession::microphoneLevelChanged);
     connect(audio_.get(), &RtpAudioEngine::networkStatsChanged, this,
             &VoiceSession::networkStatsChanged);
-    connect(audio_.get(), &RtpAudioEngine::microphoneTestPlaybackFinished, this, [this] {
-        if (!active_ && !microphoneTest_) {
-            audio_->stop();
-        }
-    });
+    connect(audio_.get(), &RtpAudioEngine::talkingStateChanged, this,
+            &VoiceSession::talkingStateChanged);
+    connect(audio_.get(), &RtpAudioEngine::peerTalkingStateChanged, this,
+            &VoiceSession::peerTalkingStateChanged);
 }
 
 VoiceSession::~VoiceSession() = default;
@@ -40,6 +35,22 @@ bool VoiceSession::microphoneTest() const {
     return microphoneTest_;
 }
 
+double VoiceSession::microphoneLevel() const {
+    return audio_->microphoneLevel();
+}
+
+AudioPreferences VoiceSession::preferences() const {
+    return audio_->preferences();
+}
+
+std::shared_ptr<IncomingRtpAudioSink> VoiceSession::incomingAudioSink() const {
+    return audio_->incomingSink();
+}
+
+void VoiceSession::setOutgoingAudioSink(std::weak_ptr<OutgoingOpusAudioSink> sink) {
+    audio_->setOutgoingSink(std::move(sink));
+}
+
 Result<void> VoiceSession::start() {
     if (active_) {
         return Result<void>::success();
@@ -50,6 +61,7 @@ Result<void> VoiceSession::start() {
     }
     active_ = true;
     muted_ = false;
+    audio_->setPttPressed(false);
     audio_->setMuted(false);
     emit stateChanged(true, false);
     return Result<void>::success();
@@ -61,6 +73,7 @@ void VoiceSession::leave() {
     }
     active_ = false;
     muted_ = false;
+    audio_->setPttPressed(false);
     if (!microphoneTest_) {
         audio_->stop();
     }
@@ -72,6 +85,9 @@ void VoiceSession::setMuted(bool muted) {
         return;
     }
     muted_ = muted;
+    if (muted_) {
+        audio_->setPttPressed(false);
+    }
     audio_->setMuted(muted);
     emit stateChanged(true, muted_);
 }
@@ -93,7 +109,16 @@ void VoiceSession::setMicrophoneTest(bool enabled) {
         }
     }
     microphoneTest_ = enabled;
+    audio_->setPttPressed(false);
     audio_->setMicrophoneTest(enabled);
+
+    if (!enabled && !active_) {
+        audio_->stop();
+    }
+}
+
+void VoiceSession::setPttPressed(bool pressed) {
+    audio_->setPttPressed(active_ && !muted_ && !microphoneTest_ && pressed);
 }
 
 void VoiceSession::setPeerVolume(const QString& peerId, int percent) {
@@ -115,6 +140,7 @@ QPair<QStringList, QStringList> VoiceSession::refreshDevices() {
 
 void VoiceSession::clear() {
     microphoneTest_ = false;
+    audio_->setPttPressed(false);
     audio_->setMicrophoneTest(false);
     leave();
     audio_->stop();
@@ -123,14 +149,6 @@ void VoiceSession::clear() {
     for (const auto& peerId : peerIds) {
         audio_->removePeer(peerId);
         emit peerChanged(peerId, false, false);
-    }
-}
-
-void VoiceSession::receiveFrame(const QString& peerId, quint32 rtpTimestamp,
-                                const QByteArray& payload,
-                                qint64 transportReceivedAtNs) {
-    if (active_ && !peerId.isEmpty()) {
-        audio_->receiveFrame(peerId, rtpTimestamp, payload, transportReceivedAtNs);
     }
 }
 

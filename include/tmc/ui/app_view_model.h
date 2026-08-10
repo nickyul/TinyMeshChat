@@ -1,9 +1,13 @@
 #pragma once
 
+#include "tmc/core/app_config.h"
+
 #include <QAbstractItemModel>
 #include <QObject>
 #include <QStringList>
+#include <QTimer>
 #include <QUrl>
+#include <QVariantMap>
 
 #include <memory>
 
@@ -14,6 +18,7 @@ class AppLinkController;
 class NetworkSession;
 class MessagesModel;
 class PeersModel;
+class GlobalPttMonitor;
 
 class AppViewModel final : public QObject {
     Q_OBJECT
@@ -30,15 +35,29 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool invitationPending READ invitationPending NOTIFY invitationStateChanged)
     Q_PROPERTY(QString invitationState READ invitationState NOTIFY invitationStateChanged)
     Q_PROPERTY(QString stunServersText READ stunServersText NOTIFY stunServersChanged)
+
+    // Audio properties
     Q_PROPERTY(QStringList captureDevices READ captureDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QStringList playbackDevices READ playbackDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QString captureDevice READ captureDevice NOTIFY audioSettingsChanged)
     Q_PROPERTY(QString playbackDevice READ playbackDevice NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool echoCancellation READ echoCancellation NOTIFY audioSettingsChanged)
+    Q_PROPERTY(bool highPassFilter READ highPassFilter NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool noiseSuppression READ noiseSuppression NOTIFY audioSettingsChanged)
+    Q_PROPERTY(int noiseSuppressionLevel READ noiseSuppressionLevel NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool automaticGainControl READ automaticGainControl NOTIFY audioSettingsChanged)
+    Q_PROPERTY(int agcTargetLevelDbfs READ agcTargetLevelDbfs NOTIFY audioSettingsChanged)
+    Q_PROPERTY(int agcCompressionGainDb READ agcCompressionGainDb NOTIFY audioSettingsChanged)
+    Q_PROPERTY(bool agcLimiter READ agcLimiter NOTIFY audioSettingsChanged)
     Q_PROPERTY(int outputVolume READ outputVolume NOTIFY audioSettingsChanged)
     Q_PROPERTY(int qualityKbps READ qualityKbps NOTIFY audioSettingsChanged)
+    Q_PROPERTY(int inputMode READ inputMode NOTIFY audioSettingsChanged)
+    Q_PROPERTY(double vadThreshold READ vadThreshold NOTIFY audioSettingsChanged)
+    Q_PROPERTY(int vadHangoverMs READ vadHangoverMs NOTIFY audioSettingsChanged)
+    Q_PROPERTY(QString pttBindingName READ pttBindingName NOTIFY pttBindingChanged)
+    Q_PROPERTY(bool pttBindingCapturing READ pttBindingCapturing NOTIFY pttBindingChanged)
+    Q_PROPERTY(bool pttPressed READ pttPressed NOTIFY pttPressedChanged)
+    Q_PROPERTY(bool isTalking READ isTalking NOTIFY talkingStateChanged)
     Q_PROPERTY(bool deafened READ deafened NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool microphoneTest READ microphoneTest NOTIFY audioSettingsChanged)
     Q_PROPERTY(double microphoneLevel READ microphoneLevel NOTIFY microphoneLevelChanged)
@@ -69,10 +88,22 @@ public:
     QString captureDevice() const;
     QString playbackDevice() const;
     bool echoCancellation() const;
+    bool highPassFilter() const;
     bool noiseSuppression() const;
+    int noiseSuppressionLevel() const;
     bool automaticGainControl() const;
+    int agcTargetLevelDbfs() const;
+    int agcCompressionGainDb() const;
+    bool agcLimiter() const;
     int outputVolume() const;
     int qualityKbps() const;
+    int inputMode() const;
+    double vadThreshold() const;
+    int vadHangoverMs() const;
+    QString pttBindingName() const;
+    bool pttBindingCapturing() const;
+    bool pttPressed() const;
+    bool isTalking() const;
     bool deafened() const;
     bool microphoneTest() const;
     double microphoneLevel() const;
@@ -98,10 +129,10 @@ public:
     Q_INVOKABLE void toggleDeafen();
     Q_INVOKABLE void toggleMicrophoneTest();
     Q_INVOKABLE void refreshAudioDevices();
-    Q_INVOKABLE void updateAudioPreferences(const QString& captureDevice,
-                                            const QString& playbackDevice, bool echoCancellation,
-                                            bool noiseSuppression, bool automaticGainControl,
-                                            int outputVolume, int qualityKbps);
+    Q_INVOKABLE void prepareAudioSettings();
+    Q_INVOKABLE void cancelAudioSettingsEdit();
+    Q_INVOKABLE void beginPttBindingCapture();
+    Q_INVOKABLE void updateAudioPreferences(const QVariantMap& settings);
     Q_INVOKABLE void setPeerVolume(const QString& peerId, int percent);
     Q_INVOKABLE void registerAppLinks();
     Q_INVOKABLE void unregisterAppLinks();
@@ -119,6 +150,9 @@ signals:
     void audioDevicesChanged();
     void audioSettingsChanged();
     void microphoneLevelChanged();
+    void pttPressedChanged();
+    void pttBindingChanged();
+    void talkingStateChanged();
     void appLinksRegisteredChanged();
     void errorRequested(QString message);
     void signalingRequested(QString kind, QString text, QString link);
@@ -129,11 +163,17 @@ private:
     void setStatus(const QString& status);
     void reportError(const QString& error);
 
+    void updateMicrophoneLevel();
+    void updateMeterTimerState();
+    void updatePttMonitorState();
+    void setPttPressed(bool pressed);
+
     ApplicationController& controller_;
     AppLinkController& appLinks_;
     std::unique_ptr<NetworkSession> session_;
     std::unique_ptr<MessagesModel> messages_;
     std::unique_ptr<PeersModel> peers_;
+    std::unique_ptr<GlobalPttMonitor> pttMonitor_;
     QByteArray signalingDocument_;
     QString status_;
     QStringList captureDevices_;
@@ -142,6 +182,11 @@ private:
     int connectedPeerCount_{0};
     int expectedPeerCount_{0};
     bool identityRequired_{false};
+    bool pttPressed_{false};
+    bool isTalking_{false};
+    PttBinding pendingPttBinding_;
+
+    QTimer meterTimer_;
 };
 
 } // namespace tmc

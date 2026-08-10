@@ -48,7 +48,9 @@ public:
     void setMuted(bool muted);
     void setDeafened(bool deafened);
     void setMicrophoneTest(bool enabled);
+    void setPttPressed(bool pressed);
     void setPeerVolume(const QString& peerId, int percent);
+    double microphoneLevel() const;
     Result<void> applyAudioPreferences(const AudioPreferences& preferences);
     QPair<QStringList, QStringList> refreshAudioDevices();
 
@@ -78,7 +80,8 @@ signals:
     void deliveryChanged(QString messageId, int acknowledged, int expected);
     void callStateChanged(bool active, bool muted);
     void audioStateChanged();
-    void microphoneLevelChanged(double level);
+    void localTalkingChanged(bool talking);
+    void peerTalkingChanged(QString peerId, bool talking);
     void peerVoiceChanged(QString peerId, bool joined, bool muted);
     void peerAudioStatsChanged(QString peerId, double packetLossPercent, int jitterMs,
                                int bufferMs);
@@ -143,6 +146,7 @@ private:
     void flushRouted(const QString& peerId);
 
     void updateMesh();
+    void updateAudioTransportGates();
     void clearSessionData();
 
     ApplicationController& app_;
@@ -159,6 +163,7 @@ private:
     QHash<QString, QList<Packet>> pendingRouted_;
     QHash<QString, QString> routeRequests_;
     QHash<QString, quint64> audioNegotiations_;
+    bool pttPressed_{false};
 
     struct PendingPing {
         QString nonce;

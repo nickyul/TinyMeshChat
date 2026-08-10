@@ -3,7 +3,6 @@
 #include "tmc/core/app_config.h"
 #include "tmc/core/result.h"
 
-#include <QByteArray>
 #include <QHash>
 #include <QObject>
 #include <QStringList>
@@ -13,6 +12,8 @@
 namespace tmc {
 
 class RtpAudioEngine;
+class IncomingRtpAudioSink;
+class OutgoingOpusAudioSink;
 
 class VoiceSession final : public QObject {
     Q_OBJECT
@@ -26,14 +27,13 @@ public:
     void setMuted(bool muted);
     void setDeafened(bool deafened);
     void setMicrophoneTest(bool enabled);
+    void setPttPressed(bool pressed);
     void setPeerVolume(const QString& peerId, int percent);
     void updateNetworkFeedback(const QString& peerId, double packetLossPercent);
     Result<void> applyPreferences(const AudioPreferences& preferences);
     QPair<QStringList, QStringList> refreshDevices();
     void clear();
 
-    void receiveFrame(const QString& peerId, quint32 rtpTimestamp, const QByteArray& payload,
-                      qint64 transportReceivedAtNs);
     void updatePeer(const QString& peerId, bool joined, bool muted);
     void removePeer(const QString& peerId);
 
@@ -41,13 +41,17 @@ public:
     bool muted() const;
     bool deafened() const;
     bool microphoneTest() const;
+    double microphoneLevel() const;
+    AudioPreferences preferences() const;
+    std::shared_ptr<IncomingRtpAudioSink> incomingAudioSink() const;
+    void setOutgoingAudioSink(std::weak_ptr<OutgoingOpusAudioSink> sink);
 
 signals:
-    void encodedFrameReady(quint32 sequence, QByteArray payload);
     void stateChanged(bool active, bool muted);
     void peerChanged(QString peerId, bool joined, bool muted);
     void errorOccurred(QString message);
-    void microphoneLevelChanged(double level);
+    void talkingStateChanged(bool isTalking);
+    void peerTalkingStateChanged(QString peerId, bool isTalking);
     void networkStatsChanged(QString peerId, double packetLossPercent, int jitterMs, int bufferMs);
 
 private:

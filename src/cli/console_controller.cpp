@@ -16,7 +16,8 @@ ConsoleController::ConsoleController(ApplicationController& a, QObject* p) : QOb
 int ConsoleController::run() {
     QTextStream in(stdin), out(stdout);
     out << "TinyMesh Chat console. /help for commands\n";
-    peer_ = std::make_shared<PeerConnection>(app_.config().stunServers);
+    peer_ = std::make_shared<PeerConnection>(app_.config().stunServers, "console",
+                                             std::weak_ptr<AudioTransportWorker>{});
     connect(peer_.get(), &PeerConnection::stateChanged, this, [&out](auto s) {
         out << "state: " << toString(s) << "\n" << Qt::flush;
     });

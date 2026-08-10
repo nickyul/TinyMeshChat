@@ -18,6 +18,9 @@ class Track;
 
 namespace tmc {
 
+class AudioTransportEndpoint;
+class AudioTransportWorker;
+
 struct PeerConnectionSnapshot {
     bool controlOpen{false};
     bool chatOpen{false};
@@ -35,7 +38,8 @@ class PeerConnection final : public QObject {
     Q_OBJECT
 
 public:
-    explicit PeerConnection(const QStringList& stunServers, QObject* parent = nullptr);
+    PeerConnection(const QStringList& stunServers, QString connectionId,
+                   std::weak_ptr<AudioTransportWorker> audioTransport, QObject* parent = nullptr);
     ~PeerConnection() override;
 
     void createOffer();
@@ -47,7 +51,7 @@ public:
 
     bool sendControl(const QString&);
     bool sendChat(const QString&);
-    bool sendAudioFrame(quint32 sequence, const QByteArray& opusPayload);
+    std::shared_ptr<AudioTransportEndpoint> audioEndpoint() const;
     PeerConnectionSnapshot snapshot() const;
 
 signals:
@@ -64,7 +68,6 @@ signals:
     void chatChannelClosed();
     void controlTextReceived(QString);
     void chatTextReceived(QString);
-    void audioFrameReceived(quint32 timestamp, QByteArray opusPayload, qint64 receivedAtNs);
     void errorOccurred(QString);
 
 private:

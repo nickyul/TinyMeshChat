@@ -13,6 +13,6 @@
         },
         "miniaudio",
         "opus",
-        "speexdsp"
+        "webrtc"
     ]
 }

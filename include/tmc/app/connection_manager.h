@@ -6,7 +6,6 @@
 #include "tmc/network/connection_policy.h"
 #include "tmc/network/connection_state.h"
 
-#include <QByteArray>
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -16,6 +15,8 @@
 #include <optional>
 
 namespace tmc {
+
+class AudioTransportWorker;
 
 enum class ConnectionKind { ManualOffer, ManualAnswer, MeshOffer, MeshAnswer };
 
@@ -97,10 +98,10 @@ public:
 
     void setStunServers(QStringList stunServers);
     int recordRoundTripTime(const QString& connectionId, int sampleMs);
+    std::shared_ptr<AudioTransportWorker> audioTransport() const;
 
     bool sendControl(const QString& connectionId, const QString& text);
     bool sendChat(const QString& connectionId, const QString& text);
-    void sendAudioFrameToOpen(quint32 sequence, const QByteArray& payload);
 
 signals:
     void localDescriptionReady(QString connectionId, QString sdp);
@@ -110,8 +111,6 @@ signals:
     void linkRemoved(QString connectionId, tmc::PeerIdentity remote, bool wasOpen);
     void controlTextReceived(QString connectionId, QString text);
     void chatTextReceived(QString connectionId, QString text);
-    void audioFrameReceived(QString connectionId, quint32 timestamp, QByteArray payload,
-                            qint64 receivedAtNs);
     void attemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
     void attemptFailed(tmc::PeerIdentity remote, tmc::ConnectionKind kind, QString message);
     void statusChanged(QString status);
@@ -144,6 +143,7 @@ private:
     ConnectionPolicy policy_;
     QHash<QString, std::shared_ptr<Link>> links_;
     QList<ConnectionInfo> recentAttempts_;
+    std::shared_ptr<AudioTransportWorker> audioTransport_;
 };
 
 } // namespace tmc

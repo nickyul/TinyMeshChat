@@ -20,9 +20,8 @@ endif()
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
+find_package(unofficial-webrtc CONFIG REQUIRED)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
-find_path(SPEEXDSP_INCLUDE_DIR speex/speex_preprocess.h REQUIRED)
-find_library(SPEEXDSP_LIBRARY NAMES speexdsp REQUIRED)
 
 add_library(tmc_core STATIC)
 target_sources(tmc_core
@@ -44,6 +43,7 @@ target_sources(tmc_core
             include/tmc/core/limits.h
             include/tmc/core/logger.h
             include/tmc/core/result.h
+            include/tmc/core/rtp_audio_frame.h
             include/tmc/core/uuid.h
             include/tmc/identity/identity_manager.h
             include/tmc/identity/peer_identity.h
@@ -57,6 +57,7 @@ target_link_libraries(tmc_core PUBLIC Qt6::Core)
 add_library(tmc_transport STATIC)
 target_sources(tmc_transport
     PRIVATE
+        src/network/audio_transport_worker.cpp
         src/network/peer_connection.cpp
         src/network/sdp_description_codec.cpp
     PUBLIC
@@ -66,6 +67,7 @@ target_sources(tmc_transport
             include/tmc/network/connection_attempt_state.h
             include/tmc/network/connection_policy.h
             include/tmc/network/connection_state.h
+            include/tmc/network/audio_transport_worker.h
             include/tmc/network/peer_connection.h
             include/tmc/network/sdp_description_codec.h
 )
@@ -91,7 +93,6 @@ target_sources(tmc_audio
 )
 target_include_directories(tmc_audio PRIVATE
     "${MINIAUDIO_INCLUDE_DIR}"
-    "${SPEEXDSP_INCLUDE_DIR}"
 )
 target_link_libraries(tmc_audio
     PUBLIC
@@ -99,7 +100,7 @@ target_link_libraries(tmc_audio
         Qt6::Core
     PRIVATE
         Opus::opus
-        "${SPEEXDSP_LIBRARY}"
+        unofficial::webrtc::webrtc
 )
 if(APPLE)
     # TinyMesh Chat uses miniaudio's native CoreAudio backend on macOS. Keeping
@@ -160,6 +161,7 @@ target_sources(TinyMeshChat
         src/cli/console_controller.cpp
         src/ui/app_link_controller.cpp
         src/ui/app_view_model.cpp
+        src/ui/global_ptt_monitor.cpp
         resources/resources.qrc
     PRIVATE
         FILE_SET HEADERS
@@ -171,6 +173,7 @@ target_sources(TinyMeshChat
             include/tmc/cli/console_controller.h
             include/tmc/ui/app_link_controller.h
             include/tmc/ui/app_view_model.h
+            include/tmc/ui/global_ptt_monitor.h
 )
 
 if(APPLE)
@@ -197,6 +200,15 @@ target_link_libraries(TinyMeshChat PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
 )
+
+if(WIN32)
+    target_link_libraries(TinyMeshChat PRIVATE user32)
+elseif(APPLE)
+    target_link_libraries(TinyMeshChat PRIVATE
+        "-framework ApplicationServices"
+        "-framework Carbon"
+    )
+endif()
 
 if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
     add_custom_command(TARGET TinyMeshChat POST_BUILD

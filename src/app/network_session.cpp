@@ -5,6 +5,7 @@
 #include "tmc/app/voice_session.h"
 #include "tmc/core/logger.h"
 #include "tmc/core/uuid.h"
+#include "tmc/network/audio_transport_worker.h"
 #include "tmc/protocol/packet.h"
 #include "tmc/protocol/packet_codec.h"
 #include "tmc/signaling/invitation_codec.h"
@@ -37,6 +38,10 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     qRegisterMetaType<ConnectionKind>();
     qRegisterMetaType<ConnectionAttemptState>();
     qRegisterMetaType<MeshSessionState>();
+
+    const auto audioTransport = connections_->audioTransport();
+    audioTransport->setIncomingSink(voice_->incomingAudioSink());
+    voice_->setOutgoingAudioSink(audioTransport);
 
     connectConnectionSignals();
     connectMeshSignals();
@@ -94,15 +99,6 @@ void NetworkSession::connectConnectionSignals() {
     connect(connections_.get(), &ConnectionManager::chatTextReceived, this,
             [this](const QString& connectionId, const QString& text) {
                 handleIncoming(connectionId, text, PacketChannel::Chat);
-            });
-    connect(connections_.get(), &ConnectionManager::audioFrameReceived, this,
-            [this](const QString& connectionId, quint32 timestamp, const QByteArray& payload,
-                   qint64 receivedAtNs) {
-                const auto connection = connections_->info(connectionId);
-                if (connection) {
-                    voice_->receiveFrame(connection->remote.peerId, timestamp, payload,
-                                         receivedAtNs);
-                }
             });
 }
 
@@ -167,13 +163,11 @@ void NetworkSession::connectMeshSignals() {
 }
 
 void NetworkSession::connectVoiceSignals() {
-    connect(voice_.get(), &VoiceSession::encodedFrameReady, this,
-            [this](quint32 sequence, const QByteArray& payload) {
-                if (voice_->active() && !voice_->muted()) {
-                    connections_->sendAudioFrameToOpen(sequence, payload);
-                }
-            });
     connect(voice_.get(), &VoiceSession::stateChanged, this, [this](bool active, bool muted) {
+        if (!active || muted) {
+            pttPressed_ = false;
+        }
+        updateAudioTransportGates();
         broadcastVoiceState();
         emit callStateChanged(active, muted);
     });
@@ -191,8 +185,10 @@ void NetworkSession::connectVoiceSignals() {
                 sendPacket(connection->connectionId, packet);
             });
     connect(voice_.get(), &VoiceSession::errorOccurred, this, &NetworkSession::errorOccurred);
-    connect(voice_.get(), &VoiceSession::microphoneLevelChanged, this,
-            &NetworkSession::microphoneLevelChanged);
+    connect(voice_.get(), &VoiceSession::talkingStateChanged, this,
+            &NetworkSession::localTalkingChanged);
+    connect(voice_.get(), &VoiceSession::peerTalkingStateChanged, this,
+            &NetworkSession::peerTalkingChanged);
 }
 
 void NetworkSession::configureKeepalive() {
@@ -208,9 +204,9 @@ void NetworkSession::handleKeepaliveTimeout() {
         connections_->inactiveConnectionIds(now, policy_.livenessTimeoutSeconds * 1000LL);
     for (const auto& connectionId : inactive) {
         const auto connection = connections_->info(connectionId);
-        const auto peerName = connection ? peerDisplayName(connection->remote.peerId) : connectionId;
-        connections_->markTimedOut(connectionId,
-                                   "Соединение с участником потеряно: " + peerName);
+        const auto peerName =
+            connection ? peerDisplayName(connection->remote.peerId) : connectionId;
+        connections_->markTimedOut(connectionId, "Соединение с участником потеряно: " + peerName);
     }
 
     for (const auto& connectionId : connections_->openConnectionIds()) {
@@ -218,13 +214,13 @@ void NetworkSession::handleKeepaliveTimeout() {
         const auto connection = connections_->info(connectionId);
         if (connection && (voice_->active() || connection->audioFramesAttempted > 0 ||
                            connection->audioFramesReceived > 0)) {
-            Logger::instance().trace(
-                "voice_transport", QString("peer=%1 track=%2 attempted=%3 sent=%4 received=%5")
-                                       .arg(connection->remote.peerId.left(8),
-                                            connection->audioTrackOpen ? "open" : "closed")
-                                       .arg(connection->audioFramesAttempted)
-                                       .arg(connection->audioFramesSent)
-                                       .arg(connection->audioFramesReceived));
+            Logger::instance().trace("voice_transport",
+                                     QString("peer=%1 track=%2 attempted=%3 sent=%4 received=%5")
+                                         .arg(connection->remote.peerId.left(8),
+                                              connection->audioTrackOpen ? "open" : "closed")
+                                         .arg(connection->audioFramesAttempted)
+                                         .arg(connection->audioFramesSent)
+                                         .arg(connection->audioFramesReceived));
         }
     }
 }
@@ -252,7 +248,16 @@ void NetworkSession::connectApplicationSignals() {
     }
 }
 
-NetworkSession::~NetworkSession() = default;
+NetworkSession::~NetworkSession() {
+    const auto transport = connections_->audioTransport();
+    transport->setReceiveEnabled(false);
+    transport->setTransmitEnabled(false);
+    transport->setIncomingSink({});
+    voice_->setOutgoingAudioSink({});
+    transport->stop();
+    voice_.reset();
+    connections_.reset();
+}
 
 MeshSessionState NetworkSession::meshState() const {
     return mesh_.state();
@@ -273,6 +278,9 @@ void NetworkSession::leaveMesh() {
     if (mesh_.meshId().isEmpty() && connections_->connections().isEmpty()) {
         return;
     }
+    pttPressed_ = false;
+    connections_->audioTransport()->setReceiveEnabled(false);
+    connections_->audioTransport()->setTransmitEnabled(false);
     voice_->leave();
     if (!mesh_.meshId().isEmpty()) {
         auto leave = basePacket(PacketType::PeerLeave, PeerLeavePayload{"left"});
@@ -683,6 +691,9 @@ void NetworkSession::leaveCall() {
     if (!voice_->active()) {
         return;
     }
+    pttPressed_ = false;
+    connections_->audioTransport()->setReceiveEnabled(false);
+    connections_->audioTransport()->setTransmitEnabled(false);
     voice_->leave();
     emit statusChanged("Вы вышли из голосового звонка.");
 }
@@ -691,7 +702,12 @@ void NetworkSession::setMuted(bool muted) {
     if (!voice_->active() || voice_->muted() == muted) {
         return;
     }
+    if (muted) {
+        pttPressed_ = false;
+        connections_->audioTransport()->setTransmitEnabled(false);
+    }
     voice_->setMuted(muted);
+    updateAudioTransportGates();
     emit statusChanged(muted ? "Микрофон выключен." : "Микрофон включён.");
 }
 
@@ -701,16 +717,38 @@ void NetworkSession::setDeafened(bool deafened) {
 }
 
 void NetworkSession::setMicrophoneTest(bool enabled) {
+    if (enabled) {
+        pttPressed_ = false;
+        connections_->audioTransport()->setTransmitEnabled(false);
+    }
     voice_->setMicrophoneTest(enabled);
+    updateAudioTransportGates();
     emit audioStateChanged();
+}
+
+void NetworkSession::setPttPressed(bool pressed) {
+    pttPressed_ = pressed && voice_->active() && !voice_->muted() && !voice_->microphoneTest();
+    if (!pttPressed_) {
+        connections_->audioTransport()->setTransmitEnabled(false);
+    }
+    voice_->setPttPressed(pttPressed_);
+    updateAudioTransportGates();
 }
 
 void NetworkSession::setPeerVolume(const QString& peerId, int percent) {
     voice_->setPeerVolume(peerId, percent);
 }
 
+double NetworkSession::microphoneLevel() const {
+    return voice_ ? voice_->microphoneLevel() : 0.0;
+}
+
 Result<void> NetworkSession::applyAudioPreferences(const AudioPreferences& preferences) {
+    pttPressed_ = false;
+    connections_->audioTransport()->setTransmitEnabled(false);
+    voice_->setPttPressed(false);
     const auto result = voice_->applyPreferences(preferences);
+    updateAudioTransportGates();
     if (result) {
         emit audioStateChanged();
     }
@@ -829,7 +867,21 @@ void NetworkSession::updateMesh() {
     emit meshChanged(connectedPeerCount(), qMax(0, knownPeerCount() - 1));
 }
 
+void NetworkSession::updateAudioTransportGates() {
+    const auto transport = connections_->audioTransport();
+    const bool active = voice_->active();
+    transport->setReceiveEnabled(active);
+
+    const bool canTransmit = active && !voice_->muted() && !voice_->microphoneTest();
+    const bool modeAllowsTransmit =
+        voice_->preferences().inputMode == AudioInputMode::VoiceActivity || pttPressed_;
+    transport->setTransmitEnabled(canTransmit && modeAllowsTransmit);
+}
+
 void NetworkSession::clearSessionData() {
+    pttPressed_ = false;
+    connections_->audioTransport()->setReceiveEnabled(false);
+    connections_->audioTransport()->setTransmitEnabled(false);
     messaging_.clear();
     voice_->clear();
     router_.clear();

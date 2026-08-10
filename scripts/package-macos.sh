@@ -45,18 +45,59 @@ done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*'
 codesign --force --deep --sign - "$dist/TinyMeshChat.app"
 codesign --verify --deep --strict "$dist/TinyMeshChat.app"
 
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  "$@" &
+  local process_id=$!
+  (
+    sleep "$timeout_seconds"
+    if kill -0 "$process_id" 2>/dev/null; then
+      kill -TERM "$process_id" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$process_id" 2>/dev/null || true
+    fi
+  ) &
+  local watchdog_id=$!
+  local status=0
+  wait "$process_id" || status=$?
+  kill "$watchdog_id" 2>/dev/null || true
+  wait "$watchdog_id" 2>/dev/null || true
+  if [[ "$status" -ne 0 ]]; then
+    echo "Smoke command failed or timed out with status $status: $*" >&2
+    return "$status"
+  fi
+}
+
 smoke_data="$(mktemp -d)"
 cleanup_smoke_data() {
   rm -rf "$smoke_data"
 }
 trap cleanup_smoke_data EXIT
 
-TMC_DATA_DIR="$smoke_data" "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" \
-  --console --display-name "CI Smoke" \
+run_with_timeout 30 env TMC_DATA_DIR="$smoke_data" \
+  "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --console --display-name "CI Smoke" \
   <<< "/quit"
+run_with_timeout 30 env TMC_DATA_DIR="$smoke_data" QT_QPA_PLATFORM=offscreen \
+  "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --qml-smoke --display-name "CI Smoke"
 cleanup_smoke_data
 trap - EXIT
 
+while IFS= read -r candidate; do
+  if file "$candidate" | grep -q 'Mach-O'; then
+    architectures="$(lipo -archs "$candidate")"
+    if [[ " $architectures " != *" arm64 "* ]]; then
+      echo "Packaged Mach-O file is not arm64: $candidate ($architectures)" >&2
+      exit 1
+    fi
+    if otool -L "$candidate" | grep -Fq "$build/vcpkg_installed"; then
+      echo "Packaged file still references the vcpkg build tree: $candidate" >&2
+      exit 1
+    fi
+  fi
+done < <(find "$dist/TinyMeshChat.app" -type f)
+
 rm -f "$archive"
 ditto -c -k --sequesterRsrc --keepParent "$dist/TinyMeshChat.app" "$archive"
+unzip -t "$archive"
 echo "Created $archive"
