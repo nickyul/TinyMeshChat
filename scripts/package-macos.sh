@@ -150,6 +150,7 @@ if [[ "$build_velopack" == "1" ]]; then
     --packTitle "TinyMesh Chat" \
     --packVersion "$version" \
     --packDir "$dist/TinyMeshChat.app" \
+    --mainExe TinyMeshChat \
     --runtime osx-arm64 \
     --channel osx-arm64 \
     --noPortable true \
