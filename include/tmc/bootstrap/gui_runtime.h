@@ -4,7 +4,7 @@
 
 #include <memory>
 
-class QGuiApplication;
+class QApplication;
 class QQmlApplicationEngine;
 
 namespace tmc {
@@ -12,6 +12,7 @@ namespace tmc {
 class ApplicationController;
 class AppLinkController;
 class AppViewModel;
+class TrayController;
 
 class GuiRuntime final {
 public:
@@ -27,11 +28,12 @@ private:
     int& argc_;
     char** argv_;
     ApplicationOptions options_;
-    std::unique_ptr<QGuiApplication> application_;
+    std::unique_ptr<QApplication> application_;
     std::unique_ptr<AppLinkController> appLinks_;
     std::unique_ptr<ApplicationController> controller_;
     std::unique_ptr<AppViewModel> viewModel_;
     std::unique_ptr<QQmlApplicationEngine> engine_;
+    std::unique_ptr<TrayController> tray_;
 };
 
 } // namespace tmc

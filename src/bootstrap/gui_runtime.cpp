@@ -3,9 +3,10 @@
 #include "tmc/app/application_controller.h"
 #include "tmc/ui/app_link_controller.h"
 #include "tmc/ui/app_view_model.h"
+#include "tmc/ui/tray_controller.h"
 
+#include <QApplication>
 #include <QCoreApplication>
-#include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -25,7 +26,7 @@ GuiRuntime::GuiRuntime(int& argc, char** argv, ApplicationOptions options)
 GuiRuntime::~GuiRuntime() = default;
 
 int GuiRuntime::run() {
-    application_ = std::make_unique<QGuiApplication>(argc_, argv_);
+    application_ = std::make_unique<QApplication>(argc_, argv_);
     application_->setApplicationName("TinyMesh Chat");
     application_->setOrganizationName("TinyMesh");
     QQuickStyle::setStyle("Basic");
@@ -92,7 +93,11 @@ void GuiRuntime::bringMainWindowToFront() {
         return;
     }
     if (const auto root = qobject_cast<QWindow*>(engine_->rootObjects().constFirst())) {
-        root->show();
+        if (root->windowState() == Qt::WindowMinimized) {
+            root->showNormal();
+        } else {
+            root->show();
+        }
         root->raise();
         root->requestActivate();
     }

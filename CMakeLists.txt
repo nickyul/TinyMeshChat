@@ -162,6 +162,7 @@ target_sources(TinyMeshChat
         src/ui/app_link_controller.cpp
         src/ui/app_view_model.cpp
         src/ui/global_ptt_monitor.cpp
+        src/ui/tray_controller.cpp
         resources/resources.qrc
     PRIVATE
         FILE_SET HEADERS
@@ -174,6 +175,7 @@ target_sources(TinyMeshChat
             include/tmc/ui/app_link_controller.h
             include/tmc/ui/app_view_model.h
             include/tmc/ui/global_ptt_monitor.h
+            include/tmc/ui/tray_controller.h
 )
 
 if(APPLE)
