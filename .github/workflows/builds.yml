@@ -36,7 +36,10 @@ jobs:
           cache: true
 
       - name: Install WebRTC build tools
-        run: brew install nasm
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          brew install nasm
 
       - name: Cache vcpkg binaries
         id: cache_vcpkg_binaries_macos
@@ -61,6 +64,8 @@ jobs:
         run: |
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           echo "vcpkg binary cache hit: ${{ steps.cache_vcpkg_binaries_macos.outputs.cache-hit }}"
+          cmake --preset macos-debug
+          cmake --build --preset macos-debug
           bash scripts/package-macos.sh
 
       - name: Upload macOS app
@@ -112,6 +117,8 @@ jobs:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
         run: |
           New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
+          cmake --preset windows-debug
+          cmake --build --preset windows-debug
           .\scripts\package-windows.ps1
 
       - name: Upload Windows portable app

@@ -2,12 +2,14 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
+#include "tmc/app/update_service.h"
 #include "tmc/messaging/chat_message.h"
 #include "tmc/ui/app_link_controller.h"
 #include "tmc/ui/global_ptt_monitor.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
+#include <QDesktopServices>
 #include <QFile>
 #include <QGuiApplication>
 #include <QVector>
@@ -320,10 +322,34 @@ private:
 };
 
 AppViewModel::AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
-                           bool identityRequired, QObject* parent)
-    : QObject(parent), controller_(controller), appLinks_(appLinks),
+                           UpdateService& updates, bool identityRequired, QObject* parent)
+    : QObject(parent), controller_(controller), appLinks_(appLinks), updates_(updates),
       messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
       pttMonitor_(std::make_unique<GlobalPttMonitor>()), identityRequired_(identityRequired) {
+
+    connect(&updates_, &UpdateService::stateChanged, this, &AppViewModel::updateStateChanged);
+    connect(&updates_, &UpdateService::progressChanged, this,
+            &AppViewModel::updateProgressChanged);
+    connect(&updates_, &UpdateService::updateAvailable, this,
+            &AppViewModel::updatePromptRequested);
+    connect(&updates_, &UpdateService::updateReady, this, [this] {
+        if (!meshVisible()) {
+            emit updatePromptRequested();
+        }
+    });
+    connect(&updates_, &UpdateService::noUpdateAvailable, this, [this](bool manual) {
+        if (manual) {
+            setStatus("Установлена актуальная версия TinyMesh Chat.");
+        }
+    });
+    connect(&updates_, &UpdateService::errorOccurred, this,
+            [this](const QString& error, bool manual) {
+                if (manual) {
+                    reportError(error);
+                }
+            });
+    connect(&updates_, &UpdateService::releasePageRequested, this,
+            [](const QUrl& url) { QDesktopServices::openUrl(url); });
 
     pttMonitor_->setBinding(controller_.config().audio.pttBinding);
     pendingPttBinding_ = pttMonitor_->binding();
@@ -508,6 +534,26 @@ double AppViewModel::microphoneLevel() const {
 
 bool AppViewModel::appLinksRegistered() const {
     return appLinks_.protocolRegistered();
+}
+
+QString AppViewModel::updateState() const {
+    return updates_.state();
+}
+
+QString AppViewModel::updateVersion() const {
+    return updates_.availableVersion();
+}
+
+QString AppViewModel::updateReleaseNotes() const {
+    return updates_.releaseNotes();
+}
+
+int AppViewModel::updateProgress() const {
+    return updates_.progress();
+}
+
+bool AppViewModel::updaterPortable() const {
+    return updates_.portable();
 }
 
 QAbstractItemModel* AppViewModel::messages() const {
@@ -814,6 +860,26 @@ void AppViewModel::unregisterAppLinks() {
     setStatus("Регистрация ссылок tinymesh:// удалена.");
 }
 
+void AppViewModel::checkForUpdates() {
+    updates_.checkForUpdates(true);
+}
+
+void AppViewModel::checkForUpdatesAutomatically() {
+    updates_.checkForUpdates(false);
+}
+
+void AppViewModel::downloadUpdate() {
+    updates_.downloadUpdate();
+}
+
+void AppViewModel::installUpdate() {
+    if (meshVisible()) {
+        setStatus("Обновление готово и будет предложено после выхода из mesh.");
+        return;
+    }
+    updates_.installUpdate();
+}
+
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
     return network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
@@ -840,6 +906,9 @@ void AppViewModel::initializeSession() {
                     messages_->clear();
                     peers_->resetSelf(controller_.identity());
                     setMeshPeerCounts(0, 0);
+                    if (updates_.state() == "ready") {
+                        emit updatePromptRequested();
+                    }
                 }
                 emit meshStateChanged();
             });

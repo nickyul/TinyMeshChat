@@ -1,6 +1,7 @@
 #include "tmc/bootstrap/gui_runtime.h"
 
 #include "tmc/app/application_controller.h"
+#include "tmc/app/update_service.h"
 #include "tmc/ui/app_link_controller.h"
 #include "tmc/ui/app_view_model.h"
 #include "tmc/ui/tray_controller.h"
@@ -29,6 +30,7 @@ int GuiRuntime::run() {
     application_ = std::make_unique<QApplication>(argc_, argv_);
     application_->setApplicationName("TinyMesh Chat");
     application_->setOrganizationName("TinyMesh");
+    application_->setApplicationVersion(QStringLiteral(TMC_APP_VERSION));
     QQuickStyle::setStyle("Basic");
     if (!options_.error.isEmpty()) {
         fprintf(stderr, "%s\n", options_.error.toUtf8().constData());
@@ -62,8 +64,9 @@ int GuiRuntime::run() {
         identityRequired = false;
     }
 
-    viewModel_ =
-        std::make_unique<AppViewModel>(*controller_, *appLinks_, identityRequired);
+    updates_ = std::make_unique<UpdateService>();
+    viewModel_ = std::make_unique<AppViewModel>(*controller_, *appLinks_, *updates_,
+                                                identityRequired);
     engine_ = std::make_unique<QQmlApplicationEngine>();
     engine_->rootContext()->setContextProperty("appViewModel", viewModel_.get());
     engine_->rootContext()->setContextProperty("qmlSmoke", options_.qmlSmoke);
@@ -73,6 +76,17 @@ int GuiRuntime::run() {
     }
 
     wireAppLinks();
+    QObject::connect(updates_.get(), &UpdateService::restartRequested, application_.get(),
+                     [this] {
+                         if (tray_) {
+                             tray_->quitApplication();
+                         } else {
+                             if (viewModel_ && viewModel_->meshVisible()) {
+                                 viewModel_->leaveMesh();
+                             }
+                             QCoreApplication::quit();
+                         }
+                     });
     if (options_.appLink.isValid()) {
         QTimer::singleShot(0, viewModel_.get(), [this] {
             viewModel_->importSignalingText(options_.appLink.toString(QUrl::FullyEncoded));
@@ -84,6 +98,12 @@ int GuiRuntime::run() {
             viewModel_->sendMessage("QML startup smoke");
         }
         QTimer::singleShot(100, application_.get(), &QCoreApplication::quit);
+    } else {
+        if (auto* root = qobject_cast<QWindow*>(engine_->rootObjects().constFirst())) {
+            tray_ = std::make_unique<TrayController>(*root, *viewModel_);
+        }
+        QTimer::singleShot(0, viewModel_.get(),
+                           &AppViewModel::checkForUpdatesAutomatically);
     }
     return application_->exec();
 }

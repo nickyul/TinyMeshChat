@@ -58,6 +58,7 @@ int ConsoleRuntime::run() {
     QCoreApplication application(argc_, argv_);
     application.setApplicationName("TinyMesh Chat");
     application.setOrganizationName("TinyMesh");
+    application.setApplicationVersion(QStringLiteral(TMC_APP_VERSION));
     if (!options_.error.isEmpty()) {
         fprintf(stderr, "%s\n", options_.error.toUtf8().constData());
         return 2;

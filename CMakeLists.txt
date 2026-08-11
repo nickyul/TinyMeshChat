@@ -1,11 +1,21 @@
 cmake_minimum_required(VERSION 3.25)
-project(TinyMeshChat VERSION 0.1.0 LANGUAGES CXX)
+
+set(TMC_APP_VERSION "0.1.0")
+if(NOT TMC_APP_VERSION MATCHES
+   "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")
+    message(FATAL_ERROR "TMC_APP_VERSION must be a semantic version")
+endif()
+set(TMC_VERSION_CORE "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+project(TinyMeshChat VERSION ${TMC_VERSION_CORE} LANGUAGES CXX)
+file(WRITE "${CMAKE_BINARY_DIR}/tmc-app-version.txt" "${TMC_APP_VERSION}\n")
 
 option(
     TMC_DEPLOY_QT_AFTER_BUILD
     "Deploy Qt beside the executable after every Windows build"
     ON
 )
+option(TMC_ENABLE_UPDATER "Build with Velopack automatic update support" OFF)
+set(TMC_VELOPACK_ROOT "" CACHE PATH "Extracted Velopack C/C++ SDK directory")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,11 +27,41 @@ if(DEFINED ENV{QT_ROOT})
     list(PREPEND CMAKE_PREFIX_PATH "$ENV{QT_ROOT}")
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Widgets)
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
 find_package(unofficial-webrtc CONFIG REQUIRED)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
+
+if(TMC_ENABLE_UPDATER)
+    if(NOT EXISTS "${TMC_VELOPACK_ROOT}/include/Velopack.hpp")
+        message(FATAL_ERROR "TMC_ENABLE_UPDATER requires TMC_VELOPACK_ROOT with Velopack.hpp")
+    endif()
+    add_library(tmc_velopack SHARED IMPORTED)
+    set_target_properties(tmc_velopack PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${TMC_VELOPACK_ROOT}/include"
+    )
+    if(WIN32)
+        if(NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll" OR
+           NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll.lib")
+            message(FATAL_ERROR "The Windows Velopack runtime or import library is missing")
+        endif()
+        set_target_properties(tmc_velopack PROPERTIES
+            IMPORTED_IMPLIB "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll.lib"
+            IMPORTED_LOCATION "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll"
+        )
+    elseif(APPLE)
+        if(NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_osx.dylib")
+            message(FATAL_ERROR "The macOS Velopack runtime is missing")
+        endif()
+        set_target_properties(tmc_velopack PROPERTIES
+            IMPORTED_LOCATION "${TMC_VELOPACK_ROOT}/lib/velopack_libc_osx.dylib"
+            IMPORTED_SONAME "@rpath/velopack_libc_osx.dylib"
+        )
+    else()
+        message(FATAL_ERROR "The TinyMesh updater currently supports Windows and macOS only")
+    endif()
+endif()
 
 add_library(tmc_core STATIC)
 target_sources(tmc_core
@@ -124,6 +164,7 @@ target_sources(tmc_application
         src/app/signaling_router.cpp
         src/app/negotiation_policy.cpp
         src/app/voice_session.cpp
+        src/app/update_service.cpp
         src/signaling/invitation_codec.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -138,6 +179,7 @@ target_sources(tmc_application
             include/tmc/app/signaling_router.h
             include/tmc/app/negotiation_policy.h
             include/tmc/app/voice_session.h
+            include/tmc/app/update_service.h
             include/tmc/signaling/invitation.h
             include/tmc/signaling/invitation_codec.h
 )
@@ -201,7 +243,39 @@ target_link_libraries(TinyMeshChat PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
 )
+
+target_compile_definitions(TinyMeshChat PRIVATE TMC_APP_VERSION="${TMC_APP_VERSION}")
+if(TMC_ENABLE_UPDATER)
+    target_compile_definitions(tmc_application PRIVATE TMC_ENABLE_UPDATER=1)
+    target_link_libraries(tmc_application PRIVATE tmc_velopack)
+    target_compile_definitions(TinyMeshChat PRIVATE TMC_ENABLE_UPDATER=1)
+    target_link_libraries(TinyMeshChat PRIVATE tmc_velopack)
+    if(WIN32)
+        add_custom_command(TARGET TinyMeshChat POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:tmc_velopack>"
+                "$<TARGET_FILE_DIR:TinyMeshChat>/velopack_libc.dll"
+            COMMENT "Deploying the Velopack runtime"
+            VERBATIM
+        )
+    elseif(APPLE)
+        set_target_properties(TinyMeshChat PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "@executable_path/../Frameworks"
+        )
+        add_custom_command(TARGET TinyMeshChat POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:TinyMeshChat>/Contents/Frameworks"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:tmc_velopack>"
+                "$<TARGET_BUNDLE_DIR:TinyMeshChat>/Contents/Frameworks/velopack_libc_osx.dylib"
+            COMMENT "Deploying the Velopack runtime into the application bundle"
+            VERBATIM
+        )
+    endif()
+endif()
 
 if(WIN32)
     target_link_libraries(TinyMeshChat PRIVATE user32)

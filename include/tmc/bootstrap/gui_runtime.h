@@ -13,6 +13,7 @@ class ApplicationController;
 class AppLinkController;
 class AppViewModel;
 class TrayController;
+class UpdateService;
 
 class GuiRuntime final {
 public:
@@ -31,6 +32,7 @@ private:
     std::unique_ptr<QApplication> application_;
     std::unique_ptr<AppLinkController> appLinks_;
     std::unique_ptr<ApplicationController> controller_;
+    std::unique_ptr<UpdateService> updates_;
     std::unique_ptr<AppViewModel> viewModel_;
     std::unique_ptr<QQmlApplicationEngine> engine_;
     std::unique_ptr<TrayController> tray_;

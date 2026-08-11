@@ -16,6 +16,7 @@ namespace tmc {
 class ApplicationController;
 class AppLinkController;
 class NetworkSession;
+class UpdateService;
 class MessagesModel;
 class PeersModel;
 class GlobalPttMonitor;
@@ -62,11 +63,17 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool microphoneTest READ microphoneTest NOTIFY audioSettingsChanged)
     Q_PROPERTY(double microphoneLevel READ microphoneLevel NOTIFY microphoneLevelChanged)
     Q_PROPERTY(bool appLinksRegistered READ appLinksRegistered NOTIFY appLinksRegisteredChanged)
+    Q_PROPERTY(QString updateState READ updateState NOTIFY updateStateChanged)
+    Q_PROPERTY(QString updateVersion READ updateVersion NOTIFY updateStateChanged)
+    Q_PROPERTY(QString updateReleaseNotes READ updateReleaseNotes NOTIFY updateStateChanged)
+    Q_PROPERTY(int updateProgress READ updateProgress NOTIFY updateProgressChanged)
+    Q_PROPERTY(bool updaterPortable READ updaterPortable NOTIFY updateStateChanged)
     Q_PROPERTY(QAbstractItemModel* messages READ messages CONSTANT)
     Q_PROPERTY(QAbstractItemModel* peers READ peers CONSTANT)
 
 public:
     AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
+                 UpdateService& updates,
                  bool identityRequired, QObject* parent = nullptr);
     ~AppViewModel() override;
 
@@ -108,6 +115,11 @@ public:
     bool microphoneTest() const;
     double microphoneLevel() const;
     bool appLinksRegistered() const;
+    QString updateState() const;
+    QString updateVersion() const;
+    QString updateReleaseNotes() const;
+    int updateProgress() const;
+    bool updaterPortable() const;
     QAbstractItemModel* messages() const;
     QAbstractItemModel* peers() const;
 
@@ -136,7 +148,12 @@ public:
     Q_INVOKABLE void setPeerVolume(const QString& peerId, int percent);
     Q_INVOKABLE void registerAppLinks();
     Q_INVOKABLE void unregisterAppLinks();
+    Q_INVOKABLE void checkForUpdates();
+    Q_INVOKABLE void downloadUpdate();
+    Q_INVOKABLE void installUpdate();
     Q_INVOKABLE QString diagnostics() const;
+
+    void checkForUpdatesAutomatically();
 
 signals:
     void identityRequiredChanged();
@@ -154,6 +171,9 @@ signals:
     void pttBindingChanged();
     void talkingStateChanged();
     void appLinksRegisteredChanged();
+    void updateStateChanged();
+    void updateProgressChanged();
+    void updatePromptRequested();
     void errorRequested(QString message);
     void signalingRequested(QString kind, QString text, QString link);
 
@@ -170,6 +190,7 @@ private:
 
     ApplicationController& controller_;
     AppLinkController& appLinks_;
+    UpdateService& updates_;
     std::unique_ptr<NetworkSession> session_;
     std::unique_ptr<MessagesModel> messages_;
     std::unique_ptr<PeersModel> peers_;

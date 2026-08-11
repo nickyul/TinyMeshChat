@@ -4,7 +4,14 @@
 
 #include <utility>
 
+#ifdef TMC_ENABLE_UPDATER
+#include <Velopack.hpp>
+#endif
+
 int main(int argc, char** argv) {
+#ifdef TMC_ENABLE_UPDATER
+    Velopack::VelopackApp::Build().SetAutoApplyOnStartup(false).Run();
+#endif
     auto options = tmc::parseApplicationOptions(argc, argv);
     if (options.console) {
         return tmc::ConsoleRuntime(argc, argv, std::move(options)).run();

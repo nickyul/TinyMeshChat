@@ -66,6 +66,18 @@ ApplicationWindow {
                 text: qsTr("О программе")
                 onTriggered: aboutDialog.open()
             }
+
+            MenuSeparator {}
+
+            Action {
+                text: appViewModel.updateState === "checking"
+                      ? qsTr("Проверка обновлений…")
+                      : qsTr("Проверить обновления")
+                enabled: appViewModel.updateState !== "checking"
+                         && appViewModel.updateState !== "downloading"
+                         && appViewModel.updateState !== "applying"
+                onTriggered: appViewModel.checkForUpdates()
+            }
         }
     }
 
@@ -810,6 +822,106 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: updateDialog
+
+        title: qsTr("Обновление TinyMesh Chat")
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(560, root.width - 60)
+        height: 360
+        closePolicy: appViewModel.updateState === "applying"
+                     ? Popup.NoAutoClose
+                     : Popup.CloseOnEscape
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 12
+
+            Label {
+                Layout.fillWidth: true
+                text: {
+                    if (appViewModel.updateState === "downloading") {
+                        return qsTr("Загрузка версии %1…").arg(appViewModel.updateVersion);
+                    }
+                    if (appViewModel.updateState === "ready" && appViewModel.meshVisible) {
+                        return qsTr("Версия %1 загружена. Выйдите из mesh, чтобы установить её.")
+                            .arg(appViewModel.updateVersion);
+                    }
+                    if (appViewModel.updateState === "ready") {
+                        return qsTr("Версия %1 готова к установке.")
+                            .arg(appViewModel.updateVersion);
+                    }
+                    if (appViewModel.updaterPortable) {
+                        return qsTr("Доступна версия %1. Portable-сборка обновляется вручную.")
+                            .arg(appViewModel.updateVersion);
+                    }
+                    return qsTr("Доступна новая версия %1.").arg(appViewModel.updateVersion);
+                }
+                wrapMode: Text.WordWrap
+            }
+
+            ProgressBar {
+                Layout.fillWidth: true
+                visible: appViewModel.updateState === "downloading"
+                from: 0
+                to: 100
+                value: appViewModel.updateProgress
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 180
+                visible: appViewModel.updateReleaseNotes.length > 0
+
+                TextArea {
+                    text: appViewModel.updateReleaseNotes
+                    readOnly: true
+                    wrapMode: TextEdit.Wrap
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+
+                Item {
+                    Layout.fillWidth: true
+                }
+
+                Button {
+                    visible: appViewModel.updateState === "available"
+                             || appViewModel.updateState === "ready"
+                    enabled: appViewModel.updateState === "available"
+                             || (appViewModel.updateState === "ready"
+                                 && !appViewModel.meshVisible)
+                    text: {
+                        if (appViewModel.updateState === "ready") {
+                            return appViewModel.meshVisible
+                                ? qsTr("Ожидание выхода из mesh")
+                                : qsTr("Установить и перезапустить");
+                        }
+                        return appViewModel.updaterPortable
+                            ? qsTr("Открыть Releases")
+                            : qsTr("Скачать");
+                    }
+                    onClicked: {
+                        if (appViewModel.updateState === "ready") {
+                            appViewModel.installUpdate();
+                        } else {
+                            appViewModel.downloadUpdate();
+                        }
+                    }
+                }
+
+                Button {
+                    text: qsTr("Закрыть")
+                    enabled: appViewModel.updateState !== "applying"
+                    onClicked: updateDialog.close()
+                }
+            }
+        }
+    }
+
     Connections {
         target: appViewModel
         function onErrorRequested(message) {
@@ -818,6 +930,9 @@ ApplicationWindow {
         }
         function onSignalingRequested(kind, text, link) {
             signalingDialog.showSignaling(kind, text, link);
+        }
+        function onUpdatePromptRequested() {
+            updateDialog.open();
         }
     }
 }

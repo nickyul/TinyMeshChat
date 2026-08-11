@@ -8,6 +8,13 @@ $distRoot = Join-Path $root 'dist'
 $dist = Join-Path $distRoot 'TinyMeshChat'
 $exePath = Join-Path $build 'Release/TinyMeshChat.exe'
 $exeDestination = Join-Path $dist 'TinyMeshChat.exe'
+$versionFile = Join-Path $build 'tmc-app-version.txt'
+$updaterEnabled = $env:TMC_ENABLE_UPDATER -eq '1'
+$buildVelopack = $env:TMC_BUILD_VELOPACK -eq '1'
+
+if ($buildVelopack -and -not $updaterEnabled) {
+    throw 'TMC_BUILD_VELOPACK=1 requires TMC_ENABLE_UPDATER=1'
+}
 
 if ([string]::IsNullOrWhiteSpace($env:QT_ROOT)) {
     throw 'QT_ROOT is not set'
@@ -17,7 +24,17 @@ if (-not (Test-Path -LiteralPath $deployPath -PathType Leaf)) {
     throw "windeployqt.exe was not found at $deployPath"
 }
 
-cmake --preset $preset
+$configureArguments = @('--preset', $preset, '-DTMC_ENABLE_UPDATER=OFF')
+$velopackRoot = $env:TMC_VELOPACK_ROOT
+if ($updaterEnabled) {
+    if ([string]::IsNullOrWhiteSpace($velopackRoot)) {
+        $velopackRoot = Join-Path $root 'build/tools/velopack'
+        & (Join-Path $PSScriptRoot 'bootstrap-velopack.ps1') -Destination $velopackRoot
+    }
+    $configureArguments[-1] = '-DTMC_ENABLE_UPDATER=ON'
+    $configureArguments += "-DTMC_VELOPACK_ROOT=$velopackRoot"
+}
+cmake @configureArguments
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed with exit code $LASTEXITCODE"
 }
@@ -71,6 +88,12 @@ foreach ($dll in $requiredDlls) {
         throw "Required runtime library is missing from the package: $dll"
     }
 }
+if ($updaterEnabled) {
+    $velopackRuntime = Join-Path $dist 'velopack_libc.dll'
+    if (-not (Test-Path -LiteralPath $velopackRuntime -PathType Leaf)) {
+        throw 'Velopack runtime is missing from the package'
+    }
+}
 
 function Invoke-PackagedSmoke {
     param(
@@ -91,7 +114,6 @@ function Invoke-PackagedSmoke {
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.EnvironmentVariables['TMC_DATA_DIR'] = $smokeData
-        $startInfo.EnvironmentVariables['QT_QPA_PLATFORM'] = 'offscreen'
         $startInfo.Arguments = ($Arguments | ForEach-Object {
                 '"' + $_.Replace('"', '\"') + '"'
             }) -join ' '
@@ -142,12 +164,55 @@ Invoke-PackagedSmoke -Arguments @('--console', '--display-name', 'CI Smoke') -Wr
 Invoke-PackagedSmoke -Arguments @('--qml-smoke', '--display-name', 'CI Smoke')
 
 $zip = Join-Path $distRoot 'TinyMeshChat.zip'
+$portableMarker = Join-Path $dist 'tinymesh-portable.marker'
+[System.IO.File]::WriteAllText(
+    $portableMarker,
+    "TinyMesh Chat standalone portable package.`n",
+    [System.Text.UTF8Encoding]::new($false)
+)
 if (Test-Path -LiteralPath $zip) {
     Remove-Item -LiteralPath $zip -Force
 }
 Compress-Archive -LiteralPath $dist -DestinationPath $zip
 $archiveEntries = tar -tf $zip
-if ($LASTEXITCODE -ne 0 -or $archiveEntries -notcontains 'TinyMeshChat/TinyMeshChat.exe') {
+if ($LASTEXITCODE -ne 0 -or
+    $archiveEntries -notcontains 'TinyMeshChat/TinyMeshChat.exe' -or
+    $archiveEntries -notcontains 'TinyMeshChat/tinymesh-portable.marker') {
     throw 'Portable archive verification failed'
 }
 Write-Host "Created $zip"
+
+if ($buildVelopack) {
+    Remove-Item -LiteralPath $portableMarker -Force
+    dotnet tool restore
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet tool restore failed with exit code $LASTEXITCODE"
+    }
+    $velopackOutput = Join-Path $distRoot 'velopack-win-x64'
+    New-Item -ItemType Directory -Path $velopackOutput -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+        throw "CMake did not produce the application version file: $versionFile"
+    }
+    $version = [System.IO.File]::ReadAllText($versionFile).Trim()
+    [System.IO.File]::WriteAllText(
+        (Join-Path $distRoot 'tmc-app-version.txt'),
+        "$version`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    dotnet tool run vpk pack `
+        --packId TinyMeshChat.Win `
+        --packTitle 'TinyMesh Chat' `
+        --packVersion $version `
+        --packDir $dist `
+        --mainExe TinyMeshChat.exe `
+        --runtime win-x64 `
+        --channel win-x64 `
+        --noPortable true `
+        --outputDir $velopackOutput
+    if ($LASTEXITCODE -ne 0) {
+        throw "Velopack packaging failed with exit code $LASTEXITCODE"
+    }
+    if (-not (Get-ChildItem -LiteralPath $velopackOutput -File | Where-Object Name -Like 'releases.*.json')) {
+        throw 'Velopack release feed was not produced'
+    }
+}
