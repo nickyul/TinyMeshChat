@@ -174,7 +174,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" release-assets/* \
+          mapfile -d '' release_files < <(find release-assets -type f -print0)
+          if (( ${#release_files[@]} == 0 )); then
+            echo "No release files found" >&2
+            exit 1
+          fi
+          gh release create "v${{ steps.version.outputs.version }}" "${release_files[@]}" \
             --verify-tag \
             --title "TinyMesh Chat v${{ steps.version.outputs.version }}" \
             --notes-file release-notes.md
