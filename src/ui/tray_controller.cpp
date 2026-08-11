@@ -3,13 +3,11 @@
 #include "tmc/ui/app_view_model.h"
 
 #include <QAction>
-#include <QApplication>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QEvent>
 #include <QIcon>
 #include <QMenu>
-#include <QStyle>
 #include <QSystemTrayIcon>
 #include <QWindow>
 
@@ -18,12 +16,7 @@ namespace tmc {
 TrayController::TrayController(QWindow& window, AppViewModel& viewModel, QObject* parent)
     : QObject(parent), window_(window), viewModel_(viewModel), menu_(std::make_unique<QMenu>()),
       trayIcon_(std::make_unique<QSystemTrayIcon>()) {
-    auto icon = QIcon::fromTheme("network-workgroup");
-    if (icon.isNull()) {
-        icon = QApplication::style()->standardIcon(QStyle::SP_ComputerIcon);
-    }
-
-    trayIcon_->setIcon(icon);
+    trayIcon_->setIcon(QIcon(QStringLiteral(":/icons/tray.png")));
     trayIcon_->setToolTip(tr("TinyMesh Chat"));
 
     auto* openAction = menu_->addAction(tr("Открыть TinyMesh Chat"));

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-set(TMC_APP_VERSION "0.1.0")
+set(TMC_APP_VERSION "0.1.1")
 if(NOT TMC_APP_VERSION MATCHES
    "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")
     message(FATAL_ERROR "TMC_APP_VERSION must be a semantic version")
@@ -221,15 +221,28 @@ target_sources(TinyMeshChat
 )
 
 if(APPLE)
+    set(TMC_MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/tinymesh.icns")
+    set_source_files_properties("${TMC_MACOS_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+    target_sources(TinyMeshChat PRIVATE "${TMC_MACOS_ICON}")
     set_target_properties(TinyMeshChat PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME "TinyMesh Chat"
+        MACOSX_BUNDLE_ICON_FILE "tinymesh.icns"
         MACOSX_BUNDLE_GUI_IDENTIFIER "chat.tinymesh.app"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )
 elseif(WIN32)
+    set(TMC_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/tinymesh.ico")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/app.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmc_app.rc"
+        @ONLY
+    )
+    target_sources(TinyMeshChat PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/tmc_app.rc")
     set_target_properties(TinyMeshChat PROPERTIES
         WIN32_EXECUTABLE TRUE
     )

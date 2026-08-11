@@ -204,6 +204,7 @@ if ($buildVelopack) {
         --packTitle 'TinyMesh Chat' `
         --packVersion $version `
         --packDir $dist `
+        --icon (Join-Path $root 'resources/icons/tinymesh.ico') `
         --mainExe TinyMeshChat.exe `
         --runtime win-x64 `
         --channel win-x64 `

@@ -8,6 +8,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -31,6 +32,7 @@ int GuiRuntime::run() {
     application_->setApplicationName("TinyMesh Chat");
     application_->setOrganizationName("TinyMesh");
     application_->setApplicationVersion(QStringLiteral(TMC_APP_VERSION));
+    application_->setWindowIcon(QIcon(QStringLiteral(":/icons/tinymesh.png")));
     QQuickStyle::setStyle("Basic");
     if (!options_.error.isEmpty()) {
         fprintf(stderr, "%s\n", options_.error.toUtf8().constData());
