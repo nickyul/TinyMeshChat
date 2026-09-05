@@ -26,6 +26,7 @@ enum class PacketType {
     LinkAnswer,
     SessionOffer,
     SessionAnswer,
+    RendezvousMetadata,
     Ping,
     Pong
 };
@@ -85,6 +86,16 @@ struct SessionSignalingPayload {
     QString sdp;
 };
 
+struct RendezvousMetadataPayload {
+    QString secret;
+    QString publicAddress;
+    int publicPort{0};
+    QString localAddress;
+    int localPort{0};
+    QString mappingMethod;
+    bool acknowledgement{false};
+};
+
 struct HeartbeatPayload {
     QString nonce;
     QDateTime sentAt;
@@ -94,7 +105,7 @@ using PacketPayload =
     std::variant<HelloPayload, PeerSnapshotPayload, PeerAnnouncePayload, PeerLeavePayload,
                  ChatMessagePayload, ChatAckPayload, VoiceStatePayload, VoiceQualityPayload,
                  RoutePayload, LinkSignalingPayload, SessionSignalingPayload,
-                 HeartbeatPayload>;
+                 RendezvousMetadataPayload, HeartbeatPayload>;
 
 struct Packet {
     PacketType type{PacketType::PeerHello};

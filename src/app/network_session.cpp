@@ -12,9 +12,12 @@
 
 #include <QDateTime>
 #include <QNetworkInformation>
+#include <QRandomGenerator>
 #include <QSet>
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <utility>
 
 namespace tmc {
@@ -32,12 +35,16 @@ qint64 monotonicNs() {
 NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy policy, QObject* parent)
     : QObject(parent), app_(app), policy_(policy),
       connections_(std::make_unique<ConnectionManager>(app.config().stunServers, policy)),
-      mesh_(policy), voice_(std::make_unique<VoiceSession>(app.config().audio)) {
+      mesh_(policy), voice_(std::make_unique<VoiceSession>(app.config().audio)),
+      rendezvous_(std::make_unique<RendezvousService>(
+          app.identity(), app.config().rendezvous, app.config().stunServers,
+          app.dataDirectory() + "/contacts.json")) {
     Q_ASSERT(policy_.isValid());
     qRegisterMetaType<ChatMessage>();
     qRegisterMetaType<ConnectionKind>();
     qRegisterMetaType<ConnectionAttemptState>();
     qRegisterMetaType<MeshSessionState>();
+    qRegisterMetaType<ContactPresence>();
 
     const auto audioTransport = connections_->audioTransport();
     audioTransport->setIncomingSink(voice_->incomingAudioSink());
@@ -46,8 +53,14 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     connectConnectionSignals();
     connectMeshSignals();
     connectVoiceSignals();
+    connectRendezvousSignals();
     configureKeepalive();
     connectApplicationSignals();
+    const auto started = rendezvous_->start();
+    if (!started) {
+        Logger::instance().log(QtWarningMsg, "rendezvous",
+                               "Automatic rendezvous unavailable: " + started.error());
+    }
 }
 
 void NetworkSession::connectConnectionSignals() {
@@ -82,7 +95,7 @@ void NetworkSession::connectConnectionSignals() {
             });
     connect(connections_.get(), &ConnectionManager::attemptFailed, this,
             [this](const PeerIdentity& peer, ConnectionKind kind, const QString&) {
-                if (isOffer(kind)) {
+                if (isMeshManaged(kind) && isOffer(kind)) {
                     mesh_.scheduleRetry(peer);
                 }
             });
@@ -103,6 +116,10 @@ void NetworkSession::connectConnectionSignals() {
 }
 
 void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIdentity& remote) {
+    const auto rendezvousRequestId = rendezvousConnections_.take(connectionId);
+    if (!rendezvousRequestId.isEmpty()) {
+        rendezvousNegotiations_.remove(rendezvousRequestId);
+    }
     if (connectionId == manualInvitationConnectionId_) {
         manualInvitationConnectionId_.clear();
         emit invitationStateChanged(false, "connected");
@@ -123,6 +140,8 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
     announceLocalPeer();
     ensureDynamicMesh();
     sendPing(connectionId);
+    sendRendezvousMetadata(connectionId, false);
+    rendezvous_->setContactConnected(remote.peerId, true);
 
     if (shouldInitiateNegotiation(app_.identity().peerId, remote.peerId)) {
         const auto audio = connections_->startAudioOffer(connectionId);
@@ -137,6 +156,10 @@ void NetworkSession::handleLinkRemoved(const QString& connectionId, const PeerId
     router_.forgetConnection(connectionId);
     pendingPings_.remove(connectionId);
     audioNegotiations_.remove(connectionId);
+    const auto rendezvousRequestId = rendezvousConnections_.take(connectionId);
+    if (!rendezvousRequestId.isEmpty()) {
+        rendezvousNegotiations_.remove(rendezvousRequestId);
+    }
 
     if (connectionId == manualInvitationConnectionId_) {
         manualInvitationConnectionId_.clear();
@@ -148,6 +171,7 @@ void NetworkSession::handleLinkRemoved(const QString& connectionId, const PeerId
         emit peerRttChanged(remote.peerId, -1);
         emit peerChanged(remote.peerId, remote.displayName, false);
         voice_->removePeer(remote.peerId);
+        rendezvous_->setContactConnected(remote.peerId, false);
     }
 
     if (wasOpen) {
@@ -189,6 +213,52 @@ void NetworkSession::connectVoiceSignals() {
             &NetworkSession::localTalkingChanged);
     connect(voice_.get(), &VoiceSession::peerTalkingStateChanged, this,
             &NetworkSession::peerTalkingChanged);
+}
+
+void NetworkSession::connectRendezvousSignals() {
+    connect(rendezvous_.get(), &RendezvousService::persistentPortsChanged, this,
+            [this](const QList<quint16>& ports, quint16 boundPort) {
+                const auto saved = app_.updateRendezvousPorts(ports, boundPort);
+                if (!saved) {
+                    Logger::instance().log(QtWarningMsg, "rendezvous", saved.error());
+                }
+            });
+    connect(rendezvous_.get(), &RendezvousService::externalEndpointChanged, this,
+            [this](const QString& address, quint16 port, const QString& method) {
+                const auto saved = app_.updateRendezvousExternalEndpoint(address, port, method);
+                if (!saved) {
+                    Logger::instance().log(QtWarningMsg, "rendezvous", saved.error());
+                }
+                for (const auto& connectionId : connections_->openConnectionIds()) {
+                    sendRendezvousMetadata(connectionId, true);
+                }
+            });
+    connect(rendezvous_.get(), &RendezvousService::contactChanged, this,
+            &NetworkSession::contactChanged);
+    connect(rendezvous_.get(), &RendezvousService::connectionRequestReceived, this,
+            [this](const QString& peerId, const QString& displayName,
+                   const QString& requestId, const QString& requestedMesh) {
+                const auto currentMesh = mesh_.meshId();
+                if (!currentMesh.isEmpty() && currentMesh != requestedMesh) {
+                    rendezvous_->respondToConnection(peerId, requestId, "busy", currentMesh);
+                    Logger::instance().log(QtInfoMsg, "rendezvous",
+                                           "Connection request answered busy: another mesh active");
+                    return;
+                }
+                rendezvousNegotiations_.insert(
+                    requestId,
+                    {{peerId, displayName}, requestId, requestedMesh, false});
+                emit contactConnectionRequest(peerId, displayName, requestId, requestedMesh);
+            });
+    connect(rendezvous_.get(), &RendezvousService::connectionResponseReceived, this,
+            &NetworkSession::handleRendezvousResponse);
+    connect(rendezvous_.get(), &RendezvousService::connectionRequestExpired, this,
+            [this](const QString&, const QString& requestId) {
+                rendezvousNegotiations_.remove(requestId);
+                emit contactConnectionRequestExpired(requestId);
+            });
+    connect(rendezvous_.get(), &RendezvousService::signalingReceived, this,
+            &NetworkSession::handleRendezvousSignaling);
 }
 
 void NetworkSession::configureKeepalive() {
@@ -244,11 +314,13 @@ void NetworkSession::connectApplicationSignals() {
                 [this] {
                     mesh_.resetRetryBackoff();
                     ensureDynamicMesh();
+                    rendezvous_->restartDiscovery();
                 });
     }
 }
 
 NetworkSession::~NetworkSession() {
+    rendezvous_->stop();
     const auto transport = connections_->audioTransport();
     transport->setReceiveEnabled(false);
     transport->setTransmitEnabled(false);
@@ -257,6 +329,215 @@ NetworkSession::~NetworkSession() {
     transport->stop();
     voice_.reset();
     connections_.reset();
+}
+
+QList<ContactPresence> NetworkSession::contacts() const {
+    return rendezvous_->contacts();
+}
+
+Result<void> NetworkSession::requestContactConnection(const QString& peerId) {
+    const auto contact = rendezvous_->contact(peerId);
+    if (!contact) {
+        return Result<void>::failure("Контакт не найден.");
+    }
+    if (connections_->infoForPeer(peerId)) {
+        return Result<void>::failure("Прямое соединение с контактом уже существует.");
+    }
+    auto requestedMesh = mesh_.meshId();
+    if (requestedMesh.isEmpty()) {
+        requestedMesh = createUuid();
+    }
+    const auto requestId = rendezvous_->requestConnection(peerId, requestedMesh);
+    if (requestId.isEmpty()) {
+        return Result<void>::failure("Контакт сейчас недоступен для подключения.");
+    }
+    rendezvousNegotiations_.insert(
+        requestId, {contact->identity, requestId, requestedMesh, true});
+    QTimer::singleShot(65000, this, [this, requestId] {
+        if (rendezvousNegotiations_.remove(requestId)) {
+            Logger::instance().log(QtInfoMsg, "rendezvous",
+                                   "Expired rendezvous negotiation state " +
+                                       requestId.left(8));
+        }
+    });
+    emit statusChanged("Запрос подключения отправлен контакту " +
+                       contact->identity.displayName + ".");
+    return Result<void>::success();
+}
+
+Result<void> NetworkSession::acceptContactConnection(const QString& requestId) {
+    auto negotiation = rendezvousNegotiations_.find(requestId);
+    if (negotiation == rendezvousNegotiations_.end() || negotiation->initiatedLocally) {
+        return Result<void>::failure("Запрос подключения больше не актуален.");
+    }
+    if (!mesh_.meshId().isEmpty() && mesh_.meshId() != negotiation->meshId) {
+        rendezvous_->respondToConnection(negotiation->peer.peerId, requestId, "busy",
+                                         mesh_.meshId());
+        rendezvousNegotiations_.erase(negotiation);
+        return Result<void>::failure("Вы уже находитесь в другой mesh.");
+    }
+    if (mesh_.meshId().isEmpty()) {
+        clearSessionData();
+        mesh_.beginJoin(app_.identity(), negotiation->meshId);
+    }
+    negotiation->accepted = true;
+    rendezvous_->respondToConnection(negotiation->peer.peerId, requestId, "accepted",
+                                     negotiation->meshId);
+    if (shouldInitiateNegotiation(app_.identity().peerId, negotiation->peer.peerId)) {
+        startRendezvousOffer(requestId);
+    }
+    emit statusChanged("Запрос принят. Создаётся свежее P2P-соединение…");
+    return Result<void>::success();
+}
+
+void NetworkSession::declineContactConnection(const QString& requestId) {
+    const auto negotiation = rendezvousNegotiations_.take(requestId);
+    if (negotiation.peer.peerId.isEmpty() || negotiation.initiatedLocally) {
+        return;
+    }
+    rendezvous_->respondToConnection(negotiation.peer.peerId, requestId, "declined",
+                                     negotiation.meshId);
+}
+
+void NetworkSession::handleRendezvousResponse(const QString& peerId, const QString& requestId,
+                                              const QString& response,
+                                              const QString& acceptedMesh) {
+    auto negotiation = rendezvousNegotiations_.find(requestId);
+    if (negotiation == rendezvousNegotiations_.end() || negotiation->peer.peerId != peerId) {
+        return;
+    }
+    if (response != "accepted") {
+        emit statusChanged(response == "busy" ? "Контакт находится в другой mesh."
+                                               : "Контакт отклонил запрос подключения.");
+        rendezvousNegotiations_.erase(negotiation);
+        return;
+    }
+    negotiation->meshId = acceptedMesh;
+    negotiation->accepted = true;
+    if (!mesh_.meshId().isEmpty() && mesh_.meshId() != acceptedMesh) {
+        emit statusChanged("Запрос принят, но активная mesh уже изменилась. Подключение отменено.");
+        rendezvousNegotiations_.erase(negotiation);
+        return;
+    }
+    if (mesh_.meshId().isEmpty()) {
+        clearSessionData();
+        mesh_.create(app_.identity(), acceptedMesh);
+    }
+    const auto deferredOffer = deferredRendezvousOffers_.take(peerId);
+    if (!deferredOffer.isEmpty()) {
+        QTimer::singleShot(0, this, [this, peerId, deferredOffer] {
+            handleRendezvousSignaling(peerId, deferredOffer);
+        });
+    }
+    if (shouldInitiateNegotiation(app_.identity().peerId, peerId)) {
+        startRendezvousOffer(requestId);
+    }
+}
+
+void NetworkSession::startRendezvousOffer(const QString& requestId) {
+    const auto negotiation = rendezvousNegotiations_.value(requestId);
+    if (negotiation.peer.peerId.isEmpty() || !negotiation.accepted) {
+        return;
+    }
+    const auto connectionId = createUuid();
+    const auto created = connections_->create(connectionId, negotiation.peer,
+                                              ConnectionKind::RendezvousOffer);
+    if (!created) {
+        emit errorOccurred(created.error());
+        return;
+    }
+    rendezvousConnections_.insert(connectionId, requestId);
+    Logger::instance().log(QtInfoMsg, "rendezvous",
+                           "Creating fresh WebRTC offer for " +
+                               negotiation.peer.displayName);
+    const auto started = connections_->startOffer(connectionId);
+    if (!started) {
+        rendezvousConnections_.remove(connectionId);
+        emit errorOccurred(started.error());
+    }
+}
+
+void NetworkSession::handleRendezvousSignaling(const QString& peerId,
+                                               const QByteArray& document) {
+    const auto decoded = InvitationCodec::decode(document);
+    if (!decoded) {
+        Logger::instance().log(QtWarningMsg, "rendezvous",
+                               "Invalid rendezvous signaling document: " + decoded.error());
+        return;
+    }
+    const auto invitation = decoded.value();
+    if (invitation.meshId != mesh_.meshId()) {
+        Logger::instance().log(QtWarningMsg, "rendezvous",
+                               "Rendezvous signaling belongs to another mesh");
+        return;
+    }
+    const auto contact = rendezvous_->contact(peerId);
+    if (!contact) {
+        return;
+    }
+    if (invitation.kind == Invitation::Kind::Offer) {
+        if (connections_->contains(invitation.connectionId)) {
+            return;
+        }
+        auto requestId = QString{};
+        for (auto it = rendezvousNegotiations_.cbegin(); it != rendezvousNegotiations_.cend();
+             ++it) {
+            if (it->accepted && it->peer.peerId == peerId &&
+                it->meshId == invitation.meshId) {
+                requestId = it.key();
+                break;
+            }
+        }
+        if (requestId.isEmpty()) {
+            const auto pendingRequest = std::find_if(
+                rendezvousNegotiations_.cbegin(), rendezvousNegotiations_.cend(),
+                [&peerId, &invitation](const RendezvousNegotiation& negotiation) {
+                    return negotiation.initiatedLocally && !negotiation.accepted &&
+                           negotiation.peer.peerId == peerId &&
+                           negotiation.meshId == invitation.meshId;
+                });
+            if (pendingRequest != rendezvousNegotiations_.cend() &&
+                deferredRendezvousOffers_.size() < 8) {
+                deferredRendezvousOffers_.insert(peerId, document);
+                QTimer::singleShot(10000, this, [this, peerId, document] {
+                    if (deferredRendezvousOffers_.value(peerId) == document) {
+                        deferredRendezvousOffers_.remove(peerId);
+                    }
+                });
+                Logger::instance().log(
+                    QtInfoMsg, "rendezvous",
+                    "Fresh offer arrived before acceptance response and was deferred");
+            } else {
+                Logger::instance().log(
+                    QtWarningMsg, "rendezvous",
+                    "Ignored signaling without an accepted connection request");
+            }
+            return;
+        }
+        const auto created = connections_->create(invitation.connectionId, contact->identity,
+                                                  ConnectionKind::RendezvousAnswer);
+        if (!created) {
+            emit errorOccurred(created.error());
+            return;
+        }
+        rendezvousConnections_.insert(invitation.connectionId, requestId);
+        Logger::instance().log(QtInfoMsg, "rendezvous", "Fresh WebRTC offer applied");
+        const auto accepted = connections_->acceptOffer(invitation.connectionId, invitation.sdp);
+        if (!accepted) {
+            emit errorOccurred(accepted.error());
+        }
+        return;
+    }
+    const auto connection = connections_->info(invitation.connectionId);
+    if (!connection || connection->remote.peerId != peerId ||
+        connection->kind != ConnectionKind::RendezvousOffer) {
+        return;
+    }
+    Logger::instance().log(QtInfoMsg, "rendezvous", "Fresh WebRTC answer applied");
+    const auto accepted = connections_->acceptAnswer(invitation.connectionId, invitation.sdp);
+    if (!accepted) {
+        emit errorOccurred(accepted.error());
+    }
 }
 
 MeshSessionState NetworkSession::meshState() const {
@@ -420,6 +701,24 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& s
     invitation.connectionId = connectionId;
     invitation.sdp = sdp;
 
+    if (isRendezvous(connection->kind)) {
+        const auto sent = rendezvous_->sendSignal(connection->remote.peerId,
+                                                  InvitationCodec::encode(invitation));
+        if (!sent) {
+            emit errorOccurred("Не удалось передать fresh WebRTC signaling: " + sent.error());
+            return;
+        }
+        Logger::instance().log(
+            QtInfoMsg, "rendezvous",
+            QString("Fresh WebRTC %1 queued for %2")
+                .arg(isOffer(connection->kind) ? "offer" : "answer",
+                     connection->remote.displayName));
+        emit statusChanged(isOffer(connection->kind)
+                               ? "Fresh offer отправлен через rendezvous."
+                               : "Fresh answer отправлен через rendezvous.");
+        return;
+    }
+
     if (isMeshManaged(connection->kind)) {
         auto packet =
             basePacket(isOffer(connection->kind) ? PacketType::LinkOffer : PacketType::LinkAnswer,
@@ -534,6 +833,64 @@ void NetworkSession::announceLocalPeer(const QString& excludedConnection) {
 void NetworkSession::sendVoiceState(const QString& connectionId) {
     sendPacket(connectionId, basePacket(PacketType::VoiceState,
                                         VoiceStatePayload{voice_->active(), voice_->muted()}));
+}
+
+void NetworkSession::sendRendezvousMetadata(const QString& connectionId,
+                                            bool acknowledgement) {
+    const auto connection = connections_->info(connectionId);
+    if (!connection || !connection->open || connection->remote.peerId.isEmpty()) {
+        return;
+    }
+    auto secret = rendezvous_->secretForPeer(connection->remote.peerId);
+    const bool localOwnsSecret = shouldInitiateNegotiation(app_.identity().peerId,
+                                                           connection->remote.peerId);
+    bool generatedSecret = false;
+    if (secret.isEmpty() && localOwnsSecret) {
+        secret.resize(32);
+        for (qsizetype offset = 0; offset < secret.size(); offset += 4) {
+            const auto random = QRandomGenerator::system()->generate();
+            std::memcpy(secret.data() + offset, &random, sizeof(random));
+        }
+        ContactRecord contact;
+        contact.identity = connection->remote;
+        contact.rendezvousSecret = secret;
+        contact.publicEndpoint = {};
+        contact.localEndpoint = {};
+        contact.lastSeen = QDateTime::currentDateTimeUtc();
+        contact.lastMeshId = mesh_.meshId();
+        const auto remembered = rendezvous_->rememberContact(std::move(contact), false);
+        if (!remembered) {
+            Logger::instance().log(QtWarningMsg, "rendezvous", remembered.error());
+            return;
+        }
+        generatedSecret = true;
+    }
+    if (secret.isEmpty()) {
+        return;
+    }
+    const auto local = rendezvous_->localEndpoint();
+    const auto external = rendezvous_->publicEndpoint();
+    const bool manualPairing = connection->kind == ConnectionKind::ManualOffer ||
+                               connection->kind == ConnectionKind::ManualAnswer;
+    const auto serializedSecret = !acknowledgement && localOwnsSecret &&
+                                          (generatedSecret || manualPairing)
+                                      ? QString::fromLatin1(secret.toBase64(
+                                            QByteArray::Base64UrlEncoding |
+                                            QByteArray::OmitTrailingEquals))
+                                      : QString{};
+    auto packet = basePacket(
+        PacketType::RendezvousMetadata,
+        RendezvousMetadataPayload{serializedSecret, external.address, external.port,
+                                  local.address, local.port, rendezvous_->mappingMethod(),
+                                  acknowledgement});
+    packet.targetId = connection->remote.peerId;
+    if (sendPacket(connectionId, packet)) {
+        Logger::instance().log(
+            QtInfoMsg, "rendezvous",
+            QString("Rendezvous metadata %1 for %2")
+                .arg(acknowledgement ? "acknowledged" : "sent",
+                     connection->remote.displayName));
+    }
 }
 
 void NetworkSession::broadcastVoiceState() {
@@ -803,6 +1160,18 @@ QString NetworkSession::diagnostics() const {
                           .arg(connectedPeerCount())
                           .arg(qMax(0, knownPeerCount() - 1)),
                       "TURN/relay: отключён"};
+    const auto localRendezvous = rendezvous_->localEndpoint();
+    const auto publicRendezvous = rendezvous_->publicEndpoint();
+    lines.prepend(QString("Rendezvous contacts: %1").arg(rendezvous_->contacts().size()));
+    lines.prepend(QString("Rendezvous mapping: %1").arg(rendezvous_->mappingMethod()));
+    lines.prepend(QString("Rendezvous public UDP: %1:%2")
+                      .arg(publicRendezvous.address.isEmpty() ? "unknown"
+                                                             : publicRendezvous.address)
+                      .arg(publicRendezvous.port));
+    lines.prepend(QString("Rendezvous local UDP: %1:%2")
+                      .arg(localRendezvous.address.isEmpty() ? "unknown"
+                                                            : localRendezvous.address)
+                      .arg(localRendezvous.port));
     const auto connections = connections_->connections();
     if (connections.isEmpty()) {
         lines.append("Соединения: отсутствуют");

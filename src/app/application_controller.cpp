@@ -5,9 +5,22 @@
 
 #include <QDir>
 #include <QFile>
+#include <QRandomGenerator>
 #include <QStandardPaths>
 
 namespace tmc {
+
+namespace {
+
+constexpr quint16 MinRendezvousPort = 49152;
+constexpr int RendezvousPortCount = 3;
+
+quint16 randomRendezvousPort() {
+    return static_cast<quint16>(QRandomGenerator::system()->bounded(
+        static_cast<quint32>(MinRendezvousPort), static_cast<quint32>(65536)));
+}
+
+} // namespace
 
 ApplicationController::ApplicationController(QObject* p) : QObject(p) {
 }
@@ -39,15 +52,40 @@ Result<InitializationState> ApplicationController::initialize() {
     }
     Logger::instance().setFilePath(dataDir_ + "/debug.log");
     const auto configPath = dataDir_ + "/config.json";
-    if (!QFile::exists(configPath) && !QFile::copy(":/default-config.json", configPath)) {
-        return Result<InitializationState>::failure("Cannot create the user configuration: " +
-                                                    configPath);
+    if (!QFile::exists(configPath)) {
+        if (!QFile::copy(":/default-config.json", configPath)) {
+            return Result<InitializationState>::failure(
+                "Cannot create the user configuration: " + configPath);
+        }
+        const auto permissions = QFile::permissions(configPath);
+        if (!QFile::setPermissions(configPath, permissions | QFileDevice::WriteOwner)) {
+            return Result<InitializationState>::failure(
+                "Cannot make the user configuration writable: " + configPath);
+        }
     }
     auto config = AppConfig::load(configPath);
     if (!config) {
         return Result<InitializationState>::failure(config.error());
     }
     config_ = config.value();
+    if (config_.rendezvous.localPorts.empty()) {
+        while (config_.rendezvous.localPorts.size() < RendezvousPortCount) {
+            const auto port = randomRendezvousPort();
+            if (!config_.rendezvous.localPorts.contains(port)) {
+                config_.rendezvous.localPorts.append(port);
+            }
+        }
+        const auto saved = config_.save(configPath);
+        if (!saved) {
+            return Result<InitializationState>::failure(saved.error());
+        }
+        Logger::instance().log(
+            QtInfoMsg, "rendezvous",
+            QString("Generated persistent rendezvous ports: %1, %2, %3")
+                .arg(config_.rendezvous.localPorts.at(0))
+                .arg(config_.rendezvous.localPorts.at(1))
+                .arg(config_.rendezvous.localPorts.at(2)));
+    }
     identityPath_ = dataDir_ + "/identity.json";
     if (!QFile::exists(identityPath_)) {
         return Result<InitializationState>::success(InitializationState::DisplayNameRequired);
@@ -126,6 +164,44 @@ Result<void> ApplicationController::updateAudioPreferences(const AudioPreference
     config_ = updated;
     emit audioPreferencesChanged(config_.audio);
     Logger::instance().log(QtInfoMsg, "config", "Audio preferences updated");
+    return Result<void>::success();
+}
+
+Result<void> ApplicationController::updateRendezvousPorts(const QList<quint16>& ports,
+                                                          quint16 boundPort) {
+    AppConfig updated = config_;
+    updated.rendezvous.localPorts = ports;
+    updated.rendezvous.lastBoundPort = boundPort;
+    if (!updated.rendezvous.isValid()) {
+        return Result<void>::failure("The replacement rendezvous ports are invalid");
+    }
+    const auto saved = updated.save(dataDir_ + "/config.json");
+    if (!saved) {
+        return saved;
+    }
+    config_ = std::move(updated);
+    return Result<void>::success();
+}
+
+Result<void> ApplicationController::updateRendezvousExternalEndpoint(
+    const QString& address, quint16 port, const QString& mappingMethod) {
+    if (address.trimmed().isEmpty() || port == 0) {
+        return Result<void>::failure("The rendezvous external endpoint is invalid");
+    }
+    if (config_.rendezvous.lastPublicAddress == address &&
+        config_.rendezvous.lastPublicPort == port &&
+        config_.rendezvous.mappingMethod == mappingMethod) {
+        return Result<void>::success();
+    }
+    AppConfig updated = config_;
+    updated.rendezvous.lastPublicAddress = address;
+    updated.rendezvous.lastPublicPort = port;
+    updated.rendezvous.mappingMethod = mappingMethod;
+    const auto saved = updated.save(dataDir_ + "/config.json");
+    if (!saved) {
+        return saved;
+    }
+    config_ = std::move(updated);
     return Result<void>::success();
 }
 

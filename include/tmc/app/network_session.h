@@ -10,6 +10,7 @@
 #include "tmc/messaging/chat_message.h"
 #include "tmc/network/connection_policy.h"
 #include "tmc/protocol/packet.h"
+#include "tmc/rendezvous/rendezvous_service.h"
 #include "tmc/signaling/invitation.h"
 
 #include <QHash>
@@ -69,6 +70,11 @@ public:
     QString diagnostics() const;
     QString peerDisplayName(const QString& peerId) const;
 
+    QList<ContactPresence> contacts() const;
+    Result<void> requestContactConnection(const QString& peerId);
+    Result<void> acceptContactConnection(const QString& requestId);
+    void declineContactConnection(const QString& requestId);
+
 signals:
     void meshStateChanged(tmc::MeshSessionState state);
     void signalingReady(QString kind, QString text, QByteArray document);
@@ -87,6 +93,10 @@ signals:
                                int bufferMs);
     void connectionAttemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
     void invitationStateChanged(bool pending, QString state);
+    void contactChanged(tmc::ContactPresence contact);
+    void contactConnectionRequest(QString peerId, QString displayName, QString requestId,
+                                  QString meshId);
+    void contactConnectionRequestExpired(QString requestId);
     void errorOccurred(QString message);
 
 private:
@@ -98,6 +108,7 @@ private:
     void connectConnectionSignals();
     void connectMeshSignals();
     void connectVoiceSignals();
+    void connectRendezvousSignals();
     void configureKeepalive();
     void connectApplicationSignals();
 
@@ -124,6 +135,7 @@ private:
     void handleSessionAnswer(const QString& connectionId, const Packet& packet);
     void handlePing(const QString& connectionId, const Packet& packet);
     void handlePong(const QString& connectionId, const Packet& packet);
+    void handleRendezvousMetadata(const QString& connectionId, const Packet& packet);
     bool routeLinkSignaling(const QString& connectionId, const Packet& packet);
 
     bool sendPacket(const QString& connectionId, const Packet& packet);
@@ -135,6 +147,7 @@ private:
     void sendPeerList(const QString& connectionId);
     void announceLocalPeer(const QString& excludedConnection = {});
     void sendVoiceState(const QString& connectionId);
+    void sendRendezvousMetadata(const QString& connectionId, bool acknowledgement);
     void broadcastVoiceState();
     void broadcastPeerList(const QString& excludedConnection = {});
 
@@ -148,6 +161,10 @@ private:
     void updateMesh();
     void updateAudioTransportGates();
     void clearSessionData();
+    void startRendezvousOffer(const QString& requestId);
+    void handleRendezvousResponse(const QString& peerId, const QString& requestId,
+                                  const QString& response, const QString& meshId);
+    void handleRendezvousSignaling(const QString& peerId, const QByteArray& document);
 
     ApplicationController& app_;
     ConnectionPolicy policy_;
@@ -157,12 +174,23 @@ private:
     SignalingRouter router_;
     MessagingService messaging_;
     std::unique_ptr<VoiceSession> voice_;
+    std::unique_ptr<RendezvousService> rendezvous_;
 
     QTimer* keepalive_{};
     QString manualInvitationConnectionId_;
     QHash<QString, QList<Packet>> pendingRouted_;
     QHash<QString, QString> routeRequests_;
     QHash<QString, quint64> audioNegotiations_;
+    struct RendezvousNegotiation {
+        PeerIdentity peer;
+        QString requestId;
+        QString meshId;
+        bool initiatedLocally{false};
+        bool accepted{false};
+    };
+    QHash<QString, RendezvousNegotiation> rendezvousNegotiations_;
+    QHash<QString, QString> rendezvousConnections_;
+    QHash<QString, QByteArray> deferredRendezvousOffers_;
     bool pttPressed_{false};
 
     struct PendingPing {
