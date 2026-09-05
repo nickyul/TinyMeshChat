@@ -26,6 +26,7 @@ constexpr std::array PacketTypeNames{
     PacketTypeName{PacketType::LinkAnswer, "link.answer"},
     PacketTypeName{PacketType::SessionOffer, "session.offer"},
     PacketTypeName{PacketType::SessionAnswer, "session.answer"},
+    PacketTypeName{PacketType::RendezvousMetadata, "rendezvous.metadata"},
     PacketTypeName{PacketType::Ping, "ping"},
     PacketTypeName{PacketType::Pong, "pong"},
 };

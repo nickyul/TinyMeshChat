@@ -65,6 +65,8 @@ bool payloadMatchesType(PacketType type, const PacketPayload& payload) {
     case PacketType::SessionOffer:
     case PacketType::SessionAnswer:
         return std::holds_alternative<SessionSignalingPayload>(payload);
+    case PacketType::RendezvousMetadata:
+        return std::holds_alternative<RendezvousMetadataPayload>(payload);
     case PacketType::Ping:
     case PacketType::Pong:
         return std::holds_alternative<HeartbeatPayload>(payload);
@@ -110,6 +112,14 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
                 return {{"link", value.connectionId},
                         {"negotiation", static_cast<qint64>(value.negotiation)},
                         {"sdp", value.sdp}};
+            } else if constexpr (std::is_same_v<T, RendezvousMetadataPayload>) {
+                return {{"secret", value.secret},
+                        {"public_address", value.publicAddress},
+                        {"public_port", value.publicPort},
+                        {"local_address", value.localAddress},
+                        {"local_port", value.localPort},
+                        {"mapping_method", value.mappingMethod},
+                        {"acknowledgement", value.acknowledgement}};
             } else {
                 static_assert(std::is_same_v<T, HeartbeatPayload>);
                 return {{"nonce", value.nonce},
@@ -228,6 +238,23 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
             sdp.toUtf8().size() < PacketCodec::MaxBytes) {
             return Result<PacketPayload>::success(SessionSignalingPayload{
                 connectionId, static_cast<quint64>(negotiation), sdp});
+        }
+        break;
+    }
+    case PacketType::RendezvousMetadata: {
+        const auto secret = payload.value("secret").toString();
+        const auto publicAddress = payload.value("public_address").toString();
+        const auto publicPort = payload.value("public_port").toInt(-1);
+        const auto localAddress = payload.value("local_address").toString();
+        const auto localPort = payload.value("local_port").toInt(-1);
+        const auto mappingMethod = payload.value("mapping_method").toString();
+        if (secret.size() <= 64 && publicAddress.size() <= 64 && localAddress.size() <= 64 &&
+            mappingMethod.size() <= 32 && publicPort >= 0 && publicPort <= 65535 &&
+            localPort >= 0 && localPort <= 65535 &&
+            payload.value("acknowledgement").isBool()) {
+            return Result<PacketPayload>::success(RendezvousMetadataPayload{
+                secret, publicAddress, publicPort, localAddress, localPort, mappingMethod,
+                payload.value("acknowledgement").toBool()});
         }
         break;
     }
