@@ -34,7 +34,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/vcpkg-ports/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -96,7 +96,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/vcpkg-ports/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 

@@ -41,6 +41,19 @@ TrayController::TrayController(QWindow& window, AppViewModel& viewModel, QObject
             &TrayController::updateTrayState);
     connect(&viewModel_, &AppViewModel::callStateChanged, this,
             &TrayController::updateTrayState);
+    connect(&viewModel_, &AppViewModel::identityRequiredChanged, this,
+            &TrayController::updateTrayState);
+    connect(&viewModel_, &AppViewModel::contactConnectionNotification, this,
+            [this](const QString& message) {
+                if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+                    return;
+                }
+                trayIcon_->show();
+                trayIcon_->showMessage(tr("TinyMesh Chat"), message,
+                                       QSystemTrayIcon::Information, 10000);
+            });
+    connect(trayIcon_.get(), &QSystemTrayIcon::messageClicked, this,
+            &TrayController::restoreWindow);
 
     window_.installEventFilter(this);
     updateTrayState();
@@ -64,7 +77,7 @@ void TrayController::quitApplication() {
 
 bool TrayController::eventFilter(QObject* watched, QEvent* event) {
     if (watched != &window_ || event->type() != QEvent::Close || quitting_ ||
-        !viewModel_.meshVisible() || !QSystemTrayIcon::isSystemTrayAvailable()) {
+        viewModel_.identityRequired() || !QSystemTrayIcon::isSystemTrayAvailable()) {
         return QObject::eventFilter(watched, event);
     }
 
@@ -85,7 +98,8 @@ void TrayController::restoreWindow() {
 
 void TrayController::updateTrayState() {
     const bool meshActive = viewModel_.meshVisible();
-    if (meshActive && QSystemTrayIcon::isSystemTrayAvailable()) {
+    const bool backgroundAvailable = !viewModel_.identityRequired();
+    if (backgroundAvailable && QSystemTrayIcon::isSystemTrayAvailable()) {
         trayIcon_->show();
     } else {
         if (!window_.isVisible() && !quitting_) {
@@ -100,6 +114,7 @@ void TrayController::updateTrayState() {
     muteAction_->setText(viewModel_.muted() ? tr("Включить микрофон")
                                             : tr("Выключить микрофон"));
     leaveMeshAction_->setEnabled(meshActive);
+    leaveMeshAction_->setVisible(meshActive);
 }
 
 } // namespace tmc

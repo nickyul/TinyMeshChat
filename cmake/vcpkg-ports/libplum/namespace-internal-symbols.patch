@@ -1,0 +1,46 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0906fdf..c32e2fc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -59,3 +59,36 @@ target_include_directories(plum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/plum)
+ target_include_directories(plum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+ target_compile_definitions(plum PRIVATE $<$<CONFIG:Release>:RELEASE=1>)
++
++# libplum and libjuice share generic internal networking helper names. When both
++# libraries are linked statically, those private implementation symbols collide.
++# Prefix libplum's helpers without changing its public plum_* API.
++set(PLUM_INTERNAL_SYMBOL_DEFINITIONS
++	addr_get_len=plum_addr_get_len
++	addr_get_host=plum_addr_get_host
++	addr_get_port=plum_addr_get_port
++	addr_set_port=plum_addr_set_port
++	addr_is_any=plum_addr_is_any
++	addr_is_local=plum_addr_is_local
++	addr_is_private=plum_addr_is_private
++	addr_is_public=plum_addr_is_public
++	addr_is_temp_inet6=plum_addr_is_temp_inet6
++	addr_unmap_inet6_v4mapped=plum_addr_unmap_inet6_v4mapped
++	addr_map_inet6_v4mapped=plum_addr_map_inet6_v4mapped
++	addr_is_equal=plum_addr_is_equal
++	addr_to_string=plum_addr_to_string
++	addr_set=plum_addr_set
++	addr_set_binary=plum_addr_set_binary
++	addr_resolve=plum_addr_resolve
++	addr_record_is_equal=plum_addr_record_is_equal
++	addr_record_to_string=plum_addr_record_to_string
++	current_timestamp=plum_current_timestamp
++	udp_create_socket=plum_udp_create_socket
++	udp_recvfrom=plum_udp_recvfrom
++	udp_sendto=plum_udp_sendto
++	udp_sendto_self=plum_udp_sendto_self
++	udp_set_diffserv=plum_udp_set_diffserv
++	udp_get_port=plum_udp_get_port
++	udp_get_bound_addr=plum_udp_get_bound_addr
++	udp_get_local_addr=plum_udp_get_local_addr)
++target_compile_definitions(plum PRIVATE ${PLUM_INTERNAL_SYMBOL_DEFINITIONS})
+ target_link_libraries(plum PRIVATE Threads::Threads)
+@@ -68,3 +101,4 @@ target_include_directories(plum-static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includ
+ target_include_directories(plum-static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+ target_compile_definitions(plum-static PRIVATE $<$<CONFIG:Release>:RELEASE=1>)
++target_compile_definitions(plum-static PRIVATE ${PLUM_INTERNAL_SYMBOL_DEFINITIONS})
+ target_link_libraries(plum-static PRIVATE Threads::Threads)

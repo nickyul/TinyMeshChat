@@ -29,6 +29,7 @@ endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Widgets)
 find_package(LibDataChannel CONFIG REQUIRED)
+find_package(LibPlum CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
 find_package(unofficial-webrtc CONFIG REQUIRED)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
@@ -118,6 +119,29 @@ target_link_libraries(tmc_transport
         LibDataChannel::LibDataChannel
 )
 
+add_library(tmc_rendezvous STATIC)
+target_sources(tmc_rendezvous
+    PRIVATE
+        src/rendezvous/contact_store.cpp
+        src/rendezvous/port_mapper.cpp
+        src/rendezvous/rendezvous_service.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/rendezvous/contact_store.h
+            include/tmc/rendezvous/port_mapper.h
+            include/tmc/rendezvous/rendezvous_service.h
+)
+target_link_libraries(tmc_rendezvous
+    PUBLIC
+        tmc_core
+        Qt6::Core
+        Qt6::Network
+    PRIVATE
+        LibPlum::LibPlum
+)
+
 add_library(tmc_audio STATIC)
 target_sources(tmc_audio
     PRIVATE
@@ -187,6 +211,7 @@ target_link_libraries(tmc_application
     PUBLIC
         tmc_core
         tmc_transport
+        tmc_rendezvous
         Qt6::Core
     PRIVATE
         tmc_audio

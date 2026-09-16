@@ -19,6 +19,7 @@ class NetworkSession;
 class UpdateService;
 class MessagesModel;
 class PeersModel;
+class ContactsModel;
 class GlobalPttMonitor;
 
 class AppViewModel final : public QObject {
@@ -68,8 +69,13 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(QString updateReleaseNotes READ updateReleaseNotes NOTIFY updateStateChanged)
     Q_PROPERTY(int updateProgress READ updateProgress NOTIFY updateProgressChanged)
     Q_PROPERTY(bool updaterPortable READ updaterPortable NOTIFY updateStateChanged)
+    Q_PROPERTY(bool incomingContactRequest READ incomingContactRequest
+                   NOTIFY incomingContactRequestChanged)
+    Q_PROPERTY(QString incomingContactName READ incomingContactName
+                   NOTIFY incomingContactRequestChanged)
     Q_PROPERTY(QAbstractItemModel* messages READ messages CONSTANT)
     Q_PROPERTY(QAbstractItemModel* peers READ peers CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* contacts READ contacts CONSTANT)
 
 public:
     AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
@@ -120,8 +126,11 @@ public:
     QString updateReleaseNotes() const;
     int updateProgress() const;
     bool updaterPortable() const;
+    bool incomingContactRequest() const;
+    QString incomingContactName() const;
     QAbstractItemModel* messages() const;
     QAbstractItemModel* peers() const;
+    QAbstractItemModel* contacts() const;
 
     Q_INVOKABLE void createIdentity(const QString& displayName);
     Q_INVOKABLE void updateDisplayName(const QString& displayName);
@@ -151,6 +160,9 @@ public:
     Q_INVOKABLE void checkForUpdates();
     Q_INVOKABLE void downloadUpdate();
     Q_INVOKABLE void installUpdate();
+    Q_INVOKABLE void connectContact(const QString& peerId);
+    Q_INVOKABLE void acceptIncomingContact();
+    Q_INVOKABLE void declineIncomingContact();
     Q_INVOKABLE QString diagnostics() const;
 
     void checkForUpdatesAutomatically();
@@ -173,6 +185,8 @@ signals:
     void appLinksRegisteredChanged();
     void updateStateChanged();
     void updateProgressChanged();
+    void incomingContactRequestChanged();
+    void contactConnectionNotification(QString message);
     void updatePromptRequested();
     void errorRequested(QString message);
     void signalingRequested(QString kind, QString text, QString link);
@@ -182,6 +196,7 @@ private:
     void setMeshPeerCounts(int connected, int expected);
     void setStatus(const QString& status);
     void reportError(const QString& error);
+    void showNextContactRequest();
 
     void updateMicrophoneLevel();
     void updateMeterTimerState();
@@ -194,6 +209,7 @@ private:
     std::unique_ptr<NetworkSession> session_;
     std::unique_ptr<MessagesModel> messages_;
     std::unique_ptr<PeersModel> peers_;
+    std::unique_ptr<ContactsModel> contacts_;
     std::unique_ptr<GlobalPttMonitor> pttMonitor_;
     QByteArray signalingDocument_;
     QString status_;
@@ -206,6 +222,15 @@ private:
     bool pttPressed_{false};
     bool isTalking_{false};
     PttBinding pendingPttBinding_;
+
+    struct IncomingContactRequest {
+        QString peerId;
+        QString displayName;
+        QString requestId;
+        QString meshId;
+    };
+    QList<IncomingContactRequest> incomingContactRequests_;
+    IncomingContactRequest activeContactRequest_;
 
     QTimer meterTimer_;
 };

@@ -87,12 +87,62 @@ void NetworkSession::handlePacket(const QString& connectionId, const Packet& pac
     case PacketType::SessionAnswer:
         handleSessionAnswer(connectionId, packet);
         return;
+    case PacketType::RendezvousMetadata:
+        handleRendezvousMetadata(connectionId, packet);
+        return;
     case PacketType::Ping:
         handlePing(connectionId, packet);
         return;
     case PacketType::Pong:
         handlePong(connectionId, packet);
         return;
+    }
+}
+
+void NetworkSession::handleRendezvousMetadata(const QString& connectionId,
+                                              const Packet& packet) {
+    const auto connection = connections_->info(connectionId);
+    if (!connection || !connection->open || connection->remote.peerId != packet.senderId) {
+        return;
+    }
+    const auto& payload = std::get<RendezvousMetadataPayload>(packet.payload);
+    auto stored = rendezvous_->contact(packet.senderId);
+    auto secret = stored ? stored->rendezvousSecret : QByteArray{};
+    if (!payload.secret.isEmpty()) {
+        const auto received = QByteArray::fromBase64(payload.secret.toLatin1(),
+                                                     QByteArray::Base64UrlEncoding);
+        if (received.size() != 32) {
+            Logger::instance().log(QtWarningMsg, "rendezvous",
+                                   "Ignored malformed rendezvous secret metadata");
+            return;
+        }
+        secret = received;
+    }
+    if (secret.size() != 32) {
+        return;
+    }
+
+    ContactRecord contact;
+    contact.identity = connection->remote;
+    contact.rendezvousSecret = secret;
+    contact.publicEndpoint = {payload.publicAddress,
+                              static_cast<quint16>(payload.publicPort)};
+    contact.localEndpoint = {payload.localAddress,
+                             static_cast<quint16>(payload.localPort)};
+    contact.lastSeen = QDateTime::currentDateTimeUtc();
+    contact.lastMeshId = mesh_.meshId();
+    contact.mappingMethod = payload.mappingMethod;
+    const bool manualPairing = connection->kind == ConnectionKind::ManualOffer ||
+                               connection->kind == ConnectionKind::ManualAnswer;
+    const auto remembered = rendezvous_->rememberContact(std::move(contact), manualPairing);
+    if (!remembered) {
+        Logger::instance().log(QtWarningMsg, "rendezvous",
+                               "Contact metadata rejected: " + remembered.error());
+        return;
+    }
+    rendezvous_->setContactConnected(packet.senderId, true);
+    if (!payload.acknowledgement) {
+        sendRendezvousMetadata(connectionId, true);
     }
 }
 

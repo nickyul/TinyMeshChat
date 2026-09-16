@@ -28,6 +28,9 @@ public:
 
     Result<void> updateStunServers(const QStringList& servers);
     Result<void> updateAudioPreferences(const AudioPreferences& preferences);
+    Result<void> updateRendezvousPorts(const QList<quint16>& ports, quint16 boundPort);
+    Result<void> updateRendezvousExternalEndpoint(const QString& address, quint16 port,
+                                                  const QString& mappingMethod);
 
 signals:
     void fatalError(QString);

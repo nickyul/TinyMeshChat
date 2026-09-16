@@ -14,6 +14,7 @@
 #include <QGuiApplication>
 #include <QVector>
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -321,10 +322,86 @@ private:
     QVector<Row> rows_;
 };
 
+class ContactsModel final : public QAbstractListModel {
+public:
+    enum Role {
+        PeerIdRole = Qt::UserRole + 1,
+        DisplayNameRole,
+        StatusRole,
+        LastSeenRole,
+        RequestPendingRole,
+        CanConnectRole
+    };
+
+    explicit ContactsModel(QObject* parent = nullptr) : QAbstractListModel(parent) {
+    }
+
+    int rowCount(const QModelIndex& parent = {}) const override {
+        return parent.isValid() ? 0 : rows_.size();
+    }
+
+    QVariant data(const QModelIndex& index, int role) const override {
+        if (!index.isValid() || index.row() < 0 || index.row() >= rows_.size()) {
+            return {};
+        }
+        const auto& row = rows_.at(index.row());
+        switch (role) {
+        case PeerIdRole:
+            return row.contact.identity.peerId;
+        case DisplayNameRole:
+            return row.contact.identity.displayName;
+        case StatusRole:
+            return contactStatusName(row.status);
+        case LastSeenRole:
+            return row.contact.lastSeen;
+        case RequestPendingRole:
+            return row.requestPending;
+        case CanConnectRole:
+            return row.status == ContactStatus::Online && !row.requestPending;
+        default:
+            return {};
+        }
+    }
+
+    QHash<int, QByteArray> roleNames() const override {
+        return {{PeerIdRole, "peerId"},
+                {DisplayNameRole, "displayName"},
+                {StatusRole, "status"},
+                {LastSeenRole, "lastSeen"},
+                {RequestPendingRole, "requestPending"},
+                {CanConnectRole, "canConnect"}};
+    }
+
+    void reset(const QList<ContactPresence>& contacts) {
+        beginResetModel();
+        rows_ = QVector<ContactPresence>(contacts.cbegin(), contacts.cend());
+        endResetModel();
+    }
+
+    void update(ContactPresence contact) {
+        for (int row = 0; row < rows_.size(); ++row) {
+            if (rows_.at(row).contact.identity.peerId != contact.contact.identity.peerId) {
+                continue;
+            }
+            rows_[row] = std::move(contact);
+            emit dataChanged(index(row), index(row));
+            return;
+        }
+        const auto row = rows_.size();
+        beginInsertRows({}, row, row);
+        rows_.append(std::move(contact));
+        endInsertRows();
+    }
+
+private:
+    QVector<ContactPresence> rows_;
+};
+
 AppViewModel::AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
                            UpdateService& updates, bool identityRequired, QObject* parent)
     : QObject(parent), controller_(controller), appLinks_(appLinks), updates_(updates),
       messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
+      contacts_(std::make_unique<ContactsModel>()),
       pttMonitor_(std::make_unique<GlobalPttMonitor>()), identityRequired_(identityRequired) {
 
     connect(&updates_, &UpdateService::stateChanged, this, &AppViewModel::updateStateChanged);
@@ -556,12 +633,24 @@ bool AppViewModel::updaterPortable() const {
     return updates_.portable();
 }
 
+bool AppViewModel::incomingContactRequest() const {
+    return !activeContactRequest_.requestId.isEmpty();
+}
+
+QString AppViewModel::incomingContactName() const {
+    return activeContactRequest_.displayName;
+}
+
 QAbstractItemModel* AppViewModel::messages() const {
     return messages_.get();
 }
 
 QAbstractItemModel* AppViewModel::peers() const {
     return peers_.get();
+}
+
+QAbstractItemModel* AppViewModel::contacts() const {
+    return contacts_.get();
 }
 
 void AppViewModel::createIdentity(const QString& displayName) {
@@ -880,6 +969,51 @@ void AppViewModel::installUpdate() {
     updates_.installUpdate();
 }
 
+void AppViewModel::connectContact(const QString& peerId) {
+    if (!session_) {
+        return;
+    }
+    const auto requested = session_->requestContactConnection(peerId);
+    if (!requested) {
+        reportError(requested.error());
+    }
+}
+
+void AppViewModel::acceptIncomingContact() {
+    if (!session_ || activeContactRequest_.requestId.isEmpty()) {
+        return;
+    }
+    const auto requestId = activeContactRequest_.requestId;
+    activeContactRequest_ = {};
+    emit incomingContactRequestChanged();
+    const auto accepted = session_->acceptContactConnection(requestId);
+    if (!accepted) {
+        reportError(accepted.error());
+    }
+    showNextContactRequest();
+}
+
+void AppViewModel::declineIncomingContact() {
+    if (!session_ || activeContactRequest_.requestId.isEmpty()) {
+        return;
+    }
+    const auto requestId = activeContactRequest_.requestId;
+    activeContactRequest_ = {};
+    emit incomingContactRequestChanged();
+    session_->declineContactConnection(requestId);
+    showNextContactRequest();
+}
+
+void AppViewModel::showNextContactRequest() {
+    if (!activeContactRequest_.requestId.isEmpty() || incomingContactRequests_.isEmpty()) {
+        return;
+    }
+    activeContactRequest_ = incomingContactRequests_.takeFirst();
+    emit incomingContactRequestChanged();
+    emit contactConnectionNotification(
+        QString("%1 хочет подключиться").arg(activeContactRequest_.displayName));
+}
+
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
     return network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
@@ -961,6 +1095,38 @@ void AppViewModel::initializeSession() {
             &AppViewModel::audioSettingsChanged);
     connect(session_.get(), &NetworkSession::invitationStateChanged, this,
             [this](bool, const QString&) { emit invitationStateChanged(); });
+    connect(session_.get(), &NetworkSession::contactChanged, this,
+            [this](const ContactPresence& contact) { contacts_->update(contact); });
+    connect(session_.get(), &NetworkSession::contactConnectionRequest, this,
+            [this](const QString& peerId, const QString& displayName,
+                   const QString& requestId, const QString& meshId) {
+                const auto duplicate = std::any_of(
+                    incomingContactRequests_.cbegin(), incomingContactRequests_.cend(),
+                    [&requestId](const IncomingContactRequest& request) {
+                        return request.requestId == requestId;
+                    });
+                if (activeContactRequest_.requestId == requestId || duplicate) {
+                    return;
+                }
+                incomingContactRequests_.append({peerId, displayName, requestId, meshId});
+                showNextContactRequest();
+            });
+    connect(session_.get(), &NetworkSession::contactConnectionRequestExpired, this,
+            [this](const QString& requestId) {
+                for (auto it = incomingContactRequests_.begin();
+                     it != incomingContactRequests_.end();) {
+                    if (it->requestId == requestId) {
+                        it = incomingContactRequests_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (activeContactRequest_.requestId == requestId) {
+                    activeContactRequest_ = {};
+                    emit incomingContactRequestChanged();
+                    showNextContactRequest();
+                }
+            });
     connect(session_.get(), &NetworkSession::signalingReady, this,
             [this](const QString& kind, const QString& text, const QByteArray& document) {
                 signalingDocument_ = document;
@@ -969,6 +1135,7 @@ void AppViewModel::initializeSession() {
                     text.startsWith("tmc0:") ? "tinymesh://signal/0/" + text.sliced(5) : QString{};
                 emit signalingRequested(kind, text, link);
             });
+    contacts_->reset(session_->contacts());
     refreshAudioDevices();
     updatePttMonitorState();
 }

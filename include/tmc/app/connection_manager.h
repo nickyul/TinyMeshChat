@@ -18,14 +18,30 @@ namespace tmc {
 
 class AudioTransportWorker;
 
-enum class ConnectionKind { ManualOffer, ManualAnswer, MeshOffer, MeshAnswer };
+enum class ConnectionKind {
+    ManualOffer,
+    ManualAnswer,
+    MeshOffer,
+    MeshAnswer,
+    RendezvousOffer,
+    RendezvousAnswer
+};
 
 constexpr bool isOffer(ConnectionKind kind) {
-    return kind == ConnectionKind::ManualOffer || kind == ConnectionKind::MeshOffer;
+    return kind == ConnectionKind::ManualOffer || kind == ConnectionKind::MeshOffer ||
+           kind == ConnectionKind::RendezvousOffer;
+}
+
+constexpr bool isRendezvous(ConnectionKind kind) {
+    return kind == ConnectionKind::RendezvousOffer || kind == ConnectionKind::RendezvousAnswer;
 }
 
 constexpr bool isMeshManaged(ConnectionKind kind) {
     return kind == ConnectionKind::MeshOffer || kind == ConnectionKind::MeshAnswer;
+}
+
+constexpr bool isAutomatic(ConnectionKind kind) {
+    return isMeshManaged(kind) || isRendezvous(kind);
 }
 
 struct ConnectionInfo {

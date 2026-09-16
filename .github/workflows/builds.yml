@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/vcpkg-ports/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -64,8 +64,6 @@ jobs:
         run: |
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           echo "vcpkg binary cache hit: ${{ steps.cache_vcpkg_binaries_macos.outputs.cache-hit }}"
-          cmake --preset macos-debug
-          cmake --build --preset macos-debug
           bash scripts/package-macos.sh
 
       - name: Upload macOS app
@@ -96,7 +94,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/vcpkg-ports/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -117,8 +115,6 @@ jobs:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
         run: |
           New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
-          cmake --preset windows-debug
-          cmake --build --preset windows-debug
           .\scripts\package-windows.ps1
 
       - name: Upload Windows portable app

@@ -150,7 +150,7 @@ Result<void> ConnectionManager::acceptAnswer(const QString& connectionId, const 
         link->transport->acceptAnswer(sdp);
     } catch (const std::exception& e) {
         link->answerApplied = false;
-        if (isMeshManaged(link->kind)) {
+        if (isAutomatic(link->kind)) {
             setAttemptState(link, ConnectionAttemptState::Failed);
             remove(link);
         } else {
@@ -401,8 +401,8 @@ void ConnectionManager::connectSignalingSignals(const std::shared_ptr<Link>& lin
             setAttemptState(link, isOffer(link->kind) ? ConnectionAttemptState::AwaitingAnswer
                                                       : ConnectionAttemptState::AwaitingConnection);
             startDeadline(link,
-                          isMeshManaged(link->kind) ? policy_.connectionTimeoutSeconds
-                                                    : policy_.manualSignalingTimeoutSeconds,
+                          isAutomatic(link->kind) ? policy_.connectionTimeoutSeconds
+                                                  : policy_.manualSignalingTimeoutSeconds,
                           isOffer(link->kind)
                               ? "Истёк срок ожидания answer. Создайте новое приглашение."
                               : "Истёк срок ожидания подключения. Импортируйте offer повторно.");

@@ -33,6 +33,16 @@ ApplicationWindow {
 
     menuBar: MenuBar {
         Menu {
+            title: qsTr("Контакты")
+
+            Action {
+                text: qsTr("Открыть список контактов")
+                enabled: !appViewModel.identityRequired
+                onTriggered: contactsDialog.open()
+            }
+        }
+
+        Menu {
             title: qsTr("Настройки")
 
             Action {
@@ -764,6 +774,20 @@ ApplicationWindow {
         viewModel: appViewModel
     }
 
+    ContactsDialog {
+        id: contactsDialog
+
+        anchors.centerIn: parent
+        viewModel: appViewModel
+    }
+
+    ContactRequestDialog {
+        id: contactRequestDialog
+
+        anchors.centerIn: parent
+        viewModel: appViewModel
+    }
+
     Dialog {
         id: identitySettings
         title: qsTr("Имя пользователя")
@@ -933,6 +957,13 @@ ApplicationWindow {
         }
         function onUpdatePromptRequested() {
             updateDialog.open();
+        }
+        function onIncomingContactRequestChanged() {
+            if (appViewModel.incomingContactRequest) {
+                contactRequestDialog.open();
+            } else {
+                contactRequestDialog.close();
+            }
         }
     }
 }

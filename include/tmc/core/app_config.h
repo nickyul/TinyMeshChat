@@ -4,6 +4,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QList>
 #include <QtGlobal>
 
 namespace tmc {
@@ -43,9 +44,20 @@ struct AudioPreferences {
     bool isValid() const;
 };
 
+struct RendezvousPreferences {
+    QList<quint16> localPorts;
+    quint16 lastBoundPort{0};
+    QString lastPublicAddress;
+    quint16 lastPublicPort{0};
+    QString mappingMethod;
+
+    bool isValid() const;
+};
+
 struct AppConfig {
     QStringList stunServers;
     AudioPreferences audio;
+    RendezvousPreferences rendezvous;
 
     static Result<AppConfig> load(const QString& path);
     Result<void> save(const QString& path) const;

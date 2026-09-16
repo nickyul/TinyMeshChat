@@ -18,6 +18,7 @@ namespace {
 
 constexpr qsizetype MaxStunUriLength = 512;
 constexpr qsizetype MaxPttBindingNameLength = 64;
+constexpr quint16 MinRendezvousPort = 49152;
 constexpr quint32 MaxSerializedPttCode = 65535;
 constexpr quint32 MaxWindowsVirtualKey = 0xFE;
 constexpr quint32 MaxMacVirtualKey = 0x7F;
@@ -211,6 +212,55 @@ Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
     return Result<AudioPreferences>::success(std::move(preferences));
 }
 
+Result<RendezvousPreferences> parseRendezvousPreferences(const QJsonObject& root) {
+    RendezvousPreferences preferences;
+    if (!root.contains("rendezvous")) {
+        return Result<RendezvousPreferences>::success(std::move(preferences));
+    }
+    if (!root.value("rendezvous").isObject()) {
+        return Result<RendezvousPreferences>::failure("rendezvous must be an object");
+    }
+
+    const auto rendezvous = root.value("rendezvous").toObject();
+    if (!rendezvous.value("local_ports").isArray() ||
+        !rendezvous.value("last_bound_port").isDouble() ||
+        !rendezvous.value("last_public_address").isString() ||
+        !rendezvous.value("last_public_port").isDouble() ||
+        !rendezvous.value("mapping_method").isString()) {
+        return Result<RendezvousPreferences>::failure("rendezvous settings are invalid");
+    }
+
+    for (const auto& value : rendezvous.value("local_ports").toArray()) {
+        if (!value.isDouble() ||
+            !isIntegerInRange(value.toDouble(), MinRendezvousPort, 65535)) {
+            return Result<RendezvousPreferences>::failure(
+                "rendezvous.local_ports contains an invalid port");
+        }
+        const auto port = static_cast<quint16>(value.toInt());
+        if (preferences.localPorts.contains(port)) {
+            return Result<RendezvousPreferences>::failure(
+                "rendezvous.local_ports must not contain duplicates");
+        }
+        preferences.localPorts.append(port);
+    }
+
+    const auto lastBoundPort = rendezvous.value("last_bound_port").toDouble();
+    const auto lastPublicPort = rendezvous.value("last_public_port").toDouble();
+    if (preferences.localPorts.size() != 3 ||
+        !isIntegerInRange(lastBoundPort, 0, 65535) ||
+        !isIntegerInRange(lastPublicPort, 0, 65535)) {
+        return Result<RendezvousPreferences>::failure("rendezvous settings are invalid");
+    }
+    preferences.lastBoundPort = static_cast<quint16>(lastBoundPort);
+    preferences.lastPublicAddress = rendezvous.value("last_public_address").toString();
+    preferences.lastPublicPort = static_cast<quint16>(lastPublicPort);
+    preferences.mappingMethod = rendezvous.value("mapping_method").toString();
+    if (!preferences.isValid()) {
+        return Result<RendezvousPreferences>::failure("rendezvous settings are invalid");
+    }
+    return Result<RendezvousPreferences>::success(std::move(preferences));
+}
+
 } // namespace
 
 bool PttBinding::isValid() const {
@@ -266,6 +316,28 @@ bool AudioPreferences::isValid() const {
     return pttBinding.isValid();
 }
 
+bool RendezvousPreferences::isValid() const {
+    if (localPorts.empty()) {
+        return lastBoundPort == 0 && lastPublicAddress.isEmpty() && lastPublicPort == 0 &&
+               mappingMethod.isEmpty();
+    }
+    if (localPorts.size() != 3) {
+        return false;
+    }
+    QList<quint16> uniquePorts;
+    for (const auto port : localPorts) {
+        if (port < MinRendezvousPort || uniquePorts.contains(port)) {
+            return false;
+        }
+        uniquePorts.append(port);
+    }
+    if (lastBoundPort != 0 && !localPorts.contains(lastBoundPort)) {
+        return false;
+    }
+    return (lastPublicAddress.isEmpty() && lastPublicPort == 0) ||
+           (!lastPublicAddress.trimmed().isEmpty() && lastPublicPort != 0);
+}
+
 Result<AppConfig> AppConfig::load(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -305,6 +377,11 @@ Result<AppConfig> AppConfig::load(const QString& path) {
         return Result<AppConfig>::failure(audio.error());
     }
     c.audio = std::move(audio.value());
+    auto rendezvous = parseRendezvousPreferences(root);
+    if (!rendezvous) {
+        return Result<AppConfig>::failure(rendezvous.error());
+    }
+    c.rendezvous = std::move(rendezvous.value());
     return Result<AppConfig>::success(std::move(c));
 }
 
@@ -315,6 +392,9 @@ Result<void> AppConfig::save(const QString& path) const {
     }
     if (!audio.isValid()) {
         return Result<void>::failure("Audio settings are invalid");
+    }
+    if (!rendezvous.isValid()) {
+        return Result<void>::failure("Rendezvous settings are invalid");
     }
 
     QJsonArray servers;
@@ -342,7 +422,19 @@ Result<void> AppConfig::save(const QString& path) const {
         {"vad_threshold", audio.vadThreshold},
         {"vad_hangover_ms", audio.vadHangoverMs},
         {"ptt_binding", pttBinding}};
-    const QJsonObject root{{"stun_servers", servers}, {"audio", audioObject}};
+    QJsonArray localPorts;
+    for (const auto port : rendezvous.localPorts) {
+        localPorts.append(port);
+    }
+    const QJsonObject rendezvousObject{
+        {"local_ports", localPorts},
+        {"last_bound_port", rendezvous.lastBoundPort},
+        {"last_public_address", rendezvous.lastPublicAddress},
+        {"last_public_port", rendezvous.lastPublicPort},
+        {"mapping_method", rendezvous.mappingMethod}};
+    const QJsonObject root{{"stun_servers", servers},
+                           {"audio", audioObject},
+                           {"rendezvous", rendezvousObject}};
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         return Result<void>::failure("Cannot write configuration: " + file.errorString());
