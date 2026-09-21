@@ -14,8 +14,17 @@ option(
     "Deploy Qt beside the executable after every Windows build"
     ON
 )
+option(TMC_BUILD_CLIENT "Build the TinyMesh Chat desktop client" ON)
+option(TMC_BUILD_SIGNALING_SERVER "Build the optional signaling server" OFF)
 option(TMC_ENABLE_UPDATER "Build with Velopack automatic update support" OFF)
 set(TMC_VELOPACK_ROOT "" CACHE PATH "Extracted Velopack C/C++ SDK directory")
+
+if(NOT TMC_BUILD_CLIENT AND NOT TMC_BUILD_SIGNALING_SERVER)
+    message(FATAL_ERROR "Enable at least one TinyMesh target")
+endif()
+if(TMC_ENABLE_UPDATER AND NOT TMC_BUILD_CLIENT)
+    message(FATAL_ERROR "TMC_ENABLE_UPDATER requires TMC_BUILD_CLIENT")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +36,26 @@ if(DEFINED ENV{QT_ROOT})
     list(PREPEND CMAKE_PREFIX_PATH "$ENV{QT_ROOT}")
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Widgets)
+set(TMC_QT_COMPONENTS Core)
+if(TMC_BUILD_CLIENT)
+    list(APPEND TMC_QT_COMPONENTS Gui Network Qml Quick QuickControls2 Widgets)
+endif()
+if(TMC_BUILD_SIGNALING_SERVER)
+    list(APPEND TMC_QT_COMPONENTS Network WebSockets)
+endif()
+list(REMOVE_DUPLICATES TMC_QT_COMPONENTS)
+find_package(Qt6 6.5 REQUIRED COMPONENTS ${TMC_QT_COMPONENTS})
+
+add_subdirectory(libs/signaling_protocol)
+
+if(TMC_BUILD_SIGNALING_SERVER)
+    add_subdirectory(server)
+endif()
+
+if(NOT TMC_BUILD_CLIENT)
+    return()
+endif()
+
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
 find_package(unofficial-webrtc CONFIG REQUIRED)

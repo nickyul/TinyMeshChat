@@ -69,6 +69,21 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_TARGET_TRIPLET": "x64-linux"
             }
+        },
+        {
+            "name": "linux-server-debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TMC_BUILD_CLIENT": "OFF",
+                "TMC_BUILD_SIGNALING_SERVER": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -93,6 +108,10 @@
         {
             "name": "linux-debug",
             "configurePreset": "linux-debug"
+        },
+        {
+            "name": "linux-server-debug",
+            "configurePreset": "linux-server-debug"
         }
     ]
 }
