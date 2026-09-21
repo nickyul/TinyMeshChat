@@ -54,6 +54,21 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "linux-debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-linux"
+            }
         }
     ],
     "buildPresets": [
@@ -74,6 +89,10 @@
         {
             "name": "macos-release",
             "configurePreset": "macos-release"
+        },
+        {
+            "name": "linux-debug",
+            "configurePreset": "linux-debug"
         }
     ]
 }
