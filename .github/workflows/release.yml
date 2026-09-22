@@ -27,6 +27,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
+          modules: qtwebsockets
           arch: win64_msvc2022_64
           cache: true
 
@@ -84,13 +85,14 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: mac
           target: desktop
+          modules: qtwebsockets
           cache: true
 
       - name: Install build tools
         run: |
           sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
-          brew install nasm
+          brew install nasm autoconf autoconf-archive automake libtool
 
       - name: Cache vcpkg binaries
         uses: actions/cache@v4

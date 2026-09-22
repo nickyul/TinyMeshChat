@@ -204,6 +204,21 @@ Result<void> ConnectionManager::acceptAudioAnswer(const QString& connectionId, c
     }
 }
 
+bool ConnectionManager::setExpectedRemote(const QString& connectionId, const PeerIdentity& remote) {
+    const auto link = current(connectionId);
+    if (!link || !remote.isValid() || link->helloReceived ||
+        (!link->remote.peerId.isEmpty() && link->remote.peerId != remote.peerId)) {
+        return false;
+    }
+    link->remote = remote;
+    return true;
+}
+
+QPair<QString, QString> ConnectionManager::fingerprints(const QString& connectionId) const {
+    const auto link = current(connectionId);
+    return link && link->transport ? link->transport->fingerprints() : QPair<QString, QString>{};
+}
+
 void ConnectionManager::markHelloReceived(const QString& connectionId, const PeerIdentity& remote) {
     const auto link = current(connectionId);
     if (!link) {
@@ -212,7 +227,8 @@ void ConnectionManager::markHelloReceived(const QString& connectionId, const Pee
     link->remote = remote;
     link->helloReceived = true;
     link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
-    audioTransport_->updateConnection(connectionId, remote.peerId, false);
+    // A repeated signed hello updates the name without disabling an already open audio route.
+    audioTransport_->updateConnection(connectionId, remote.peerId, link->open);
     updateHandshakeReadiness(link);
 }
 
@@ -527,7 +543,7 @@ void ConnectionManager::updateTransportReadiness(const std::shared_ptr<Link>& li
     link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     setAttemptState(link, ConnectionAttemptState::AwaitingHello);
     startDeadline(link, policy_.helloTimeoutSeconds,
-                  "Истёк таймаут handshake: не получен peer.hello.");
+                  "Истёк таймаут handshake: не подтверждён ключ участника.");
     emit transportOpened(link->connectionId, link->remote);
     updateHandshakeReadiness(link);
 }

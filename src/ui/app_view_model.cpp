@@ -2,6 +2,8 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
+#include "tmc/signaling_client/access_invitation.h"
+#include "tmc/signaling_client/signaling_client.h"
 #include "tmc/app/update_service.h"
 #include "tmc/messaging/chat_message.h"
 #include "tmc/ui/app_link_controller.h"
@@ -436,6 +438,67 @@ QString AppViewModel::stunServersText() const {
     return controller_.config().stunServers.join('\n');
 }
 
+QString AppViewModel::signalingServerUrl() const { return controller_.config().signalingServerUrl; }
+QString AppViewModel::identityPublicKey() const {
+    const auto key = controller_.signingKey();
+    return key ? key->publicKey() : QString{};
+}
+
+QString AppViewModel::accessPreview(const QString& text) const {
+    QString server;
+    QString authority;
+    if (const auto invitation = decodeAccessInvitation(text.trimmed())) {
+        server = invitation->server.toDisplayString();
+        authority = invitation->authority;
+    } else {
+        const auto grant = decodeAccessGrant(text.trimmed());
+        if (grant.isEmpty() || grant.value("subject").toString() != identityPublicKey() ||
+            !SignalingClient::validServerUrl(QUrl(signalingServerUrl(), QUrl::StrictMode))) return {};
+        server = signalingServerUrl();
+        authority = grant.value("authority").toString();
+    }
+    return QStringLiteral("Сервер: %1\nКлюч сервера: %2\n\nПостоянный доступ, включая право выдавать доступ другим. Знакомства и участие в mesh оформляются отдельно.")
+        .arg(server, authority);
+}
+
+bool AppViewModel::importServerAccess(const QString& text) {
+    if (!session_) return false;
+    const auto result = session_->importServerAccess(text);
+    if (!result) reportError(result.error());
+    return bool(result);
+}
+
+void AppViewModel::createAccessInvitation() {
+    if (!session_) return;
+    const auto result = session_->createAccessInvitation();
+    if (!result) reportError(result.error());
+}
+bool AppViewModel::serverReady() const { return session_ && session_->signalingConnected(); }
+bool AppViewModel::serverBusy() const { return session_ && session_->signalingBusy(); }
+bool AppViewModel::serverMesh() const { return session_ && session_->serverMesh(); }
+QVariantList AppViewModel::acquaintances() const { return session_ ? session_->acquaintances() : QVariantList{}; }
+
+void AppViewModel::inviteAcquaintance(const QString& peerId) {
+    if (!session_) return;
+    const auto result = session_->inviteAcquaintance(peerId);
+    if (!result) reportError(result.error());
+}
+
+void AppViewModel::respondToOnlineInvitation(const QString& invitationId, bool accept) {
+    if (session_) session_->respondToOnlineInvitation(invitationId, accept);
+}
+
+QString AppViewModel::signalingStatus() const {
+    const auto state = session_ ? session_->signalingState() : QStringLiteral("disabled");
+    if (state == "connected") return "Подключён";
+    if (state == "recovering") return "Подключён, восстановление комнаты…";
+    if (state == "connecting") return "Подключение…";
+    if (state == "authenticating" || state == "authenticated") return "Проверка доступа…";
+    if (state == "access-required") return "Требуется разрешение доступа";
+    if (state == "unavailable") return "Недоступен, повторное подключение…";
+    return "Отключён";
+}
+
 QStringList AppViewModel::captureDevices() const {
     return captureDevices_;
 }
@@ -578,6 +641,10 @@ void AppViewModel::createIdentity(const QString& displayName) {
     emit identityRequiredChanged();
     emit displayNameChanged();
     initializeSession();
+    if (!deferredServerInvitation_.isEmpty()) {
+        const auto link = std::exchange(deferredServerInvitation_, QString{});
+        importSignalingText(link);
+    }
 }
 
 void AppViewModel::updateDisplayName(const QString& displayName) {
@@ -597,6 +664,43 @@ void AppViewModel::updateStunServers(const QString& servers) {
     }
     emit stunServersChanged();
     setStatus("Настройки STUN сохранены и применятся к новым соединениям.");
+}
+
+bool AppViewModel::updateSignalingServer(const QString& url) {
+    if (!session_ || meshVisible() || connecting() || serverBusy()) {
+        reportError("Выйдите из mesh перед изменением серверного подключения.");
+        return false;
+    }
+    if (!url.trimmed().isEmpty() && !SignalingClient::validServerUrl(QUrl(url.trimmed(), QUrl::StrictMode))) {
+        reportError("Укажите wss:// для внешнего сервера или ws:// для localhost, без пароля, query и fragment.");
+        return false;
+    }
+    const auto result = controller_.updateSignalingServer(url);
+    if (!result) {
+        reportError(result.error());
+        return false;
+    }
+    session_->configureSignalingServer(controller_.config().signalingServerUrl);
+    emit signalingServerChanged();
+    return true;
+}
+
+void AppViewModel::createServerInvitation() {
+    if (!session_) return;
+    const auto result = session_->createServerInvitation();
+    if (!result) reportError(result.error());
+}
+
+void AppViewModel::acceptServerInvitation() {
+    if (!session_ || !pendingServerInvitation_) return;
+    const auto invitation = *pendingServerInvitation_;
+    pendingServerInvitation_.reset();
+    const auto result = session_->joinServerInvitation(invitation);
+    if (!result) reportError(result.error());
+}
+
+void AppViewModel::declineServerInvitation() {
+    pendingServerInvitation_.reset();
 }
 
 void AppViewModel::createMesh() {
@@ -643,6 +747,31 @@ void AppViewModel::recreateInvitation() {
 
 void AppViewModel::importSignalingText(const QString& text) {
     if (!session_) {
+        if ((text.trimmed().startsWith("tinymesh://join/") || text.trimmed().startsWith("tinymesh://access/")) && text.size() <= 8192) {
+            deferredServerInvitation_ = text.trimmed();
+            setStatus("Укажите имя пользователя, чтобы принять приглашение.");
+        } else {
+            reportError("Сначала укажите имя пользователя, затем откройте приглашение повторно.");
+        }
+        return;
+    }
+    const auto normalized = text.trimmed();
+    if (normalized.startsWith("tinymesh://access") || normalized.startsWith("tmc-access1:")) {
+        emit accessImportRequested(normalized);
+        return;
+    }
+    if (normalized.startsWith("tinymesh://join")) {
+        const auto invitation = decodeServerInvitation(normalized);
+        if (!invitation) {
+            reportError("Некорректная ссылка серверного приглашения.");
+            return;
+        }
+        if (meshVisible() || connecting() || serverBusy()) {
+            reportError("Сначала выйдите из текущего mesh.");
+            return;
+        }
+        pendingServerInvitation_ = invitation;
+        emit serverJoinRequested(invitation->server.toDisplayString());
         return;
     }
     const auto result = session_->importSignalingText(text);
@@ -882,7 +1011,7 @@ void AppViewModel::installUpdate() {
 
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
-    return network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
+    return "Сигналинг: " + signalingStatus() + "\n" + network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
            controller_.config().stunServers.join("\n  ") + "\n\nКаталог данных:\n" +
            controller_.dataDirectory() + "\nЛог:\n" + controller_.dataDirectory() + "/debug.log";
 }
@@ -969,6 +1098,22 @@ void AppViewModel::initializeSession() {
                     text.startsWith("tmc0:") ? "tinymesh://signal/0/" + text.sliced(5) : QString{};
                 emit signalingRequested(kind, text, link);
             });
+    connect(session_.get(), &NetworkSession::signalingServerChanged,
+            this, &AppViewModel::signalingServerChanged);
+    connect(session_.get(), &NetworkSession::accessInvitationReady,
+            this, &AppViewModel::accessInvitationReady);
+    connect(session_.get(), &NetworkSession::acquaintancesChanged,
+            this, &AppViewModel::acquaintancesChanged);
+    connect(session_.get(), &NetworkSession::onlineInvitationReceived,
+            this, &AppViewModel::onlineInvitationReceived);
+    connect(session_.get(), &NetworkSession::onlineInvitationClosed,
+            this, &AppViewModel::onlineInvitationClosed);
+    connect(session_.get(), &NetworkSession::serverInvitationReady, this, [this](const QString& link) {
+        signalingDocument_.clear();
+        QGuiApplication::clipboard()->setText(link);
+        emit signalingRequested(QStringLiteral("server"), link, link);
+    });
+    session_->configureSignalingServer(controller_.config().signalingServerUrl);
     refreshAudioDevices();
     updatePttMonitorState();
 }

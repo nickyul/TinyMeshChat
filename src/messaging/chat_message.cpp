@@ -2,11 +2,12 @@
 
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
+#include "tmc/security/security.h"
 
 namespace tmc {
 
 bool ChatMessage::isValid() const {
-    return isCanonicalUuid(messageId) && isCanonicalUuid(senderId) && logicalClock > 0 &&
+    return isCanonicalUuid(messageId) && security::validKey(senderId) && logicalClock > 0 &&
            !text.trimmed().isEmpty() && text.size() <= limits::MaxChatMessageLength &&
            createdAt.isValid();
 }

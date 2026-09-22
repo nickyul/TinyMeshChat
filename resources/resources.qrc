@@ -11,5 +11,8 @@
     <file alias="qml/Main.qml">../qml/Main.qml</file>
     <file alias="qml/PrimaryButton.qml">../qml/PrimaryButton.qml</file>
     <file alias="qml/SignalingOutputDialog.qml">../qml/SignalingOutputDialog.qml</file>
+    <file alias="qml/SignalingSettingsDialog.qml">../qml/SignalingSettingsDialog.qml</file>
+    <file alias="qml/ServerAccessDialog.qml">../qml/ServerAccessDialog.qml</file>
+    <file alias="qml/AcquaintancesDialog.qml">../qml/AcquaintancesDialog.qml</file>
   </qresource>
 </RCC>

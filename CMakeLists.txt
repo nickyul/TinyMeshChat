@@ -38,7 +38,7 @@ endif()
 
 set(TMC_QT_COMPONENTS Core)
 if(TMC_BUILD_CLIENT)
-    list(APPEND TMC_QT_COMPONENTS Gui Network Qml Quick QuickControls2 Widgets)
+    list(APPEND TMC_QT_COMPONENTS Gui Network WebSockets Qml Quick QuickControls2 Widgets)
 endif()
 if(TMC_BUILD_SIGNALING_SERVER)
     list(APPEND TMC_QT_COMPONENTS Network WebSockets)
@@ -46,6 +46,7 @@ endif()
 list(REMOVE_DUPLICATES TMC_QT_COMPONENTS)
 find_package(Qt6 6.5 REQUIRED COMPONENTS ${TMC_QT_COMPONENTS})
 
+add_subdirectory(libs/security)
 add_subdirectory(libs/signaling_protocol)
 
 if(TMC_BUILD_SIGNALING_SERVER)
@@ -55,6 +56,8 @@ endif()
 if(NOT TMC_BUILD_CLIENT)
     return()
 endif()
+
+add_subdirectory(libs/signaling_client)
 
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
@@ -120,7 +123,8 @@ target_sources(tmc_core
             include/tmc/messaging/chat_message.h
             include/tmc/messaging/delivery_tracker.h
 )
-target_link_libraries(tmc_core PUBLIC Qt6::Core)
+target_link_libraries(tmc_core PUBLIC tmc_security
+        Qt6::Core)
 
 add_library(tmc_transport STATIC)
 target_sources(tmc_transport
@@ -188,6 +192,9 @@ target_sources(tmc_application
         src/app/mesh_coordinator.cpp
         src/app/messaging_service.cpp
         src/app/network_session.cpp
+        src/app/network_session_signaling.cpp
+        src/app/network_session_recovery.cpp
+        src/app/network_session_presence.cpp
         src/app/network_session_packets.cpp
         src/app/signaling_router.cpp
         src/app/negotiation_policy.cpp
@@ -215,6 +222,7 @@ target_link_libraries(tmc_application
     PUBLIC
         tmc_core
         tmc_transport
+        tmc_signaling_client
         Qt6::Core
     PRIVATE
         tmc_audio

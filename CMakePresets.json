@@ -82,7 +82,10 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "TMC_BUILD_CLIENT": "OFF",
-                "TMC_BUILD_SIGNALING_SERVER": "ON"
+                "TMC_BUILD_SIGNALING_SERVER": "ON",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-linux",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON"
             }
         }
     ],

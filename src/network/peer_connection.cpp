@@ -224,6 +224,16 @@ QString candidateTransportName(rtc::Candidate::TransportType type) {
 
 } // namespace
 
+QPair<QString, QString> PeerConnection::fingerprints() const {
+    const auto local = state_->pc->localDescription();
+    const auto remote = state_->pc->remoteDescription();
+    if (!local || !remote || !local->fingerprint() || !remote->fingerprint()) return {};
+    const auto text = [](const auto& fp) {
+        return QString::fromStdString(rtc::CertificateFingerprint::AlgorithmIdentifier(fp.algorithm) + ":" + fp.value).toLower();
+    };
+    return {text(*local->fingerprint()), text(*remote->fingerprint())};
+}
+
 PeerConnection::PeerConnection(const QStringList& stunServers, QString connectionId,
                                std::weak_ptr<AudioTransportWorker> audioTransport, QObject* p)
     : QObject(p), state_(std::make_shared<State>()) {

@@ -18,7 +18,7 @@ bool isLowerOrDigit(QChar character) {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
-std::optional<CodecError> validate(const Envelope& envelope) {
+std::optional<CodecError> validateFields(const Envelope& envelope) {
     if (envelope.version != 1) {
         return error(CodecErrorCode::UnsupportedVersion, "Unsupported protocol version");
     }
@@ -95,7 +95,7 @@ bool hasDuplicateKeys(const QByteArray& bytes) {
 } // namespace
 
 EnvelopeCodec::EncodeResult EnvelopeCodec::encode(const Envelope& envelope) {
-    if (const auto failure = validate(envelope)) {
+    if (const auto failure = validateFields(envelope)) {
         return *failure;
     }
     QJsonObject object{{QStringLiteral("v"), envelope.version},
@@ -109,6 +109,14 @@ EnvelopeCodec::EncodeResult EnvelopeCodec::encode(const Envelope& envelope) {
         return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
     }
     return bytes;
+}
+
+std::optional<CodecError> EnvelopeCodec::validate(const Envelope& envelope) {
+    const auto encoded = encode(envelope);
+    if (const auto* failure = std::get_if<CodecError>(&encoded)) {
+        return *failure;
+    }
+    return std::nullopt;
 }
 
 EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
@@ -154,7 +162,7 @@ EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
         }
         envelope.requestId = id.toString();
     }
-    if (const auto failure = validate(envelope)) {
+    if (const auto failure = validateFields(envelope)) {
         return *failure;
     }
     return envelope;

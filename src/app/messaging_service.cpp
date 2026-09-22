@@ -2,6 +2,7 @@
 
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
+#include "tmc/security/security.h"
 
 #include <QDateTime>
 
@@ -35,7 +36,7 @@ Result<OutgoingChatMessage> MessagingService::createMessage(const QString& text,
         return Result<OutgoingChatMessage>::failure(
             "Максимальная длина сообщения — 4096 символов.");
     }
-    if (!isCanonicalUuid(meshId) || !isCanonicalUuid(senderId)) {
+    if (!isCanonicalUuid(meshId) || !security::validKey(senderId)) {
         return Result<OutgoingChatMessage>::failure(
             "Некорректные идентификаторы сообщения.");
     }

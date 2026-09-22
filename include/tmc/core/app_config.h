@@ -45,6 +45,7 @@ struct AudioPreferences {
 
 struct AppConfig {
     QStringList stunServers;
+    QString signalingServerUrl; // Empty disables the optional server.
     AudioPreferences audio;
 
     static Result<AppConfig> load(const QString& path);

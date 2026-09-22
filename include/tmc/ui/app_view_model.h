@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/core/app_config.h"
+#include "tmc/signaling_client/server_invitation.h"
 
 #include <QAbstractItemModel>
 #include <QObject>
@@ -8,6 +9,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
+#include <QVariantList>
 
 #include <memory>
 
@@ -25,6 +27,7 @@ class AppViewModel final : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool identityRequired READ identityRequired NOTIFY identityRequiredChanged)
     Q_PROPERTY(QString displayName READ displayName NOTIFY displayNameChanged)
+    Q_PROPERTY(QString identityPublicKey READ identityPublicKey NOTIFY identityRequiredChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool meshVisible READ meshVisible NOTIFY meshStateChanged)
     Q_PROPERTY(bool connecting READ connecting NOTIFY meshStateChanged)
@@ -36,6 +39,13 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool invitationPending READ invitationPending NOTIFY invitationStateChanged)
     Q_PROPERTY(QString invitationState READ invitationState NOTIFY invitationStateChanged)
     Q_PROPERTY(QString stunServersText READ stunServersText NOTIFY stunServersChanged)
+
+    Q_PROPERTY(QString signalingServerUrl READ signalingServerUrl NOTIFY signalingServerChanged)
+    Q_PROPERTY(QString signalingStatus READ signalingStatus NOTIFY signalingServerChanged)
+    Q_PROPERTY(bool serverReady READ serverReady NOTIFY signalingServerChanged)
+    Q_PROPERTY(bool serverBusy READ serverBusy NOTIFY signalingServerChanged)
+    Q_PROPERTY(bool serverMesh READ serverMesh NOTIFY signalingServerChanged)
+    Q_PROPERTY(QVariantList acquaintances READ acquaintances NOTIFY acquaintancesChanged)
 
     // Audio properties
     Q_PROPERTY(QStringList captureDevices READ captureDevices NOTIFY audioDevicesChanged)
@@ -79,6 +89,7 @@ public:
 
     bool identityRequired() const;
     QString displayName() const;
+    QString identityPublicKey() const;
     QString status() const;
     bool meshVisible() const;
     bool connecting() const;
@@ -90,6 +101,12 @@ public:
     bool invitationPending() const;
     QString invitationState() const;
     QString stunServersText() const;
+    QString signalingServerUrl() const;
+    QString signalingStatus() const;
+    bool serverReady() const;
+    bool serverBusy() const;
+    bool serverMesh() const;
+    QVariantList acquaintances() const;
     QStringList captureDevices() const;
     QStringList playbackDevices() const;
     QString captureDevice() const;
@@ -126,6 +143,15 @@ public:
     Q_INVOKABLE void createIdentity(const QString& displayName);
     Q_INVOKABLE void updateDisplayName(const QString& displayName);
     Q_INVOKABLE void updateStunServers(const QString& servers);
+    Q_INVOKABLE bool updateSignalingServer(const QString& url);
+    Q_INVOKABLE QString accessPreview(const QString& text) const;
+    Q_INVOKABLE bool importServerAccess(const QString& text);
+    Q_INVOKABLE void createAccessInvitation();
+    Q_INVOKABLE void createServerInvitation();
+    Q_INVOKABLE void acceptServerInvitation();
+    Q_INVOKABLE void declineServerInvitation();
+    Q_INVOKABLE void inviteAcquaintance(const QString& peerId);
+    Q_INVOKABLE void respondToOnlineInvitation(const QString& invitationId, bool accept);
     Q_INVOKABLE void createMesh();
     Q_INVOKABLE void leaveMesh();
     Q_INVOKABLE void createInvitation();
@@ -164,6 +190,13 @@ signals:
     void callStateChanged();
     void invitationStateChanged();
     void stunServersChanged();
+    void signalingServerChanged();
+    void serverJoinRequested(QString server);
+    void accessImportRequested(QString text);
+    void accessInvitationReady(QString link);
+    void acquaintancesChanged();
+    void onlineInvitationReceived(QString invitationId, QString displayName, QString server);
+    void onlineInvitationClosed(QString invitationId);
     void audioDevicesChanged();
     void audioSettingsChanged();
     void microphoneLevelChanged();
@@ -196,6 +229,8 @@ private:
     std::unique_ptr<PeersModel> peers_;
     std::unique_ptr<GlobalPttMonitor> pttMonitor_;
     QByteArray signalingDocument_;
+    std::optional<ServerInvitation> pendingServerInvitation_;
+    QString deferredServerInvitation_;
     QString status_;
     QStringList captureDevices_;
     QStringList playbackDevices_;

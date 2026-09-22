@@ -2,10 +2,12 @@
 
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
+#include "tmc/security/security.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QUrl>
 
 #include <type_traits>
 
@@ -19,6 +21,11 @@ bool validUuid(const QJsonValue& value) {
 
 bool validTimestamp(const QJsonValue& value) {
     return value.isString() && QDateTime::fromString(value.toString(), Qt::ISODateWithMs).isValid();
+}
+
+bool isRecoveryPacket(PacketType type) {
+    return type == PacketType::SignalingState || type == PacketType::SignalingJoinRequest ||
+           type == PacketType::SignalingJoinInvitation;
 }
 
 QJsonObject identityToJson(const PeerIdentity& identity) {
@@ -42,6 +49,8 @@ bool payloadMatchesType(PacketType type, const PacketPayload& payload) {
     switch (type) {
     case PacketType::PeerHello:
         return std::holds_alternative<HelloPayload>(payload);
+    case PacketType::PeerProof:
+        return std::holds_alternative<PeerProofPayload>(payload);
     case PacketType::PeerSnapshot:
         return std::holds_alternative<PeerSnapshotPayload>(payload);
     case PacketType::PeerAnnounce:
@@ -65,6 +74,11 @@ bool payloadMatchesType(PacketType type, const PacketPayload& payload) {
     case PacketType::SessionOffer:
     case PacketType::SessionAnswer:
         return std::holds_alternative<SessionSignalingPayload>(payload);
+    case PacketType::SignalingState:
+        return std::holds_alternative<SignalingStatePayload>(payload);
+    case PacketType::SignalingJoinRequest:
+    case PacketType::SignalingJoinInvitation:
+        return std::holds_alternative<SignalingJoinPayload>(payload);
     case PacketType::Ping:
     case PacketType::Pong:
         return std::holds_alternative<HeartbeatPayload>(payload);
@@ -77,7 +91,11 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
         [](const auto& value) -> QJsonObject {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, HelloPayload>) {
-                return {{"display_name", value.displayName}};
+                QJsonObject hello{{"display_name", value.displayName}, {"public_key", value.publicKey}, {"nonce", value.nonce}};
+                if (value.signalingVersion > 0) hello.insert("signaling_version", value.signalingVersion);
+                return hello;
+            } else if constexpr (std::is_same_v<T, PeerProofPayload>) {
+                return {{"signature", value.signature}};
             } else if constexpr (std::is_same_v<T, PeerSnapshotPayload>) {
                 QJsonArray peers;
                 for (const auto& peer : value.peers) {
@@ -110,6 +128,14 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
                 return {{"link", value.connectionId},
                         {"negotiation", static_cast<qint64>(value.negotiation)},
                         {"sdp", value.sdp}};
+            } else if constexpr (std::is_same_v<T, SignalingStatePayload>) {
+                return {{"server", value.server}, {"session_id", value.sessionId},
+                        {"room_id", value.roomId}};
+            } else if constexpr (std::is_same_v<T, SignalingJoinPayload>) {
+                QJsonObject result{{"request_id", value.requestId}, {"session_id", value.sessionId},
+                                   {"room_id", value.roomId}};
+                if (!value.token.isEmpty()) result.insert("token", value.token);
+                return result;
             } else {
                 static_assert(std::is_same_v<T, HeartbeatPayload>);
                 return {{"nonce", value.nonce},
@@ -127,7 +153,20 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
             displayName.size() > limits::MaxDisplayNameLength) {
             break;
         }
-        return Result<PacketPayload>::success(HelloPayload{displayName});
+        bool printable = true;
+        for (const auto c : displayName) if (!c.isPrint()) printable = false;
+        if (!printable) break;
+        const auto version = payload.value("signaling_version");
+        if (!version.isUndefined() && version.toInt(-1) < 0) break;
+        const auto key = payload.value("public_key").toString();
+        const auto nonce = payload.value("nonce").toString();
+        if (!security::validKey(key) || security::unbase64(nonce, 32).isEmpty()) break;
+        return Result<PacketPayload>::success(HelloPayload{displayName, version.toInt(0), key, nonce});
+    }
+    case PacketType::PeerProof: {
+        const auto signature = payload.value("signature").toString();
+        if (payload.size() != 1 || security::unbase64(signature, 64).isEmpty()) break;
+        return Result<PacketPayload>::success(PeerProofPayload{signature});
     }
     case PacketType::PeerSnapshot: {
         if (!payload.value("peers").isArray()) {
@@ -231,6 +270,37 @@ Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload)
         }
         break;
     }
+    case PacketType::SignalingState: {
+        if (payload.size() != 3 || !payload.value("server").isString() ||
+            !payload.value("session_id").isString() || !payload.value("room_id").isString()) break;
+        const auto server = payload.value("server").toString();
+        const auto session = payload.value("session_id").toString();
+        const auto room = payload.value("room_id").toString();
+        const QUrl url(server, QUrl::StrictMode);
+        if ((!server.isEmpty() && (server.size() > 2048 || !url.isValid() ||
+             (url.scheme() != "ws" && url.scheme() != "wss") || url.host().isEmpty() ||
+             !url.userInfo().isEmpty() || url.hasQuery() || url.hasFragment() || url.port() == 0)) ||
+            (!session.isEmpty() && (!isCanonicalUuid(session) || server.isEmpty())) ||
+            (!room.isEmpty() && (!isCanonicalUuid(room) || session.isEmpty()))) break;
+        return Result<PacketPayload>::success(SignalingStatePayload{server, session, room});
+    }
+    case PacketType::SignalingJoinRequest:
+    case PacketType::SignalingJoinInvitation: {
+        const bool invitation = type == PacketType::SignalingJoinInvitation;
+        if (payload.size() != (invitation ? 4 : 3) || !validUuid(payload.value("request_id")) ||
+            !validUuid(payload.value("session_id")) || !validUuid(payload.value("room_id"))) break;
+        const auto token = payload.value("token").toString();
+        if (invitation) {
+            const auto bytes = QByteArray::fromBase64(token.toLatin1(),
+                QByteArray::Base64UrlEncoding | QByteArray::AbortOnBase64DecodingErrors);
+            if (!payload.value("token").isString() || token.size() != 43 || bytes.size() != 32 ||
+                QString::fromLatin1(bytes.toBase64(QByteArray::Base64UrlEncoding |
+                    QByteArray::OmitTrailingEquals)) != token) break;
+        } else if (payload.contains("token")) break;
+        return Result<PacketPayload>::success(SignalingJoinPayload{
+            payload.value("request_id").toString(), payload.value("session_id").toString(),
+            payload.value("room_id").toString(), token});
+    }
     case PacketType::Ping:
     case PacketType::Pong:
         if (validUuid(payload.value("nonce")) && validTimestamp(payload.value("sent_at"))) {
@@ -250,20 +320,25 @@ Result<QByteArray> PacketCodec::encode(const Packet& packet) {
         return Result<QByteArray>::failure("Packet type does not match its payload");
     }
     if (!isCanonicalUuid(packet.packetId) || !isCanonicalUuid(packet.meshId) ||
-        !isCanonicalUuid(packet.senderId) || !packet.createdAt.isValid()) {
+        !security::validKey(packet.senderId) || !packet.createdAt.isValid()) {
         return Result<QByteArray>::failure("Packet contains invalid fields");
     }
-    if ((!packet.targetId.isEmpty() && !isCanonicalUuid(packet.targetId)) ||
+    if ((!packet.targetId.isEmpty() && !security::validKey(packet.targetId)) ||
         packet.ttl < 0 || packet.ttl > 16) {
         return Result<QByteArray>::failure("Packet contains invalid routing fields");
     }
-    QJsonObject object{{"v", 0},
+    const auto body = payloadToJson(packet.payload);
+    if (isRecoveryPacket(packet.type) &&
+        (packet.targetId.isEmpty() || packet.ttl != 0 || !decodePayload(packet.type, body))) {
+        return Result<QByteArray>::failure("Invalid direct signaling recovery packet");
+    }
+    QJsonObject object{{"v", 1},
                        {"type", toString(packet.type)},
                        {"id", packet.packetId},
                        {"mesh", packet.meshId},
                        {"from", packet.senderId},
                        {"created_at", packet.createdAt.toUTC().toString(Qt::ISODateWithMs)},
-                       {"body", payloadToJson(packet.payload)}};
+                       {"body", body}};
     if (!packet.targetId.isEmpty()) {
         object.insert("to", packet.targetId);
     }
@@ -288,11 +363,11 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
     }
     const auto object = document.object();
     const auto type = packetTypeFromString(object.value("type").toString());
-    if (object.value("v").toInt(-1) != 0 || !type) {
+    if (object.value("v").toInt(-1) != 1 || !type) {
         return Result<Packet>::failure("Unsupported protocol version or packet type");
     }
     if (!validUuid(object.value("id")) || !validUuid(object.value("mesh")) ||
-        !validUuid(object.value("from")) || !validTimestamp(object.value("created_at")) ||
+        !security::validKey(object.value("from").toString()) || !validTimestamp(object.value("created_at")) ||
         !object.value("body").isObject()) {
         return Result<Packet>::failure("Packet contains invalid fields");
     }
@@ -303,8 +378,11 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
         QDateTime::fromString(object.value("created_at").toString(), Qt::ISODateWithMs);
     const auto targetId = object.value("to").toString();
     const auto ttl = object.value("ttl").toInt(0);
-    if ((!targetId.isEmpty() && !isCanonicalUuid(targetId)) || ttl < 0 || ttl > 16) {
+    if ((!targetId.isEmpty() && !security::validKey(targetId)) || ttl < 0 || ttl > 16) {
         return Result<Packet>::failure("Packet contains invalid routing fields");
+    }
+    if (isRecoveryPacket(*type) && (targetId.isEmpty() || ttl != 0)) {
+        return Result<Packet>::failure("Signaling recovery requires a direct target");
     }
     if (!expectedMesh.isEmpty() && meshId != expectedMesh) {
         return Result<Packet>::failure("Packet belongs to another mesh");

@@ -8,13 +8,15 @@ Dialog {
     required property var viewModel
     property string signalingText: ""
     property string signalingLink: ""
+    property bool serverInvitation: false
 
     signal saveRequested
 
     function showSignaling(kind, text, link) {
         signalingText = text;
         signalingLink = link;
-        title = kind === "offer" ? qsTr("Приглашение готово") : qsTr("Ответ готов");
+        serverInvitation = kind === "server";
+        title = kind === "offer" || serverInvitation ? qsTr("Приглашение готово") : qsTr("Ответ готов");
         open();
     }
 
@@ -31,7 +33,9 @@ Dialog {
 
         Label {
             Layout.fillWidth: true
-            text: qsTr("Код уже скопирован. Передайте его другому участнику:")
+            text: control.serverInvitation
+                ? qsTr("Ссылка скопирована. Передайте её одному участнику: она действует 10 минут, пока вы остаётесь подключены к серверу. Ответ вернётся автоматически.")
+                : qsTr("Код уже скопирован. Передайте его другому участнику:")
             wrapMode: Text.WordWrap
         }
 
@@ -63,6 +67,7 @@ Dialog {
 
             Button {
                 text: qsTr("Сохранить файл…")
+                visible: !control.serverInvitation
                 onClicked: control.saveRequested()
             }
 

@@ -3,7 +3,12 @@ target_sources(TinyMeshSignalingServer
     PRIVATE
         src/main.cpp
         src/signaling_server.cpp
+        src/signaling_server_access.cpp
         src/signaling_server.h
+        src/room_registry.cpp
+        src/room_registry.h
+        src/presence_registry.cpp
+        src/presence_registry.h
 )
 target_link_libraries(TinyMeshSignalingServer PRIVATE
     tmc_signaling_protocol

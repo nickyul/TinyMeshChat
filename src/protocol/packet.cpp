@@ -13,6 +13,7 @@ struct PacketTypeName {
 
 constexpr std::array PacketTypeNames{
     PacketTypeName{PacketType::PeerHello, "peer.hello"},
+    PacketTypeName{PacketType::PeerProof, "peer.proof"},
     PacketTypeName{PacketType::PeerSnapshot, "peer.snapshot"},
     PacketTypeName{PacketType::PeerAnnounce, "peer.announce"},
     PacketTypeName{PacketType::PeerLeave, "peer.leave"},
@@ -26,6 +27,9 @@ constexpr std::array PacketTypeNames{
     PacketTypeName{PacketType::LinkAnswer, "link.answer"},
     PacketTypeName{PacketType::SessionOffer, "session.offer"},
     PacketTypeName{PacketType::SessionAnswer, "session.answer"},
+    PacketTypeName{PacketType::SignalingState, "signaling.state"},
+    PacketTypeName{PacketType::SignalingJoinRequest, "signaling.join.request"},
+    PacketTypeName{PacketType::SignalingJoinInvitation, "signaling.join.invitation"},
     PacketTypeName{PacketType::Ping, "ping"},
     PacketTypeName{PacketType::Pong, "pong"},
 };

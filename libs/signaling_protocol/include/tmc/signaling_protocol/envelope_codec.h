@@ -17,6 +17,8 @@ enum class CodecErrorCode {
     UnsupportedVersion,
     InvalidType,
     InvalidRequestId,
+    InvalidBody,
+    UnknownType,
 };
 
 // Local diagnostics, not a server-to-client error message. Never contains input data.
@@ -34,6 +36,7 @@ public:
     using EncodeResult = std::variant<QByteArray, CodecError>;
     using DecodeResult = std::variant<Envelope, CodecError>;
 
+    [[nodiscard]] static std::optional<CodecError> validate(const Envelope& envelope);
     [[nodiscard]] static EncodeResult encode(const Envelope& envelope);
     [[nodiscard]] static DecodeResult decode(const QByteArray& bytes);
 };

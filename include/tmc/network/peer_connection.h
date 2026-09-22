@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QPair>
 #include <QStringList>
 
 #include <memory>
@@ -53,6 +54,7 @@ public:
     bool sendChat(const QString&);
     std::shared_ptr<AudioTransportEndpoint> audioEndpoint() const;
     PeerConnectionSnapshot snapshot() const;
+    QPair<QString, QString> fingerprints() const;
 
 signals:
     void localDescriptionReady(QString type, QString sdp);

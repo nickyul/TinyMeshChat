@@ -9,6 +9,7 @@
 #include "tmc/protocol/packet.h"
 #include "tmc/protocol/packet_codec.h"
 #include "tmc/signaling/invitation_codec.h"
+#include "tmc/signaling_client/signaling_client.h"
 
 #include <QDateTime>
 #include <QNetworkInformation>
@@ -82,7 +83,9 @@ void NetworkSession::connectConnectionSignals() {
             });
     connect(connections_.get(), &ConnectionManager::attemptFailed, this,
             [this](const PeerIdentity& peer, ConnectionKind kind, const QString&) {
-                if (isOffer(kind)) {
+                if ((isOffer(kind) && !isServerManaged(kind)) ||
+                    (isServerManaged(kind) && mesh_.joined() &&
+                     shouldInitiateNegotiation(app_.identity().peerId, peer.peerId))) {
                     mesh_.scheduleRetry(peer);
                 }
             });
@@ -108,7 +111,12 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
         emit invitationStateChanged(false, "connected");
     }
 
+    serverJoinDeadline_.stop();
     mesh_.connectionOpened(remote);
+    if (signaling_) {
+        const auto saved = app_.rememberAcquaintance(remote);
+        if (!saved) emit errorOccurred(saved.error());
+    }
     router_.observeDirect(remote.peerId, connectionId);
     Logger::instance().log(QtInfoMsg, "network",
                            "Direct DataChannel opened for " + connectionId.left(8));
@@ -123,6 +131,7 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
     announceLocalPeer();
     ensureDynamicMesh();
     sendPing(connectionId);
+    broadcastSignalingState();
 
     if (shouldInitiateNegotiation(app_.identity().peerId, remote.peerId)) {
         const auto audio = connections_->startAudioOffer(connectionId);
@@ -134,6 +143,12 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
 
 void NetworkSession::handleLinkRemoved(const QString& connectionId, const PeerIdentity& remote,
                                        bool wasOpen) {
+    serverLinks_.remove(connectionId);
+    localHelloNonces_.remove(connectionId);
+    remoteHellos_.remove(connectionId);
+    recoveryCapableConnections_.remove(connectionId);
+    recoveryPeers_.remove(remote.peerId);
+    recoveryTokens_.remove(remote.peerId);
     router_.forgetConnection(connectionId);
     pendingPings_.remove(connectionId);
     audioNegotiations_.remove(connectionId);
@@ -249,6 +264,10 @@ void NetworkSession::connectApplicationSignals() {
 }
 
 NetworkSession::~NetworkSession() {
+    if (signaling_) {
+        signaling_->disconnect(this);
+        signaling_.reset();
+    }
     const auto transport = connections_->audioTransport();
     transport->setReceiveEnabled(false);
     transport->setTransmitEnabled(false);
@@ -264,6 +283,9 @@ MeshSessionState NetworkSession::meshState() const {
 }
 
 Result<void> NetworkSession::createMesh() {
+    if (signalingBusy()) {
+        return Result<void>::failure("Дождитесь завершения операции с сервером.");
+    }
     if (!connections_->connections().isEmpty() || !mesh_.meshId().isEmpty()) {
         return Result<void>::failure("Сначала покиньте текущую mesh-сессию.");
     }
@@ -275,6 +297,7 @@ Result<void> NetworkSession::createMesh() {
 }
 
 void NetworkSession::leaveMesh() {
+    leaveServerRoom();
     if (mesh_.meshId().isEmpty() && connections_->connections().isEmpty()) {
         return;
     }
@@ -317,6 +340,11 @@ Result<void> NetworkSession::createInvitation() {
         return created;
     }
     manualInvitationConnectionId_ = connectionId;
+    onlineInvitationTargets_.remove(pendingContactTarget_);
+    pendingContactTarget_.clear();
+    emit acquaintancesChanged();
+    serverInvitationRequested_ = false;
+    emit signalingServerChanged();
     emit invitationStateChanged(true, "gathering");
     emit statusChanged("Создаётся приглашение для нового участника…");
     const auto started = connections_->startOffer(connectionId);
@@ -354,6 +382,9 @@ Result<void> NetworkSession::importSignalingText(const QString& text) {
 }
 
 Result<void> NetworkSession::importSignalingDocument(const QByteArray& document) {
+    if (pendingServerJoin_ || (serverMesh_ && !mesh_.joined())) {
+        return Result<void>::failure("Дождитесь подключения через сервер или выйдите из mesh.");
+    }
     auto decoded = InvitationCodec::decode(document);
     if (!decoded) {
         return Result<void>::failure(decoded.error());
@@ -411,6 +442,10 @@ Result<void> NetworkSession::importSignalingDocument(const QByteArray& document)
 void NetworkSession::emitSignaling(const QString& connectionId, const QString& sdp) {
     const auto connection = connections_->info(connectionId);
     if (!connection) {
+        return;
+    }
+    if (isServerManaged(connection->kind)) {
+        emitServerSignaling(connectionId, sdp);
         return;
     }
     Invitation invitation;
@@ -493,8 +528,11 @@ bool NetworkSession::sendPacket(const QString& connectionId, const Packet& packe
 }
 
 void NetworkSession::sendHello(const QString& connectionId) {
-    sendPacket(connectionId,
-               basePacket(PacketType::PeerHello, HelloPayload{app_.identity().displayName}));
+    if (!app_.signingKey()) return;
+    if (!localHelloNonces_.contains(connectionId)) localHelloNonces_.insert(connectionId, security::randomToken());
+    sendPacket(connectionId, basePacket(PacketType::PeerHello, HelloPayload{
+        app_.identity().displayName, signaling_ ? 1 : 0, app_.signingKey()->publicKey(), localHelloNonces_.value(connectionId)}));
+    sendPeerProof(connectionId);
 }
 
 void NetworkSession::sendPing(const QString& connectionId) {
@@ -865,6 +903,7 @@ QString NetworkSession::peerDisplayName(const QString& peerId) const {
 
 void NetworkSession::updateMesh() {
     emit meshChanged(connectedPeerCount(), qMax(0, knownPeerCount() - 1));
+    if (signaling_) emit acquaintancesChanged();
 }
 
 void NetworkSession::updateAudioTransportGates() {
@@ -879,6 +918,11 @@ void NetworkSession::updateAudioTransportGates() {
 }
 
 void NetworkSession::clearSessionData() {
+    localHelloNonces_.clear();
+    remoteHellos_.clear();
+    recoveryCapableConnections_.clear();
+    recoveryPeers_.clear();
+    if (signaling_) resetRoomRecovery();
     pttPressed_ = false;
     connections_->audioTransport()->setReceiveEnabled(false);
     connections_->audioTransport()->setTransmitEnabled(false);

@@ -6,6 +6,9 @@
 #include <QDebug>
 #include <QHostAddress>
 #include <QTimer>
+#include <QJsonDocument>
+#include <QTextStream>
+#include "tmc/security/security.h"
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
@@ -34,7 +37,24 @@ int main(int argc, char** argv) {
     parser.addOption(addressOption);
     parser.addOption(portOption);
     parser.addOption(startupSmokeOption);
+    parser.addOption({"authority-key", "Authority private key file (required to serve).", "path"});
+    parser.addOption({"init-authority", "Create a new authority key file and exit.", "path"});
+    parser.addOption({"grant-access", "Issue a permanent grant to this public key and exit.", "public-key"});
     parser.process(application);
+    if (parser.isSet("init-authority")) {
+        const auto key = tmc::security::SigningKey::create(parser.value("init-authority"));
+        if (!key) { qCritical("Cannot create authority key; an existing key is never overwritten"); return 2; }
+        QTextStream(stdout) << "Authority public key: " << key->publicKey() << Qt::endl;
+        return 0;
+    }
+    const auto authority = tmc::security::SigningKey::load(parser.value("authority-key"));
+    if (!authority) { qCritical("A valid --authority-key file is required"); return 2; }
+    if (parser.isSet("grant-access")) {
+        const auto grant = tmc::security::issueGrant(*authority, parser.value("grant-access"));
+        if (grant.isEmpty()) { qCritical("Invalid public key"); return 2; }
+        QTextStream(stdout) << "tmc-access1:" << tmc::security::base64(QJsonDocument(grant).toJson(QJsonDocument::Compact)) << Qt::endl;
+        return 0;
+    }
 
     QHostAddress address;
     if (!address.setAddress(parser.value(addressOption))) {
@@ -44,6 +64,10 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    if (!address.isLoopback()) {
+        qCritical("Bind to loopback; expose remote access only through a TLS reverse proxy");
+        return 2;
+    }
     bool portValid = false;
     const quint16 parsedPort = parser.value(portOption).toUShort(&portValid);
     if (!portValid) {
@@ -52,7 +76,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    tmc::server::SignalingServer server;
+    tmc::server::SignalingServer server(authority);
     if (!server.listen(address, parsedPort)) {
         qCritical().noquote()
             << QStringLiteral("Failed to listen on %1:%2: %3")

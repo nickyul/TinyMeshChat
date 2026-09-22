@@ -33,12 +33,30 @@ ApplicationWindow {
 
     menuBar: MenuBar {
         Menu {
+            title: qsTr("Знакомые")
+            Action {
+                text: qsTr("Открыть список")
+                enabled: !appViewModel.identityRequired
+                onTriggered: acquaintancesDialog.open()
+            }
+        }
+        Menu {
             title: qsTr("Настройки")
 
             Action {
                 text: qsTr("Имя пользователя")
                 enabled: !appViewModel.identityRequired
                 onTriggered: identitySettings.open()
+            }
+            Action {
+                text: qsTr("Сервер сигналинга")
+                enabled: !appViewModel.identityRequired
+                onTriggered: signalingSettings.open()
+            }
+            Action {
+                text: qsTr("Доступ к серверу")
+                enabled: !appViewModel.identityRequired
+                onTriggered: serverAccess.open()
             }
             Action {
                 text: qsTr("STUN-серверы")
@@ -235,7 +253,9 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     text: {
                         if (appViewModel.connecting) {
-                            return qsTr("Подключение к mesh… Передайте созданный answer пригласившему участнику.");
+                            return appViewModel.serverMesh
+                                ? qsTr("Подключение к mesh… Обмен описаниями соединения выполняется автоматически.")
+                                : qsTr("Подключение к mesh… Передайте созданный answer пригласившему участнику.");
                         }
 
                         if (appViewModel.status.length > 0) {
@@ -342,9 +362,23 @@ ApplicationWindow {
                     }
 
                     PrimaryButton {
+                        id: inviteButton
                         text: appViewModel.invitationPending ? qsTr("Подготовка ICE…") : qsTr("Пригласить")
                         enabled: !appViewModel.invitationPending
-                        onClicked: appViewModel.createInvitation()
+                        onClicked: invitationMenu.open()
+                        Menu {
+                            id: invitationMenu
+                            y: inviteButton.height
+                            MenuItem {
+                                text: appViewModel.serverBusy ? qsTr("Через сервер — ожидание…") : qsTr("Через сервер")
+                                enabled: appViewModel.serverReady && !appViewModel.serverBusy
+                                onTriggered: appViewModel.createServerInvitation()
+                            }
+                            MenuItem {
+                                text: qsTr("Вручную")
+                                onTriggered: appViewModel.createInvitation()
+                            }
+                        }
                     }
 
                     Button {
@@ -746,6 +780,85 @@ ApplicationWindow {
         onSaveRequested: saveDialog.open()
     }
 
+    AcquaintancesDialog {
+        id: acquaintancesDialog
+        viewModel: appViewModel
+    }
+
+    Dialog {
+        id: onlineInvitationDialog
+        property string invitationId: ""
+        property string senderName: ""
+        property string serverAddress: ""
+        title: qsTr("Приглашение от знакомого")
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(600, root.width - 48)
+        onAccepted: appViewModel.respondToOnlineInvitation(invitationId, true)
+        onRejected: appViewModel.respondToOnlineInvitation(invitationId, false)
+        footer: DialogButtonBox {
+            alignment: Qt.AlignRight
+            spacing: 8
+            padding: 12
+            Button {
+                text: qsTr("Принять")
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            Button {
+                text: qsTr("Отклонить")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        Label {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: qsTr("%1 приглашает вас в mesh через сервер %2.\n\nНа ответ есть одна минута. Микрофон автоматически не включается.")
+                .arg(onlineInvitationDialog.senderName).arg(onlineInvitationDialog.serverAddress)
+            wrapMode: Text.WrapAnywhere
+        }
+    }
+
+    SignalingSettingsDialog {
+        id: signalingSettings
+        viewModel: appViewModel
+    }
+
+    ServerAccessDialog {
+        id: serverAccess
+        viewModel: appViewModel
+    }
+
+    Dialog {
+        id: serverJoinDialog
+        property string serverAddress: ""
+        title: qsTr("Присоединиться к mesh?")
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(600, root.width - 48)
+        onAccepted: appViewModel.acceptServerInvitation()
+        onRejected: appViewModel.declineServerInvitation()
+        footer: DialogButtonBox {
+            alignment: Qt.AlignRight
+            spacing: 8
+            padding: 12
+
+            Button {
+                text: qsTr("Присоединиться")
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            Button {
+                text: qsTr("Отмена")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        Label {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: qsTr("Подключиться к серверу %1 и принять приглашение? Микрофон останется выключенным.").arg(serverJoinDialog.serverAddress)
+            wrapMode: Text.WrapAnywhere
+        }
+    }
+
     AppLinkSettingsDialog {
         id: appLinkSettings
 
@@ -817,7 +930,7 @@ ApplicationWindow {
         width: Math.min(520, root.width - 60)
         Label {
             width: parent.width
-            text: qsTr("TinyMesh Chat\n\nДинамический прямой P2P-чат для небольшой компании. " + "Первый offer/answer передаётся вручную, остальные связи строятся автоматически.\n\n" + "TURN и relay не используются.")
+            text: qsTr("TinyMesh Chat\n\nДинамический прямой P2P-чат для небольшой компании. " + "Приглашения передаются вручную или через настроенный сервер сигналинга.\n\n" + "TURN и relay не используются.")
             wrapMode: Text.WordWrap
         }
     }
@@ -925,11 +1038,35 @@ ApplicationWindow {
     Connections {
         target: appViewModel
         function onErrorRequested(message) {
+            if (errorDialog.visible && errorDialog.text === message)
+                return;
             errorDialog.text = message;
             errorDialog.open();
         }
         function onSignalingRequested(kind, text, link) {
             signalingDialog.showSignaling(kind, text, link);
+        }
+        function onServerJoinRequested(server) {
+            serverJoinDialog.serverAddress = server;
+            serverJoinDialog.open();
+        }
+        function onAccessImportRequested(text) {
+            serverAccess.showImport(text);
+        }
+        function onAccessInvitationReady(link) {
+            serverAccess.showInvitation(link);
+        }
+        function onOnlineInvitationReceived(invitationId, displayName, server) {
+            onlineInvitationDialog.invitationId = invitationId;
+            onlineInvitationDialog.senderName = displayName;
+            onlineInvitationDialog.serverAddress = server;
+            onlineInvitationDialog.open();
+        }
+        function onOnlineInvitationClosed(invitationId) {
+            if (onlineInvitationDialog.invitationId === invitationId) {
+                onlineInvitationDialog.close();
+                onlineInvitationDialog.invitationId = "";
+            }
         }
         function onUpdatePromptRequested() {
             updateDialog.open();

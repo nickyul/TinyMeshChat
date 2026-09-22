@@ -10,6 +10,7 @@ namespace tmc {
 void NetworkSession::handleIncoming(const QString& connectionId, const QString& text,
                                     PacketChannel channel) {
     const auto connection = connections_->info(connectionId);
+    if (!connection) return;
     auto decoded = PacketCodec::decode(text.toUtf8(), mesh_.meshId());
     if (!decoded) {
         Logger::instance().log(QtWarningMsg, "protocol", decoded.error());
@@ -35,8 +36,9 @@ void NetworkSession::handleIncoming(const QString& connectionId, const QString& 
         emit errorOccurred("Packet sender does not match the direct WebRTC peer.");
         return;
     }
-    if (connection && !connection->open && decoded.value().type != PacketType::PeerHello) {
-        emit errorOccurred("До завершения handshake разрешён только peer.hello.");
+    if (connection && !connection->open && decoded.value().type != PacketType::PeerHello &&
+        decoded.value().type != PacketType::PeerProof) {
+        emit errorOccurred("До подтверждения ключа разрешён только обмен peer.hello / peer.proof.");
         return;
     }
 
@@ -47,6 +49,9 @@ void NetworkSession::handlePacket(const QString& connectionId, const Packet& pac
     switch (packet.type) {
     case PacketType::PeerHello:
         handlePeerHello(connectionId, packet);
+        return;
+    case PacketType::PeerProof:
+        handlePeerProof(connectionId, packet);
         return;
     case PacketType::PeerSnapshot:
         handlePeerSnapshot(connectionId, packet);
@@ -87,6 +92,11 @@ void NetworkSession::handlePacket(const QString& connectionId, const Packet& pac
     case PacketType::SessionAnswer:
         handleSessionAnswer(connectionId, packet);
         return;
+    case PacketType::SignalingState:
+    case PacketType::SignalingJoinRequest:
+    case PacketType::SignalingJoinInvitation:
+        handleRecoveryPacket(connectionId, packet);
+        return;
     case PacketType::Ping:
         handlePing(connectionId, packet);
         return;
@@ -98,18 +108,61 @@ void NetworkSession::handlePacket(const QString& connectionId, const Packet& pac
 
 void NetworkSession::handlePeerHello(const QString& connectionId, const Packet& packet) {
     const auto connection = connections_->info(connectionId);
-    if (!connection) {
+    const auto& hello = std::get<HelloPayload>(packet.payload);
+    if (!connection || packet.senderId == app_.identity().peerId ||
+        security::identityId(hello.publicKey) != packet.senderId ||
+        (!connection->remote.peerId.isEmpty() && connection->remote.peerId != packet.senderId)) {
+        connections_->discard(connectionId);
+        emit errorOccurred("Ключ участника не соответствует заявленной идентичности.");
         return;
     }
-    const auto& payload = std::get<HelloPayload>(packet.payload);
-    auto remote = connection->remote;
-    if (remote.peerId.isEmpty()) {
-        remote.peerId = packet.senderId;
+    const auto previous = remoteHellos_.constFind(connectionId);
+    if (previous != remoteHellos_.cend() && (previous->publicKey != hello.publicKey || previous->nonce != hello.nonce)) {
+        connections_->discard(connectionId);
+        return;
     }
-    if (!payload.displayName.isEmpty()) {
-        remote.displayName = payload.displayName;
+    remoteHellos_.insert(connectionId, hello);
+    // Only transportOpened sends our first hello, once both DataChannels are ready.
+    // An early remote hello is cached; sendHello will then send the proof too.
+    sendPeerProof(connectionId);
+}
+
+void NetworkSession::sendPeerProof(const QString& connectionId) {
+    const auto remote = remoteHellos_.constFind(connectionId);
+    const auto fingerprints = connections_->fingerprints(connectionId);
+    if (!app_.signingKey() || remote == remoteHellos_.cend() || !localHelloNonces_.contains(connectionId) ||
+        fingerprints.first.isEmpty() || fingerprints.second.isEmpty()) return;
+    const auto signature = app_.signingKey()->sign(security::transcript("tmc.p2p-auth.v1", {
+        mesh_.meshId(), connectionId, app_.identity().peerId, security::identityId(remote->publicKey),
+        localHelloNonces_.value(connectionId), remote->nonce, fingerprints.first, fingerprints.second,
+        app_.identity().displayName}));
+    sendPacket(connectionId, basePacket(PacketType::PeerProof, PeerProofPayload{signature}));
+}
+
+void NetworkSession::handlePeerProof(const QString& connectionId, const Packet& packet) {
+    const auto hello = remoteHellos_.constFind(connectionId);
+    const auto fingerprints = connections_->fingerprints(connectionId);
+    if (hello == remoteHellos_.cend() || !localHelloNonces_.contains(connectionId) ||
+        fingerprints.first.isEmpty() || fingerprints.second.isEmpty()) return;
+    const auto remoteId = security::identityId(hello->publicKey);
+    const auto message = security::transcript("tmc.p2p-auth.v1", {mesh_.meshId(), connectionId,
+        remoteId, app_.identity().peerId, hello->nonce, localHelloNonces_.value(connectionId),
+        fingerprints.second, fingerprints.first, hello->displayName});
+    if (packet.senderId != remoteId || !security::verify(hello->publicKey, message,
+            std::get<PeerProofPayload>(packet.payload).signature)) {
+        connections_->discard(connectionId);
+        emit errorOccurred("Не удалось подтвердить ключ P2P-участника.");
+        return;
     }
+    const PeerIdentity remote{remoteId, hello->displayName};
+    const bool recovery = hello->signalingVersion == 1;
     mesh_.rememberPeer(remote);
+    if (recovery) recoveryCapableConnections_.insert(connectionId);
+    const auto connection = connections_->info(connectionId);
+    if (signaling_ && connection && connection->open) {
+        const auto saved = app_.rememberAcquaintance(remote);
+        if (!saved) emit errorOccurred(saved.error());
+    }
     connections_->markHelloReceived(connectionId, remote);
 }
 

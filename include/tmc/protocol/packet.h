@@ -13,6 +13,7 @@ namespace tmc {
 
 enum class PacketType {
     PeerHello,
+    PeerProof,
     PeerSnapshot,
     PeerAnnounce,
     PeerLeave,
@@ -26,13 +27,21 @@ enum class PacketType {
     LinkAnswer,
     SessionOffer,
     SessionAnswer,
+    SignalingState,
+    SignalingJoinRequest,
+    SignalingJoinInvitation,
     Ping,
     Pong
 };
 
 struct HelloPayload {
     QString displayName;
+    int signalingVersion{0};
+    QString publicKey;
+    QString nonce;
 };
+
+struct PeerProofPayload { QString signature; };
 
 struct PeerSnapshotPayload {
     QList<PeerIdentity> peers;
@@ -90,11 +99,26 @@ struct HeartbeatPayload {
     QDateTime sentAt;
 };
 
+// Direct control-channel messages. No routing and no endpoint discovery:
+// recovery only uses the signaling server already authorized on this client.
+struct SignalingStatePayload {
+    QString server;
+    QString sessionId;
+    QString roomId;
+};
+
+struct SignalingJoinPayload {
+    QString requestId;
+    QString sessionId;
+    QString roomId;
+    QString token; // Empty on a request; one-use bearer token on a reply.
+};
+
 using PacketPayload =
-    std::variant<HelloPayload, PeerSnapshotPayload, PeerAnnouncePayload, PeerLeavePayload,
+    std::variant<HelloPayload, PeerProofPayload, PeerSnapshotPayload, PeerAnnouncePayload, PeerLeavePayload,
                  ChatMessagePayload, ChatAckPayload, VoiceStatePayload, VoiceQualityPayload,
                  RoutePayload, LinkSignalingPayload, SessionSignalingPayload,
-                 HeartbeatPayload>;
+                 HeartbeatPayload, SignalingStatePayload, SignalingJoinPayload>;
 
 struct Packet {
     PacketType type{PacketType::PeerHello};

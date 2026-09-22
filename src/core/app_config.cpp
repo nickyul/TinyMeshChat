@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QUrl>
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,16 @@ constexpr quint32 WindowsForwardMouseButton = 0x06;
 constexpr quint32 MacMiddleMouseButton = 2;
 constexpr quint32 MacBackMouseButton = 3;
 constexpr quint32 MacForwardMouseButton = 4;
+
+bool validSignalingUrl(const QString& text) {
+    if (text.isEmpty()) {
+        return true;
+    }
+    const QUrl url(text, QUrl::StrictMode);
+    return text.size() <= 2048 && url.isValid() &&
+           (url.scheme() == "ws" || url.scheme() == "wss") && !url.host().isEmpty() &&
+           url.userInfo().isEmpty() && !url.hasQuery() && !url.hasFragment() && url.port() != 0;
+}
 
 bool isIntegerInRange(double value, double minimum, double maximum) {
     return std::isfinite(value) && value == std::floor(value) && value >= minimum &&
@@ -282,6 +293,14 @@ Result<AppConfig> AppConfig::load(const QString& path) {
 
     AppConfig c;
     const auto root = d.object();
+    const auto signaling = root.value("signaling_server_url");
+    if (!signaling.isUndefined() && !signaling.isString()) {
+        return Result<AppConfig>::failure("signaling_server_url must be a string");
+    }
+    c.signalingServerUrl = signaling.toString();
+    if (!validSignalingUrl(c.signalingServerUrl)) {
+        return Result<AppConfig>::failure("Invalid signaling server URL");
+    }
     const auto serverValue = root.value("stun_servers");
     if (!serverValue.isArray()) {
         return Result<AppConfig>::failure("stun_servers must be an array");
@@ -309,6 +328,9 @@ Result<AppConfig> AppConfig::load(const QString& path) {
 }
 
 Result<void> AppConfig::save(const QString& path) const {
+    if (!validSignalingUrl(signalingServerUrl)) {
+        return Result<void>::failure("Укажите адрес ws:// или wss:// без пароля, query и fragment.");
+    }
     auto normalizedServers = normalizeStunServers(stunServers);
     if (!normalizedServers) {
         return Result<void>::failure(normalizedServers.error());
@@ -342,7 +364,8 @@ Result<void> AppConfig::save(const QString& path) const {
         {"vad_threshold", audio.vadThreshold},
         {"vad_hangover_ms", audio.vadHangoverMs},
         {"ptt_binding", pttBinding}};
-    const QJsonObject root{{"stun_servers", servers}, {"audio", audioObject}};
+    const QJsonObject root{{"stun_servers", servers}, {"audio", audioObject},
+                           {"signaling_server_url", signalingServerUrl}};
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         return Result<void>::failure("Cannot write configuration: " + file.errorString());

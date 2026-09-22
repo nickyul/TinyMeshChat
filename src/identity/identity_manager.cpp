@@ -2,8 +2,10 @@
 
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
+#include "tmc/security/security.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
@@ -29,10 +31,11 @@ Result<QString> normalizeDisplayName(const QString& name) {
 }
 
 Result<void> saveIdentity(const QString& path, const PeerIdentity& identity) {
-    const QJsonObject object{{"peer_id", identity.peerId},
-                             {"display_name", identity.displayName}};
+    const QJsonObject object{{"v", 1}, {"peer_id", identity.peerId},
+                             {"display_name", identity.displayName}, {"legacy_peer_id", identity.legacyPeerId}};
     QSaveFile out(path);
-    if (!out.open(QIODevice::WriteOnly) || out.write(QJsonDocument(object).toJson()) < 0 ||
+    const auto bytes = QJsonDocument(object).toJson();
+    if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size() ||
         !out.commit()) {
         return Result<void>::failure("Cannot persist identity: " + out.errorString());
     }
@@ -49,6 +52,7 @@ Result<PeerIdentity> IdentityManager::load(const QString& path) {
 
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+    file.close();
     if (error.error != QJsonParseError::NoError || !document.isObject()) {
         return Result<PeerIdentity>::failure("Stored identity is invalid");
     }
@@ -57,10 +61,30 @@ Result<PeerIdentity> IdentityManager::load(const QString& path) {
     PeerIdentity identity{object.value("peer_id").toString(),
                           object.value("display_name").toString()};
     const auto displayName = normalizeDisplayName(identity.displayName);
-    if (!identity.isValid() || !displayName) {
+    if (!displayName || (!identity.isValid() && !isCanonicalUuid(identity.peerId))) {
         return Result<PeerIdentity>::failure("Stored identity is invalid");
     }
     identity.displayName = displayName.value();
+    const auto keyPath = QFileInfo(path).absolutePath() + "/identity-key.json";
+    if (isCanonicalUuid(identity.peerId)) {
+        // Preserve the old profile before adopting a key-derived identity.
+        if (!QFile::exists(path + ".legacy") && !QFile::copy(path, path + ".legacy"))
+            return Result<PeerIdentity>::failure("Cannot back up legacy identity");
+        auto key = QFile::exists(keyPath) ? security::SigningKey::load(keyPath) : security::SigningKey::create(keyPath);
+        if (!key) return Result<PeerIdentity>::failure("Cannot initialize identity key");
+        identity.legacyPeerId = identity.peerId;
+        identity.peerId = security::identityId(key->publicKey());
+        const auto saved = saveIdentity(path, identity);
+        if (!saved) return Result<PeerIdentity>::failure(saved.error());
+    } else {
+        if (object.value("v").toInt(-1) != 1) {
+            return Result<PeerIdentity>::failure("Unsupported identity version");
+        }
+        const auto key = security::SigningKey::load(keyPath);
+        if (!key || security::identityId(key->publicKey()) != identity.peerId)
+            return Result<PeerIdentity>::failure("Identity key is missing or does not match; restore its backup");
+        identity.legacyPeerId = object.value("legacy_peer_id").toString();
+    }
     return Result<PeerIdentity>::success(identity);
 }
 
@@ -73,7 +97,10 @@ Result<PeerIdentity> IdentityManager::create(const QString& path, const QString&
         return Result<PeerIdentity>::failure(normalized.error());
     }
 
-    PeerIdentity identity{createUuid(), normalized.value()};
+    const auto keyPath = QFileInfo(path).absolutePath() + "/identity-key.json";
+    auto key = QFile::exists(keyPath) ? security::SigningKey::load(keyPath) : security::SigningKey::create(keyPath);
+    if (!key) return Result<PeerIdentity>::failure("Cannot initialize identity key");
+    PeerIdentity identity{security::identityId(key->publicKey()), normalized.value()};
     const auto saved = saveIdentity(path, identity);
     if (!saved) {
         return Result<PeerIdentity>::failure(saved.error());

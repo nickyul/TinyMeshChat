@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPair>
 #include <QStringList>
 
 #include <memory>
@@ -18,14 +19,22 @@ namespace tmc {
 
 class AudioTransportWorker;
 
-enum class ConnectionKind { ManualOffer, ManualAnswer, MeshOffer, MeshAnswer };
+enum class ConnectionKind {
+    ManualOffer, ManualAnswer, MeshOffer, MeshAnswer, ServerOffer, ServerAnswer
+};
+
+constexpr bool isServerManaged(ConnectionKind kind) {
+    return kind == ConnectionKind::ServerOffer || kind == ConnectionKind::ServerAnswer;
+}
 
 constexpr bool isOffer(ConnectionKind kind) {
-    return kind == ConnectionKind::ManualOffer || kind == ConnectionKind::MeshOffer;
+    return kind == ConnectionKind::ManualOffer || kind == ConnectionKind::MeshOffer ||
+           kind == ConnectionKind::ServerOffer;
 }
 
 constexpr bool isMeshManaged(ConnectionKind kind) {
-    return kind == ConnectionKind::MeshOffer || kind == ConnectionKind::MeshAnswer;
+    return kind == ConnectionKind::MeshOffer || kind == ConnectionKind::MeshAnswer ||
+           isServerManaged(kind);
 }
 
 struct ConnectionInfo {
@@ -82,6 +91,8 @@ public:
     Result<void> startAudioOffer(const QString& connectionId);
     Result<void> acceptAudioOffer(const QString& connectionId, const QString& sdp);
     Result<void> acceptAudioAnswer(const QString& connectionId, const QString& sdp);
+    bool setExpectedRemote(const QString& connectionId, const PeerIdentity& remote);
+    QPair<QString, QString> fingerprints(const QString& connectionId) const;
     void markHelloReceived(const QString& connectionId, const PeerIdentity& remote);
 
     void discard(const QString& connectionId);

@@ -6,6 +6,9 @@ ARG VCPKG_REF=2026.06.24
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
+        autoconf \
+        autoconf-archive \
+        automake \
         build-essential \
         ca-certificates \
         cmake \
@@ -16,6 +19,7 @@ RUN apt-get update \
         libfontconfig1 \
         libfreetype6 \
         libgl1-mesa-dev \
+        libtool \
         libxcb-cursor0 \
         libxcb-icccm4 \
         libxcb-keysyms1 \
