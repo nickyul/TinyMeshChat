@@ -72,6 +72,12 @@ void ConnectionManager::setStunServers(QStringList stunServers) {
     stunServers_ = std::move(stunServers);
 }
 
+void ConnectionManager::setTurnServers(QList<RelayServer> servers, int expiresInSeconds) {
+    turnServers_ = std::move(servers);
+    turnExpiry_.setRemainingTime(qint64{expiresInSeconds} * 1000);
+    // Existing transports keep their selected route; only new connections use these credentials.
+}
+
 int ConnectionManager::recordRoundTripTime(const QString& connectionId, int sampleMs) {
     const auto link = current(connectionId);
     if (!link || sampleMs < 0) {
@@ -93,7 +99,13 @@ Result<void> ConnectionManager::create(const QString& connectionId, const PeerId
     link->kind = kind;
     link->generation = generation;
     link->createdAtMs = QDateTime::currentMSecsSinceEpoch();
-    link->transport = std::make_shared<PeerConnection>(stunServers_, connectionId, audioTransport_);
+    try {
+        const auto relays = turnExpiry_.hasExpired() ? QList<RelayServer>{} : turnServers_;
+        link->transport = std::make_shared<PeerConnection>(
+            stunServers_, relays, connectionId, audioTransport_);
+    } catch (const std::exception& error) {
+        return Result<void>::failure(QString::fromUtf8(error.what()));
+    }
     audioTransport_->registerConnection(connectionId, link->transport->audioEndpoint());
     links_.insert(connectionId, link);
     configure(link);

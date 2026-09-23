@@ -17,6 +17,7 @@
 #include <QTextStream>
 
 #include <optional>
+#include <utility>
 
 namespace {
 
@@ -88,6 +89,9 @@ int main(int argc, char** argv) {
     parser.addOption(addressOption);
     parser.addOption(portOption);
     parser.addOption(startupSmokeOption);
+    parser.addOption({"turn-url", "Advertised TURN URI; repeat for UDP, TCP and TLS endpoints.", "uri"});
+    parser.addOption({"turn-secret-file", "File containing coturn's static-auth-secret.", "path"});
+    parser.addOption({"turn-ttl", "Lifetime of issued TURN credentials in seconds.", "seconds", "86400"});
     parser.addOption({"tls-cert", "Enable wss with this PEM certificate chain (server first).", "path"});
     parser.addOption({"tls-key", "Unencrypted PEM private key for --tls-cert.", "path"});
     parser.addOption({"authority-key", "Authority private key file (required to serve).", "path"});
@@ -141,7 +145,44 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    tmc::server::SignalingServer server(authority, tls);
+    tmc::server::TurnSettings turn;
+    turn.urls = parser.values("turn-url");
+    if (turn.urls.isEmpty() != !parser.isSet("turn-secret-file") ||
+        (turn.urls.isEmpty() && parser.isSet("turn-ttl"))) {
+        qCritical("TURN requires --turn-url and --turn-secret-file together");
+        return 2;
+    }
+    if (!turn.urls.isEmpty()) {
+        bool validLifetime = false;
+        turn.lifetimeSeconds = parser.value("turn-ttl").toInt(&validLifetime);
+        if (!validLifetime ||
+            turn.lifetimeSeconds < tmc::signaling_protocol::MinTurnLifetimeSeconds ||
+            turn.lifetimeSeconds > tmc::signaling_protocol::MaxTurnLifetimeSeconds ||
+            turn.urls.size() > tmc::signaling_protocol::MaxTurnUrls) {
+            qCritical("Invalid TURN lifetime (600..604800 seconds) or too many TURN URLs (maximum 8)");
+            return 2;
+        }
+        for (const auto& url : turn.urls) {
+            if (!tmc::signaling_protocol::validTurnUrl(url) || turn.urls.count(url) != 1) {
+                qCritical("Invalid or duplicate TURN URI; use turn:host:port?transport=udp/tcp "
+                          "or turns:host:port?transport=tcp");
+                return 2;
+            }
+        }
+        QFile secretFile(parser.value("turn-secret-file"));
+        if (!secretFile.open(QIODevice::ReadOnly) || secretFile.size() > 4096) {
+            qCritical("Cannot read TURN secret file (maximum 4096 bytes)");
+            return 2;
+        }
+        turn.sharedSecret = secretFile.readAll().trimmed();
+        if (turn.sharedSecret.size() < 32 || turn.sharedSecret.contains('\n') ||
+            turn.sharedSecret.contains('\r')) {
+            qCritical("TURN secret must be a single line of at least 32 bytes");
+            return 2;
+        }
+    }
+
+    tmc::server::SignalingServer server(authority, std::move(turn), tls);
     if (!server.listen(address, parsedPort)) {
         qCritical().noquote()
             << QStringLiteral("Failed to listen on %1:%2: %3")

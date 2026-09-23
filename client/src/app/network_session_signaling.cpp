@@ -35,6 +35,14 @@ void NetworkSession::initializeSignalingClient() {
     }
     signaling_ = std::make_unique<SignalingClient>();
     signaling_->configureAccess(app_.signingKey(), app_.serverAccess());
+    connect(signaling_.get(), &SignalingClient::turnCredentialsChanged, this, [this] {
+        const auto credentials = signaling_->turnCredentials();
+        QList<RelayServer> servers;
+        for (const auto& url : credentials.urls) {
+            servers.append({url, credentials.username, credentials.password});
+        }
+        connections_->setTurnServers(std::move(servers), credentials.expiresInSeconds);
+    });
     connect(signaling_.get(), &SignalingClient::accessRequired, this, &NetworkSession::errorOccurred);
     connect(signaling_.get(), &SignalingClient::accessGranted, this, [this](const QString& server, const QJsonObject& grant) {
         const auto saved = app_.saveServerAccess(server, grant);
@@ -60,6 +68,7 @@ void NetworkSession::initializeSignalingClient() {
             this, &NetworkSession::handleServerEvent);
     connect(signaling_.get(), &SignalingClient::connectionLost, this, [this] {
         const bool affected = serverMesh_;
+        connections_->setTurnServers({}, 0);
         resetPresence();
         serverRoomId_.clear();
         serverPeerId_.clear();
@@ -171,7 +180,9 @@ Result<void> NetworkSession::createServerInvitation() {
     if (mesh_.peerCount() >= policy_.maxPeers || serverPeers_.size() >= policy_.maxPeers - 1) {
         return Result<void>::failure("Достигнут лимит участников mesh.");
     }
-    if (!serverMesh_) recoveryAfter_ = recoveryClock_.elapsed() + 3000;
+    if (!serverMesh_) {
+        recoveryAfter_ = recoveryClock_.elapsed() + (mesh_.peerCount() == 1 ? 0 : 3000);
+    }
     serverMesh_ = true;
     serverInvitationRequested_ = true;
     broadcastSignalingState();

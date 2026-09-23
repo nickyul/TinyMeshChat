@@ -229,6 +229,7 @@ bool NetworkSession::handleRecoveryResponse(const signaling_protocol::Envelope& 
     }
     recoveryAfter_ = recoveryClock_.elapsed() + 1000;
     broadcastSignalingState();
+    requestServerInvitationWhenReady();
     emit signalingServerChanged();
     return true;
 }

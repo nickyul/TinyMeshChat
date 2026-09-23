@@ -234,7 +234,8 @@ QPair<QString, QString> PeerConnection::fingerprints() const {
     return {text(*local->fingerprint()), text(*remote->fingerprint())};
 }
 
-PeerConnection::PeerConnection(const QStringList& stunServers, QString connectionId,
+PeerConnection::PeerConnection(const QStringList& stunServers, const QList<RelayServer>& turnServers,
+                               QString connectionId,
                                std::weak_ptr<AudioTransportWorker> audioTransport, QObject* p)
     : QObject(p), state_(std::make_shared<State>()) {
     state_->connectionId = std::move(connectionId);
@@ -245,6 +246,31 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QString connectio
     rtc::Configuration cfg;
     for (const auto& s : stunServers) {
         cfg.iceServers.emplace_back(s.toStdString());
+    }
+    // Default: normal ICE priorities, with direct candidates preferred over relays.
+    // These environment overrides are for manual connectivity checks, never persisted.
+    const auto policy = qEnvironmentVariable("TMC_ICE_POLICY", "all");
+    const auto transport = qEnvironmentVariable("TMC_TURN_TRANSPORT", "all");
+    if ((policy != "all" && policy != "relay") ||
+        (transport != "all" && transport != "udp" && transport != "tcp" && transport != "tls")) {
+        throw std::invalid_argument("Invalid TMC_ICE_POLICY or TMC_TURN_TRANSPORT");
+    }
+    cfg.iceTransportPolicy = policy == "relay" ? rtc::TransportPolicy::Relay : rtc::TransportPolicy::All;
+    bool hasRelay = false;
+    for (const auto& relay : turnServers) {
+        rtc::IceServer server(relay.url.toStdString());
+        if ((transport == "udp" && server.relayType != rtc::IceServer::RelayType::TurnUdp) ||
+            (transport == "tcp" && server.relayType != rtc::IceServer::RelayType::TurnTcp) ||
+            (transport == "tls" && server.relayType != rtc::IceServer::RelayType::TurnTls)) {
+            continue;
+        }
+        server.username = relay.username.toStdString();
+        server.password = relay.password.toStdString();
+        cfg.iceServers.push_back(std::move(server));
+        hasRelay = true;
+    }
+    if (policy == "relay" && !hasRelay) {
+        throw std::invalid_argument("Relay-only check requires TURN access from the signaling server");
     }
     cfg.disableAutoNegotiation = true;
     cfg.forceMediaTransport = true;
@@ -335,7 +361,7 @@ PeerConnection::PeerConnection(const QStringList& stunServers, QString connectio
                     }
                     if (state == rtc::PeerConnection::IceState::Failed) {
                         emit self->errorOccurred(
-                            "ICE checks failed: direct P2P connection could not be established.");
+                            "ICE checks failed: no working direct or relay route.");
                     }
                 }
             },

@@ -87,6 +87,13 @@
                 "VCPKG_TARGET_TRIPLET": "x64-linux",
                 "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON"
             }
+        },
+        {
+            "name": "linux-server-release",
+            "inherits": "linux-server-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
         }
     ],
     "buildPresets": [
@@ -115,6 +122,10 @@
         {
             "name": "linux-server-debug",
             "configurePreset": "linux-server-debug"
+        },
+        {
+            "name": "linux-server-release",
+            "configurePreset": "linux-server-release"
         }
     ]
 }

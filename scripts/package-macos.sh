@@ -105,10 +105,12 @@ cleanup_smoke_data() {
 }
 trap cleanup_smoke_data EXIT
 
-run_with_timeout 30 env TMC_DATA_DIR="$smoke_data" \
+run_with_timeout 30 env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
+  -u QT_PLUGIN_PATH -u QML_IMPORT_PATH -u QML2_IMPORT_PATH TMC_DATA_DIR="$smoke_data" \
   "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --console --display-name "CI Smoke" \
   <<< "/quit"
-run_with_timeout 30 env TMC_DATA_DIR="$smoke_data" QT_QPA_PLATFORM=offscreen \
+run_with_timeout 30 env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
+  -u QT_PLUGIN_PATH -u QML_IMPORT_PATH -u QML2_IMPORT_PATH TMC_DATA_DIR="$smoke_data" QT_QPA_PLATFORM=offscreen \
   "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --qml-smoke --display-name "CI Smoke"
 cleanup_smoke_data
 trap - EXIT
@@ -120,8 +122,10 @@ while IFS= read -r candidate; do
       echo "Packaged Mach-O file is not arm64: $candidate ($architectures)" >&2
       exit 1
     fi
-    if otool -L "$candidate" | grep -Fq "$build/vcpkg_installed"; then
-      echo "Packaged file still references the vcpkg build tree: $candidate" >&2
+    # Only Apple system libraries and bundle-relative references are deployable.
+    if otool -L "$candidate" | tail -n +2 | awk '{print $1}' | \
+       grep '^/' | grep -Ev '^(/usr/lib/|/System/Library/)' >/dev/null; then
+      echo "Packaged file still references a library outside the bundle: $candidate" >&2
       exit 1
     fi
     if [[ "$updater_enabled" == "1" ]] &&

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/network/connection_state.h"
+#include "tmc/network/relay_server.h"
 
 #include <QByteArray>
 #include <QObject>
@@ -39,7 +40,8 @@ class PeerConnection final : public QObject {
     Q_OBJECT
 
 public:
-    PeerConnection(const QStringList& stunServers, QString connectionId,
+    PeerConnection(const QStringList& stunServers, const QList<RelayServer>& turnServers,
+                   QString connectionId,
                    std::weak_ptr<AudioTransportWorker> audioTransport, QObject* parent = nullptr);
     ~PeerConnection() override;
 

@@ -81,7 +81,9 @@ Result<void> NetworkSession::inviteAcquaintance(const QString& peerId) {
         return Result<void>::failure("Этот знакомый уже числится в текущем mesh.");
     pendingContactTarget_ = peerId;
     onlineInvitationTargets_.insert(peerId);
-    if (!serverMesh_) recoveryAfter_ = recoveryClock_.elapsed() + 3000;
+    if (!serverMesh_) {
+        recoveryAfter_ = recoveryClock_.elapsed() + (mesh_.peerCount() == 1 ? 0 : 3000);
+    }
     serverMesh_ = true;
     serverInvitationRequested_ = true;
     broadcastSignalingState();

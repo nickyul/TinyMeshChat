@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/signaling_protocol/envelope.h"
+#include "tmc/signaling_protocol/turn_credentials.h"
 #include "tmc/security/security.h"
 
 #include <QByteArray>
@@ -44,6 +45,7 @@ public:
     QString state() const;
     QUrl url() const;
     QString sessionId() const;
+    signaling_protocol::TurnCredentials turnCredentials() const;
 
 signals:
     void stateChanged();
@@ -54,6 +56,7 @@ signals:
     void requestFailed(QString requestId, QString requestType, QString code);
     void accessRequired(QString reason);
     void accessGranted(QString server, QJsonObject grant);
+    void turnCredentialsChanged();
 
 private:
     enum class State {
@@ -84,6 +87,8 @@ private:
     void maintainConnectionAttempt(qint64 now);
     void maintainReadyConnection(qint64 now);
     void maintainHeartbeat(qint64 now);
+    void maintainTurnCredentials(qint64 now);
+    void updateTurnCredentials(const QJsonObject& body);
     [[nodiscard]] bool hasTimedOutRequest(qint64 now) const;
 
     // Connection and lifecycle timers.
@@ -114,6 +119,12 @@ private:
     QJsonObject grants_;
     QString expectedAuthority_;
     QString accessToken_;
+
+    // Server-issued TURN access, kept only for this signaling connection.
+    signaling_protocol::TurnCredentials turn_;
+    qint64 turnExpiresAt_{0};
+    qint64 turnRefreshAt_{0};
+    QString turnRefreshRequestId_;
 };
 
 } // namespace tmc

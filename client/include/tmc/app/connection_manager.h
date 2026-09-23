@@ -5,8 +5,10 @@
 #include "tmc/network/connection_attempt_state.h"
 #include "tmc/network/connection_policy.h"
 #include "tmc/network/connection_state.h"
+#include "tmc/network/relay_server.h"
 
 #include <QHash>
+#include <QDeadlineTimer>
 #include <QList>
 #include <QObject>
 #include <QPair>
@@ -108,6 +110,7 @@ public:
     int connectedPeerCount() const;
 
     void setStunServers(QStringList stunServers);
+    void setTurnServers(QList<RelayServer> servers, int expiresInSeconds);
     int recordRoundTripTime(const QString& connectionId, int sampleMs);
     std::shared_ptr<AudioTransportWorker> audioTransport() const;
 
@@ -151,6 +154,8 @@ private:
     ConnectionInfo snapshot(const std::shared_ptr<Link>& link) const;
 
     QStringList stunServers_;
+    QList<RelayServer> turnServers_;
+    QDeadlineTimer turnExpiry_;
     ConnectionPolicy policy_;
     QHash<QString, std::shared_ptr<Link>> links_;
     QList<ConnectionInfo> recentAttempts_;

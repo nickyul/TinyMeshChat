@@ -1,4 +1,5 @@
 #include "tmc/signaling_protocol/message_codec.h"
+#include "tmc/signaling_protocol/turn_credentials.h"
 
 #include <QJsonArray>
 #include "tmc/security/security.h"
@@ -120,7 +121,7 @@ std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope
     } else if (type == "access.redeem") {
         valid = fields(body, {"publicKey", "token", "signature"}) && identity(body.value("publicKey")) &&
                 base64(body.value("token"), 32, 32) && base64(body.value("signature"), 64, 64);
-    } else if (type == "access.invite") {
+    } else if (type == "access.invite" || type == "turn.refresh") {
         valid = body.isEmpty();
     } else if (type == "presence.publish") {
         valid = fields(body, {"identityId", "displayName", "knownPeers", "busy"}) &&
@@ -179,12 +180,17 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
                 base64(body.value("nonce"), 32, 32) && identity(body.value("authority"));
     } else if (type == "access.granted") {
         const auto grant = body.value("grant").toObject();
-        valid = fields(body, {"grant"}) && security::verifyGrant(grant,
+        valid = fields(body, {"grant", "turn"}) && body.value("turn").isObject() &&
+                decodeTurnCredentials(body.value("turn").toObject()).has_value() &&
+                security::verifyGrant(grant,
             grant.value("authority").toString(), grant.value("subject").toString());
     } else if (type == "access.invited") {
         valid = fields(body, {"token", "authority", "expiresInSeconds"}) && base64(body.value("token"), 32, 32) &&
                 identity(body.value("authority")) && body.value("expiresInSeconds").toInt(-1) == InvitationLifetimeSeconds;
-    } else if (type == "auth.authenticated" || type == "presence.published" || type == "contact.responded") {
+    } else if (type == "auth.authenticated" || type == "turn.credentials") {
+        valid = fields(body, {"turn"}) && body.value("turn").isObject() &&
+                decodeTurnCredentials(body.value("turn").toObject()).has_value();
+    } else if (type == "presence.published" || type == "contact.responded") {
         valid = body.isEmpty();
     } else if (type == "presence.snapshot") {
         valid = fields(body, {"peers"}) && body.value("peers").isArray() &&
@@ -274,6 +280,7 @@ bool MessageCodec::isResponseFor(const QString& requestType, const QString& resp
         {"auth.authenticate", "auth.authenticated"},
         {"access.redeem", "access.granted"},
         {"access.invite", "access.invited"},
+        {"turn.refresh", "turn.credentials"},
         {"presence.publish", "presence.published"},
         {"contact.invite", "contact.invited"},
         {"contact.respond", "contact.responded"},

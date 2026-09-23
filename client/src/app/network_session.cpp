@@ -119,10 +119,10 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
     }
     router_.observeDirect(remote.peerId, connectionId);
     Logger::instance().log(QtInfoMsg, "network",
-                           "Direct DataChannel opened for " + connectionId.left(8));
+                           "DataChannel opened for " + connectionId.left(8));
 
     emit peerChanged(remote.peerId, remote.displayName, true);
-    emit statusChanged("Прямое соединение установлено.");
+    emit statusChanged("Соединение с участником установлено.");
     updateMesh();
 
     sendPeerList(connectionId);
@@ -837,7 +837,7 @@ int NetworkSession::knownPeerCount() const {
 
 QString NetworkSession::diagnostics() const {
     QStringList lines{"Состояние mesh: " + toString(mesh_.state()),
-                      QString("Прямых каналов: %1/%2")
+                      QString("Соединений с пирами: %1/%2")
                           .arg(connectedPeerCount())
                           .arg(qMax(0, knownPeerCount() - 1))};
     const auto connections = connections_->connections();
@@ -856,6 +856,13 @@ QString NetworkSession::diagnostics() const {
                               toString(connection.attemptState))
                          .arg(elapsed)
                          .arg(connection.connectionId.left(8)));
+        const auto route = connection.selectedCandidatePair.isEmpty()
+            ? QStringLiteral("определяется")
+            : connection.selectedCandidatePair.contains("relay")
+                ? QStringLiteral("через TURN")
+                : connection.selectedCandidatePair.contains("unknown")
+                    ? QStringLiteral("неизвестен") : QStringLiteral("напрямую");
+        lines.append(QString("    Маршрут: %1").arg(route));
         lines.append(QString("    candidates: host=%1 srflx=%2 relay=%3 · selected: %4")
                          .arg(connection.hostCandidates)
                          .arg(connection.serverReflexiveCandidates)

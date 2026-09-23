@@ -1,4 +1,4 @@
-name: "Desktop builds"
+name: "Builds"
 
 on:
   workflow_dispatch:
@@ -19,6 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-linux-server:
+    uses: ./.github/workflows/server-build.yml
+    with:
+      artifact-name: TinyMeshSignalingServer-Linux-x64
+
   build-macos:
     runs-on: macos-26
     timeout-minutes: 180
@@ -38,16 +43,15 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
-          brew install nasm autoconf autoconf-archive automake libtool
+          brew install nasm autoconf autoconf-archive automake libtool pkgconf gettext bison flex gperf
 
       - name: Cache vcpkg binaries
         id: cache_vcpkg_binaries_macos
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/ports/**', 'cmake/triplets/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -98,7 +102,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/ports/**', 'cmake/triplets/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -120,7 +124,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
           cmake --preset windows-debug
+          if ($LASTEXITCODE -ne 0) { throw 'Debug configure failed' }
           cmake --build --preset windows-debug
+          if ($LASTEXITCODE -ne 0) { throw 'Debug build failed' }
           .\scripts\package-windows.ps1
 
       - name: Upload Windows portable app

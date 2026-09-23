@@ -3,6 +3,9 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
 )
 
 find_package(LibDataChannel CONFIG REQUIRED)
+if(NOT TMC_LIBDATACHANNEL_USES_LIBNICE)
+    message(FATAL_ERROR "TinyMesh TURN requires the libdatachannel overlay with USE_NICE; configure with the repository vcpkg-configuration.json")
+endif()
 find_package(Opus CONFIG REQUIRED)
 find_package(unofficial-webrtc CONFIG REQUIRED)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
@@ -86,6 +89,7 @@ target_sources(tmc_transport
             include/tmc/network/connection_state.h
             include/tmc/network/audio_transport_worker.h
             include/tmc/network/peer_connection.h
+            include/tmc/network/relay_server.h
             include/tmc/network/sdp_description_codec.h
 )
 target_link_libraries(tmc_transport
@@ -196,6 +200,17 @@ target_link_libraries(tmc_application
 )
 
 add_executable(TinyMeshChat)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Isolate vcpkg's static GLib from the system GLib loaded by Qt plugins.
+    # Other archives retain their normal visibility; shared GLib is unaffected.
+    include(CheckLinkerFlag)
+    set(tmc_glib_visibility "LINKER:--exclude-libs,libglib-2.0.a:libgobject-2.0.a:libgio-2.0.a:libgmodule-2.0.a:libgthread-2.0.a")
+    check_linker_flag(CXX "${tmc_glib_visibility}" TMC_LINKER_CAN_HIDE_GLIB)
+    if(NOT TMC_LINKER_CAN_HIDE_GLIB)
+        message(FATAL_ERROR "The Linux linker must support --exclude-libs to isolate static GLib from Qt plugins")
+    endif()
+    target_link_options(TinyMeshChat PRIVATE "${tmc_glib_visibility}")
+endif()
 # Keep the executable and macOS bundle at the paths used by packaging scripts.
 set_target_properties(TinyMeshChat PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"

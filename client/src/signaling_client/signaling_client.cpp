@@ -16,6 +16,7 @@ constexpr int MaintenanceIntervalMs = 1000;
 constexpr qint64 ConnectionAttemptTimeoutMs = 15000;
 constexpr qint64 RequestTimeoutMs = 15000;
 constexpr qint64 HeartbeatIntervalMs = 30000;
+constexpr qint64 TurnRefreshRetryMs = 5000;
 constexpr qint64 StableConnectionPeriodMs = 30000;
 constexpr int InitialReconnectDelayMs = 1000;
 constexpr int MaxReconnectDelayMs = 30000;
@@ -70,11 +71,58 @@ void SignalingClient::maintainReadyConnection(qint64 now) {
     if (now - readyAt_ >= StableConnectionPeriodMs) {
         retryAttempt_ = 0;
     }
+    // TURN refresh is read-only and can be retried without resetting the room.
+    for (auto it = pending_.begin(); it != pending_.end();) {
+        if (it->type == "turn.refresh" && now - it->sentAt >= RequestTimeoutMs) {
+            if (it.key() == turnRefreshRequestId_) {
+                turnRefreshRequestId_.clear();
+                turnRefreshAt_ = now + TurnRefreshRetryMs;
+            }
+            it = pending_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     if (hasTimedOutRequest(now)) {
         fail();
         return;
     }
-    maintainHeartbeat(now);
+    maintainTurnCredentials(now);
+    if (state_ == State::Ready) {
+        maintainHeartbeat(now);
+    }
+}
+
+TurnCredentials SignalingClient::turnCredentials() const {
+    return ready() && clock_.elapsed() < turnExpiresAt_ ? turn_ : TurnCredentials{};
+}
+
+void SignalingClient::updateTurnCredentials(const QJsonObject& body) {
+    // MessageCodec has already validated the object.
+    turn_ = *decodeTurnCredentials(body.value("turn").toObject());
+    const auto now = clock_.elapsed();
+    turnExpiresAt_ = now + qint64{turn_.expiresInSeconds} * 1000;
+    turnRefreshAt_ = turn_.urls.isEmpty() ? 0 : now + qint64{turn_.expiresInSeconds} * 500;
+    turnRefreshRequestId_.clear();
+    emit turnCredentialsChanged();
+}
+
+void SignalingClient::maintainTurnCredentials(qint64 now) {
+    if (!turn_.urls.isEmpty() && now >= turnExpiresAt_) {
+        turn_ = {};
+        emit turnCredentialsChanged();
+        if (!ready()) {
+            return;
+        }
+    }
+    if (turnRefreshAt_ == 0 || now < turnRefreshAt_ || !turnRefreshRequestId_.isEmpty()) {
+        return;
+    }
+    turnRefreshAt_ = now + TurnRefreshRetryMs;
+    const auto result = request("turn.refresh");
+    if (const auto* id = std::get_if<QString>(&result)) {
+        turnRefreshRequestId_ = *id;
+    }
 }
 
 bool SignalingClient::hasTimedOutRequest(qint64 now) const {
@@ -111,6 +159,9 @@ bool SignalingClient::validServerUrl(const QUrl& url) {
 void SignalingClient::resetSocket() {
     maintenanceTimer_.stop();
     pending_.clear();
+    turn_ = {};
+    turnExpiresAt_ = turnRefreshAt_ = 0;
+    turnRefreshRequestId_.clear();
     pendingPing_.clear();
     sessionId_.clear();
     if (socket_) {
@@ -267,7 +318,8 @@ SignalingClient::RequestResult SignalingClient::request(const QString& type, con
     if (pending_.size() >= MaxPendingRequests) {
         return RequestError::TooManyPendingRequests;
     }
-    const auto id = QString::number(++nextRequest_);
+    const auto id = (type == "turn.refresh" ? QStringLiteral("turn-") : QString{}) +
+                    QString::number(++nextRequest_);
     const Envelope envelope{signaling_protocol::ProtocolVersion, type, id, body};
     if (MessageCodec::validateRequest(envelope)) {
         return RequestError::InvalidMessage;
@@ -385,6 +437,14 @@ void SignalingClient::handleChallenge(const Envelope& message) {
 void SignalingClient::handleResponse(const Envelope& message) {
     const auto found = pending_.find(*message.requestId);
     if (found == pending_.end()) {
+        // Recognize retired refresh replies without retaining an unbounded list
+        // of timed-out request IDs. Never apply stale credentials to a new request.
+        if (message.requestId->startsWith("turn-") &&
+            (message.type == "turn.credentials" || message.type == "error")) {
+            bool valid = false;
+            const auto sequence = message.requestId->sliced(5).toULongLong(&valid);
+            if (valid && sequence > 0 && sequence <= nextRequest_) return;
+        }
         fail();
         return;
     }
@@ -393,6 +453,11 @@ void SignalingClient::handleResponse(const Envelope& message) {
     pending_.erase(found);
 
     if (message.type == "error") {
+        if (type == "turn.refresh") {
+            turnRefreshRequestId_.clear();
+            turnRefreshAt_ = clock_.elapsed() + TurnRefreshRetryMs;
+            return;
+        }
         if (type == "auth.authenticate" || type == "access.redeem") {
             if (message.body.value("code").toString() == "identity_in_use") {
                 requireAccess("Этот профиль уже подключён к серверу. Отключите другую сессию "
@@ -412,6 +477,10 @@ void SignalingClient::handleResponse(const Envelope& message) {
         return;
     }
 
+    if (type == "turn.refresh") {
+        updateTurnCredentials(message.body);
+        return;
+    }
     if (type == "auth.authenticate" || type == "access.redeem") {
         handleAuthenticationResponse(type, message);
         return;
@@ -435,6 +504,10 @@ void SignalingClient::handleAuthenticationResponse(const QString& requestType,
     expectedAuthority_.clear();
     state_ = State::Ready;
     readyAt_ = clock_.elapsed();
+    updateTurnCredentials(message.body);
+    if (state_ != State::Ready) {
+        return;
+    }
     if (requestType == "access.redeem") {
         emit accessGranted(url_.toString(QUrl::FullyEncoded), grant);
     }

@@ -10,10 +10,15 @@ RUN apt-get update \
         autoconf-archive \
         automake \
         build-essential \
+        bison \
         ca-certificates \
         cmake \
+        coturn \
         curl \
+        flex \
         gdb \
+        gettext \
+        gperf \
         git \
         libdbus-1-3 \
         libfontconfig1 \
@@ -29,6 +34,7 @@ RUN apt-get update \
         libxkbcommon-x11-0 \
         nasm \
         ninja-build \
+        openssl \
         pkg-config \
         python3 \
         python3-venv \

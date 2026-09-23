@@ -49,11 +49,12 @@ QString failureCode(CodecErrorCode code) {
 } // namespace
 
 SignalingServer::SignalingServer(std::shared_ptr<security::SigningKey> authority,
+                                 TurnSettings turn,
                                  const std::optional<QSslConfiguration>& tls, QObject* parent)
     : QObject(parent),
       server_(QStringLiteral("TinyMesh Signaling Server"),
               tls ? QWebSocketServer::SecureMode : QWebSocketServer::NonSecureMode),
-      authority_(std::move(authority)) {
+      turn_(std::move(turn)), authority_(std::move(authority)) {
     if (tls) {
         server_.setSslConfiguration(*tls);
     }
@@ -202,6 +203,12 @@ void SignalingServer::receive(QWebSocket* socket, const QString& text) {
         closeClient(socket, QWebSocketProtocol::CloseCodePolicyViolated, "Authentication required");
         return;
     }
+    if (request.type == "turn.refresh") {
+        send(socket, {signaling_protocol::ProtocolVersion, "turn.credentials", request.requestId,
+                      {{"turn", signaling_protocol::encodeTurnCredentials(
+                                    turn_.issue(session->identityId))}}});
+        return;
+    }
     if (request.type == "presence.publish" &&
         request.body.value("identityId").toString() != session->identityId) {
         send(socket, MessageCodec::error(request.requestId, "identity_mismatch"));
@@ -309,14 +316,15 @@ bool SignalingServer::handleAccess(QWebSocket* socket, const Envelope& request) 
     }
 
     session->identityId = identityId;
+    const auto turn = signaling_protocol::encodeTurnCredentials(turn_.issue(identityId));
     if (type == "access.redeem") {
         accessInvitations_.remove(token);
         const auto grant = security::issueGrant(*authority_, publicKey);
         send(socket, {signaling_protocol::ProtocolVersion, "access.granted", request.requestId,
-                      {{"grant", grant}}});
+                      {{"grant", grant}, {"turn", turn}}});
     } else {
         send(socket, {signaling_protocol::ProtocolVersion, "auth.authenticated", request.requestId,
-                      {}});
+                      {{"turn", turn}}});
     }
     return true;
 }

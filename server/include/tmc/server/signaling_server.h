@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/server/room_registry.h"
+#include "tmc/server/turn_service.h"
 #include "tmc/server/presence_registry.h"
 #include "tmc/security/security.h"
 
@@ -26,6 +27,7 @@ namespace tmc::server {
 class SignalingServer final : public QObject {
 public:
     explicit SignalingServer(std::shared_ptr<security::SigningKey> authority,
+                             TurnSettings turn = {},
                              const std::optional<QSslConfiguration>& tls = std::nullopt,
                              QObject* parent = nullptr);
     ~SignalingServer() override;
@@ -64,6 +66,7 @@ private:
     QHash<QWebSocket*, Session> clients_;
     QQueue<QVector<Delivery>> pendingDeliveries_;
     bool delivering_{false};
+    TurnService turn_;
     RoomRegistry rooms_;
     PresenceRegistry presence_;
     QElapsedTimer clock_;

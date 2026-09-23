@@ -16,8 +16,8 @@ ConsoleController::ConsoleController(ApplicationController& a, QObject* p) : QOb
 int ConsoleController::run() {
     QTextStream in(stdin), out(stdout);
     out << "TinyMesh Chat console. /help for commands\n";
-    peer_ = std::make_shared<PeerConnection>(app_.config().stunServers, "console",
-                                             std::weak_ptr<AudioTransportWorker>{});
+    peer_ = std::make_shared<PeerConnection>(app_.config().stunServers, QList<RelayServer>{},
+                                             "console", std::weak_ptr<AudioTransportWorker>{});
     connect(peer_.get(), &PeerConnection::stateChanged, this, [&out](auto s) {
         out << "state: " << toString(s) << "\n" << Qt::flush;
     });
@@ -25,7 +25,7 @@ int ConsoleController::run() {
         out << "Control DataChannel open\n" << Qt::flush;
     });
     connect(peer_.get(), &PeerConnection::chatChannelOpened, this, [&out] {
-        out << "Chat DataChannel open; direct P2P connected; relay not used\n" << Qt::flush;
+        out << "Chat DataChannel open\n" << Qt::flush;
     });
     connect(peer_.get(), &PeerConnection::controlTextReceived, this, [&out](const QString& s) {
         out << "received: " << s << "\n" << Qt::flush;

@@ -2,6 +2,8 @@ add_executable(TinyMeshSignalingServer)
 target_sources(TinyMeshSignalingServer
     PRIVATE
         src/main.cpp
+        src/turn_service.cpp
+        include/tmc/server/turn_service.h
         src/signaling_server.cpp
         include/tmc/server/signaling_server.h
         include/tmc/server/limits.h
