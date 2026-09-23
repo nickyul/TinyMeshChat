@@ -59,7 +59,7 @@ $deployArguments = @(
     '--no-translations'
     '--compiler-runtime'
     '--qmldir'
-    (Join-Path $root 'qml')
+    (Join-Path $root 'client/qml')
     $exeDestination
 )
 & $deployPath @deployArguments
@@ -204,7 +204,7 @@ if ($buildVelopack) {
         --packTitle 'TinyMesh Chat' `
         --packVersion $version `
         --packDir $dist `
-        --icon (Join-Path $root 'resources/icons/tinymesh.ico') `
+        --icon (Join-Path $root 'client/resources/icons/tinymesh.ico') `
         --mainExe TinyMeshChat.exe `
         --runtime win-x64 `
         --channel win-x64 `

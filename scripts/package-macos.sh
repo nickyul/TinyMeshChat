@@ -57,7 +57,7 @@ deploy_args=(-always-overwrite -verbose=1)
 while IFS= read -r libdir; do
   deploy_args+=("-libpath=$libdir")
 done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*' 2>/dev/null)
-"$QT_ROOT/bin/macdeployqt" "$dist/TinyMeshChat.app" "-qmldir=$root/qml" "${deploy_args[@]}"
+"$QT_ROOT/bin/macdeployqt" "$dist/TinyMeshChat.app" "-qmldir=$root/client/qml" "${deploy_args[@]}"
 
 if [[ "$updater_enabled" == "1" ]]; then
   velopack_name="velopack_libc_osx.dylib"
@@ -150,7 +150,7 @@ if [[ "$build_velopack" == "1" ]]; then
     --packTitle "TinyMesh Chat" \
     --packVersion "$version" \
     --packDir "$dist/TinyMeshChat.app" \
-    --icon "$root/resources/icons/tinymesh.icns" \
+    --icon "$root/client/resources/icons/tinymesh.icns" \
     --mainExe TinyMeshChat \
     --runtime osx-arm64 \
     --channel osx-arm64 \

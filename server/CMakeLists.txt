@@ -11,6 +11,7 @@ target_sources(TinyMeshSignalingServer
         src/presence_registry.h
 )
 target_link_libraries(TinyMeshSignalingServer PRIVATE
+    tmc_security
     tmc_signaling_protocol
     Qt6::Core
     Qt6::Network

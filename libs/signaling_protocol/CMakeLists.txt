@@ -14,4 +14,7 @@ target_sources(tmc_signaling_protocol
             include/tmc/signaling_protocol/room_creation_codec.h
             include/tmc/signaling_protocol/message_codec.h
 )
-target_link_libraries(tmc_signaling_protocol PUBLIC tmc_security Qt6::Core)
+target_link_libraries(tmc_signaling_protocol
+    PUBLIC Qt6::Core
+    PRIVATE tmc_security
+)
