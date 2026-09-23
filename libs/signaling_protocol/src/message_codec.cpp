@@ -1,5 +1,4 @@
 #include "tmc/signaling_protocol/message_codec.h"
-#include "tmc/signaling_protocol/room_creation_codec.h"
 
 #include <QJsonArray>
 #include "tmc/security/security.h"
@@ -10,6 +9,9 @@
 
 namespace tmc::signaling_protocol {
 namespace {
+
+// A joining peer receives at most five existing peers in the current wire format.
+constexpr qsizetype MaxRoomPeers = 5;
 
 CodecError invalidBody() {
     return {CodecErrorCode::InvalidBody, QStringLiteral("Missing or invalid message body field")};
@@ -102,7 +104,7 @@ bool errorBody(const QJsonObject& body) {
 } // namespace
 
 std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope) {
-    if (const auto failure = EnvelopeCodec::validate(envelope)) {
+    if (const auto failure = EnvelopeCodec::validateHeader(envelope)) {
         return failure;
     }
     if (!envelope.requestId) {
@@ -134,11 +136,11 @@ std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope
         valid = fields(body, {"invitationId", "decision"}) && uuid(body.value("invitationId")) &&
                 (decision == "accept" || decision == "decline" || decision == "busy");
     } else if (type == "room.create") {
-        const auto decoded = RoomCreationCodec::decodeRequest(envelope);
-        if (const auto* failure = std::get_if<CodecError>(&decoded)) {
-            return *failure;
+        if (!body.isEmpty()) {
+            return CodecError{CodecErrorCode::UnknownField,
+                              QStringLiteral("Room creation request body must be empty")};
         }
-        return std::nullopt;
+        valid = true;
     } else if (type == "invite.create" || type == "room.leave") {
         valid = fields(body, {"roomId"}) && uuid(body.value("roomId"));
     } else if (type == "room.join") {
@@ -155,7 +157,7 @@ std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope
 }
 
 std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& envelope) {
-    if (const auto failure = EnvelopeCodec::validate(envelope)) {
+    if (const auto failure = EnvelopeCodec::validateHeader(envelope)) {
         return failure;
     }
     const auto& type = envelope.type;
@@ -163,7 +165,7 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
     if (type == "error") {
         return errorBody(body) ? std::nullopt : std::optional<CodecError>{invalidBody()};
     }
-    const bool event = type == "auth.challenge" || type == "session.ready" || type == "peer.joined" ||
+    const bool event = type == "auth.challenge" || type == "peer.joined" ||
                        type == "peer.left" || type == "signal.received" ||
                        type == "presence.snapshot" || type == "contact.invitation" ||
                        type == "contact.accepted" || type == "contact.result" || type == "contact.closed";
@@ -211,14 +213,18 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
                 uuid(body.value("invitationId")) && identity(body.value("toIdentityId")) && outcome(body.value("status"));
     } else if (type == "contact.closed") {
         valid = fields(body, {"invitationId", "status"}) && uuid(body.value("invitationId")) && outcome(body.value("status"));
-    } else if (type == "session.ready") {
-        valid = fields(body, {"sessionId"}) && uuid(body.value("sessionId"));
     } else if (type == "room.created") {
-        const auto decoded = RoomCreationCodec::decodeResponse(envelope);
-        if (const auto* failure = std::get_if<CodecError>(&decoded)) {
-            return *failure;
+        for (auto it = body.constBegin(); it != body.constEnd(); ++it) {
+            if (it.key() != "roomId" && it.key() != "peerId") {
+                return CodecError{CodecErrorCode::UnknownField,
+                                  QStringLiteral("Unknown room creation response field")};
+            }
         }
-        return std::nullopt;
+        if (!uuid(body.value("roomId")) || !uuid(body.value("peerId"))) {
+            return CodecError{CodecErrorCode::InvalidBody,
+                              QStringLiteral("Room and peer identifiers must be canonical non-null UUIDs")};
+        }
+        valid = true;
     } else if (type == "invite.created") {
         valid = fields(body, {"roomId", "token", "expiresInSeconds"}) &&
                 uuid(body.value("roomId")) && base64(body.value("token"), 32, 32) &&
@@ -237,7 +243,7 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
             }
             seen.insert(peer.toString());
         }
-        valid = valid && peers.size() < RoomCapacity;
+        valid = valid && peers.size() <= MaxRoomPeers;
     } else if (type == "room.left") {
         valid = fields(body, {"roomId"}) && uuid(body.value("roomId"));
     } else if (type == "signal.accepted") {
@@ -260,9 +266,35 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
     return valid ? std::nullopt : std::optional<CodecError>{invalidBody()};
 }
 
+bool MessageCodec::isResponseFor(const QString& requestType, const QString& responseType) {
+    static constexpr struct {
+        const char* request;
+        const char* response;
+    } pairs[] = {
+        {"auth.authenticate", "auth.authenticated"},
+        {"access.redeem", "access.granted"},
+        {"access.invite", "access.invited"},
+        {"presence.publish", "presence.published"},
+        {"contact.invite", "contact.invited"},
+        {"contact.respond", "contact.responded"},
+        {"room.create", "room.created"},
+        {"invite.create", "invite.created"},
+        {"room.join", "room.joined"},
+        {"room.leave", "room.left"},
+        {"signal.send", "signal.accepted"},
+    };
+
+    for (const auto& pair : pairs) {
+        if (requestType == QLatin1String(pair.request)) {
+            return responseType == QLatin1String(pair.response);
+        }
+    }
+    return false;
+}
+
 Envelope MessageCodec::error(const std::optional<QString>& requestId, const QString& code) {
     // Codes carry machine-readable detail; the description never includes untrusted input.
-    return {1, QStringLiteral("error"), requestId,
+    return {ProtocolVersion, QStringLiteral("error"), requestId,
             {{QStringLiteral("code"), code},
              {QStringLiteral("message"), QStringLiteral("Signaling request rejected")}}};
 }

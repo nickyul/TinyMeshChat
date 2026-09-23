@@ -1,14 +1,65 @@
-#include "signaling_server.h"
+#include "tmc/server/signaling_server.h"
+
+#include "tmc/security/security.h"
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QHostAddress>
+#include <QFile>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslKey>
+#include <QSslSocket>
 #include <QTimer>
 #include <QJsonDocument>
 #include <QTextStream>
-#include "tmc/security/security.h"
+
+#include <optional>
+
+namespace {
+
+std::optional<QSslConfiguration> loadTlsConfiguration(const QString& certificatePath,
+                                                     const QString& keyPath) {
+    if (!QSslSocket::supportsSsl()) {
+        qCritical("TLS is unavailable in this Qt installation");
+        return std::nullopt;
+    }
+
+    QFile certificateFile(certificatePath);
+    if (!certificateFile.open(QIODevice::ReadOnly)) {
+        qCritical().noquote() << "Cannot read TLS certificate:" << certificateFile.errorString();
+        return std::nullopt;
+    }
+    const auto certificates = QSslCertificate::fromDevice(&certificateFile, QSsl::Pem);
+    if (certificates.isEmpty() || certificates.first().publicKey().isNull()) {
+        qCritical("Invalid TLS certificate; expected a PEM certificate chain, server certificate first");
+        return std::nullopt;
+    }
+
+    QFile keyFile(keyPath);
+    if (!keyFile.open(QIODevice::ReadOnly)) {
+        qCritical().noquote() << "Cannot read TLS private key:" << keyFile.errorString();
+        return std::nullopt;
+    }
+    const QSslKey key(&keyFile, certificates.first().publicKey().algorithm(),
+                     QSsl::Pem, QSsl::PrivateKey);
+    if (key.isNull()) {
+        qCritical("Invalid TLS private key; expected an unencrypted PEM key for the certificate");
+        return std::nullopt;
+    }
+
+    auto configuration = QSslConfiguration::defaultConfiguration();
+    configuration.setLocalCertificateChain(certificates);
+    configuration.setPrivateKey(key);
+    configuration.setProtocol(QSsl::TlsV1_2OrLater);
+    // Clients authenticate with TinyMesh grants, not TLS client certificates.
+    configuration.setPeerVerifyMode(QSslSocket::VerifyNone);
+    return configuration;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
@@ -37,6 +88,8 @@ int main(int argc, char** argv) {
     parser.addOption(addressOption);
     parser.addOption(portOption);
     parser.addOption(startupSmokeOption);
+    parser.addOption({"tls-cert", "Enable wss with this PEM certificate chain (server first).", "path"});
+    parser.addOption({"tls-key", "Unencrypted PEM private key for --tls-cert.", "path"});
     parser.addOption({"authority-key", "Authority private key file (required to serve).", "path"});
     parser.addOption({"init-authority", "Create a new authority key file and exit.", "path"});
     parser.addOption({"grant-access", "Issue a permanent grant to this public key and exit.", "public-key"});
@@ -64,8 +117,20 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (!address.isLoopback()) {
-        qCritical("Bind to loopback; expose remote access only through a TLS reverse proxy");
+    if (parser.isSet("tls-cert") != parser.isSet("tls-key")) {
+        qCritical("--tls-cert and --tls-key must be provided together");
+        return 2;
+    }
+    std::optional<QSslConfiguration> tls;
+    if (parser.isSet("tls-cert")) {
+        tls = loadTlsConfiguration(parser.value("tls-cert"), parser.value("tls-key"));
+        if (!tls) {
+            return 2;
+        }
+    }
+    if (!tls && !address.isLoopback()) {
+        qCritical("Without TLS, bind to loopback behind a TLS proxy; for direct wss use "
+                  "--tls-cert and --tls-key");
         return 2;
     }
     bool portValid = false;
@@ -76,7 +141,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    tmc::server::SignalingServer server(authority);
+    tmc::server::SignalingServer server(authority, tls);
     if (!server.listen(address, parsedPort)) {
         qCritical().noquote()
             << QStringLiteral("Failed to listen on %1:%2: %3")
@@ -87,9 +152,9 @@ int main(int argc, char** argv) {
     }
 
     qInfo().noquote()
-        << QStringLiteral("TinyMesh signaling server listening on %1:%2")
-               .arg(server.serverAddress().toString())
-               .arg(server.serverPort());
+        << QStringLiteral("TinyMesh signaling server listening on %1 (%2)")
+               .arg(server.serverAddress().toString() + ":" + QString::number(server.serverPort()))
+               .arg(tls ? "wss" : "ws");
 
     QObject::connect(&application, &QCoreApplication::aboutToQuit,
                      &server, &tmc::server::SignalingServer::close);

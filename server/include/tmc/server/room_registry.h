@@ -6,6 +6,8 @@
 #include <QString>
 #include <QVector>
 
+#include <variant>
+
 namespace tmc::server {
 
 struct Delivery {
@@ -17,6 +19,15 @@ struct Delivery {
 // All calls run on the server event-loop thread. Time is monotonic milliseconds.
 class RoomRegistry {
 public:
+    struct CreatedInvitation {
+        QString token;
+        int expiresInSeconds;
+    };
+    enum class InvitationError { NotInRoom, RoomMismatch, ResourceLimit, TokenGenerationFailed };
+    using InvitationResult = std::variant<CreatedInvitation, InvitationError>;
+
+    [[nodiscard]] InvitationResult createInvitation(const QString& sessionId, const QString& roomId,
+                                                    qint64 now);
     [[nodiscard]] QVector<Delivery> handle(const QString& sessionId,
                                            const signaling_protocol::Envelope& request,
                                            qint64 now);

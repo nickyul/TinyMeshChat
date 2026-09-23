@@ -1,6 +1,6 @@
 #pragma once
 
-#include "room_registry.h"
+#include "tmc/server/room_registry.h"
 #include <QJsonArray>
 #include <QSet>
 
@@ -12,7 +12,7 @@ class PresenceRegistry {
 public:
     QVector<Delivery> handle(const QString& sessionId, const signaling_protocol::Envelope& request,
                              RoomRegistry& rooms, qint64 now);
-    QVector<Delivery> maintain(const RoomRegistry& rooms, qint64 now);
+    QVector<Delivery> maintainInvitations(const RoomRegistry& rooms, qint64 now);
     QVector<Delivery> disconnect(const QString& sessionId, const RoomRegistry& rooms, qint64 now);
     void clear();
 
@@ -30,6 +30,7 @@ private:
         QString id, fromSession, toSession, toIdentity, roomId, meshId;
         qint64 expiresAt{0};
     };
+    QVector<Delivery> updateSnapshots();
     bool mutual(const QString& first, const QString& second) const;
     QVector<Delivery> finish(const Invitation& invitation, const QString& status) const;
     QHash<QString, Profile> profiles_;

@@ -8,7 +8,7 @@ namespace tmc {
 using namespace signaling_protocol;
 
 QString encodeServerInvitation(const ServerInvitation& invitation) {
-    const Envelope envelope{1, QStringLiteral("mesh.invitation"), std::nullopt,
+    const Envelope envelope{signaling_protocol::ProtocolVersion, QStringLiteral("mesh.invitation"), std::nullopt,
         {{"server", invitation.server.toString(QUrl::FullyEncoded)},
          {"roomId", invitation.roomId}, {"meshId", invitation.meshId}, {"token", invitation.token}}};
     const auto encoded = EnvelopeCodec::encode(envelope);
@@ -50,7 +50,7 @@ std::optional<ServerInvitation> decodeServerInvitation(const QString& link) {
     const auto mesh = QUuid::fromString(result.meshId);
     if (!SignalingClient::validServerUrl(result.server) || mesh.isNull() ||
         mesh.toString(QUuid::WithoutBraces) != result.meshId ||
-        MessageCodec::validateRequest({1, QStringLiteral("room.join"), QStringLiteral("check"),
+        MessageCodec::validateRequest({signaling_protocol::ProtocolVersion, QStringLiteral("room.join"), QStringLiteral("check"),
                                       {{"roomId", result.roomId}, {"token", result.token}}})) {
         return std::nullopt;
     }

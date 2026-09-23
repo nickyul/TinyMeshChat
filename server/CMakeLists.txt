@@ -3,13 +3,14 @@ target_sources(TinyMeshSignalingServer
     PRIVATE
         src/main.cpp
         src/signaling_server.cpp
-        src/signaling_server_access.cpp
-        src/signaling_server.h
+        include/tmc/server/signaling_server.h
+        include/tmc/server/limits.h
         src/room_registry.cpp
-        src/room_registry.h
+        include/tmc/server/room_registry.h
         src/presence_registry.cpp
-        src/presence_registry.h
+        include/tmc/server/presence_registry.h
 )
+target_include_directories(TinyMeshSignalingServer PRIVATE include)
 target_link_libraries(TinyMeshSignalingServer PRIVATE
     tmc_security
     tmc_signaling_protocol

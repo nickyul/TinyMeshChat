@@ -153,8 +153,8 @@ void NetworkSession::configureSignalingServer(const QString& url) {
     }
     if (url.isEmpty()) {
         signaling_->stop();
-    } else {
-        signaling_->connectTo(QUrl(url, QUrl::StrictMode));
+    } else if (!signaling_->connectTo(QUrl(url, QUrl::StrictMode))) {
+        emit errorOccurred("Некорректный адрес сервера.");
     }
 }
 
@@ -213,8 +213,9 @@ void NetworkSession::submitServerJoin() {
     }
     serverOperation_ = QStringLiteral("joining");
     const auto& invitation = *pendingServerJoin_;
-    if (signaling_->request(QStringLiteral("room.join"),
-                           {{"roomId", invitation.roomId}, {"token", invitation.token}}).isEmpty()) {
+    const auto result = signaling_->request(QStringLiteral("room.join"),
+                                           {{"roomId", invitation.roomId}, {"token", invitation.token}});
+    if (std::holds_alternative<SignalingClient::RequestError>(result)) {
         leaveMesh();
         emit errorOccurred("Не удалось отправить запрос вступления.");
     }
@@ -348,7 +349,7 @@ void NetworkSession::emitServerSignaling(const QString& connectionId, const QStr
         emit errorOccurred("Сигналинг для нового соединения недоступен.");
         return;
     }
-    const Envelope envelope{1, isOffer(info->kind) ? QStringLiteral("webrtc.offer")
+    const Envelope envelope{signaling_protocol::ProtocolVersion, isOffer(info->kind) ? QStringLiteral("webrtc.offer")
                                                  : QStringLiteral("webrtc.answer"), std::nullopt,
         {{"meshId", mesh_.meshId()}, {"connectionId", connectionId},
          {"identityId", app_.identity().peerId}, {"displayName", app_.identity().displayName},
@@ -362,13 +363,13 @@ void NetworkSession::emitServerSignaling(const QString& connectionId, const QStr
     }
     const auto payload = QString::fromLatin1(bytes->toBase64(
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
-    const auto requestId = signaling_->request(QStringLiteral("signal.send"),
+    const auto result = signaling_->request(QStringLiteral("signal.send"),
             {{"roomId", serverRoomId_}, {"toPeerId", target}, {"payload", payload}});
-    if (requestId.isEmpty()) {
+    if (const auto* requestId = std::get_if<QString>(&result)) {
+        serverSignalRequests_.insert(*requestId, connectionId);
+    } else {
         connections_->discard(connectionId);
         emit errorOccurred("Не удалось отправить описание соединения.");
-    } else {
-        serverSignalRequests_.insert(requestId, connectionId);
     }
 }
 
@@ -461,7 +462,8 @@ void NetworkSession::leaveServerRoom() {
     resetRoomRecovery();
     if (canLeave) {
         serverOperation_ = QStringLiteral("leave");
-        if (signaling_->request(QStringLiteral("room.leave"), {{"roomId", room}}).isEmpty()) {
+        const auto result = signaling_->request(QStringLiteral("room.leave"), {{"roomId", room}});
+        if (std::holds_alternative<SignalingClient::RequestError>(result)) {
             signaling_->stop();
             serverOperation_.clear();
         }
@@ -480,7 +482,10 @@ void NetworkSession::leaveServerRoom() {
 namespace tmc {
 Result<void> NetworkSession::createAccessInvitation() {
     if (!signalingConnected()) return Result<void>::failure("Сначала получите доступ и подключитесь к серверу.");
-    if (signaling_->request("access.invite").isEmpty()) return Result<void>::failure("Не удалось запросить приглашение доступа.");
+    const auto result = signaling_->request("access.invite");
+    if (std::holds_alternative<SignalingClient::RequestError>(result)) {
+        return Result<void>::failure("Не удалось запросить приглашение доступа.");
+    }
     return Result<void>::success();
 }
 Result<void> NetworkSession::importServerAccess(const QString& text) {

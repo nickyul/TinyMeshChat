@@ -11,23 +11,35 @@
 #include <QUrl>
 
 #include <memory>
+#include <variant>
 
 class QWebSocket;
 
 namespace tmc {
 
-// WebSocket transport and request correlation. No mesh or WebRTC ownership.
+// Server connection, authentication, request correlation and reconnects.
+// No mesh or WebRTC ownership.
 class SignalingClient final : public QObject {
     Q_OBJECT
 public:
+    enum class RequestError {
+        NotReady,
+        TooManyPendingRequests,
+        InvalidMessage,
+        MessageTooLarge,
+        OutgoingQueueFull,
+        SendFailed,
+    };
+    using RequestResult = std::variant<QString, RequestError>;
+
     explicit SignalingClient(QObject* parent = nullptr);
     ~SignalingClient() override;
     static bool validServerUrl(const QUrl& url);
-    void connectTo(const QUrl& url);
+    bool connectTo(const QUrl& url);
     void configureAccess(std::shared_ptr<security::SigningKey> key, QJsonObject grants);
     void redeemAccess(const QUrl& url, const QString& authority, const QString& token);
     void stop();
-    QString request(const QString& type, const QJsonObject& body = {});
+    [[nodiscard]] RequestResult request(const QString& type, const QJsonObject& body = {});
     bool ready() const;
     QString state() const;
     QUrl url() const;
@@ -44,27 +56,60 @@ signals:
     void accessGranted(QString server, QJsonObject grant);
 
 private:
-    struct Pending { QString type; qint64 sentAt; };
+    enum class State {
+        Disabled,
+        Connecting,
+        Authenticating,
+        Ready,
+        Reconnecting,
+        AccessRequired,
+    };
+
+    struct Pending {
+        QString type;
+        qint64 sentAt;
+    };
+
     void receive(const QString& text);
+    void handleChallenge(const signaling_protocol::Envelope& message);
+    void handleResponse(const signaling_protocol::Envelope& message);
+    void handleAuthenticationResponse(const QString& requestType,
+                                      const signaling_protocol::Envelope& message);
+
     void requireAccess(const QString& reason);
     void fail();
     void resetSocket();
     void openSocket();
+    void maintainConnection();
+    void maintainConnectionAttempt(qint64 now);
+    void maintainReadyConnection(qint64 now);
+    void maintainHeartbeat(qint64 now);
+    [[nodiscard]] bool hasTimedOutRequest(qint64 now) const;
+
+    // Connection and lifecycle timers.
     std::unique_ptr<QWebSocket> socket_;
-    QHash<QString, Pending> pending_;
-    QTimer timer_;
-    QTimer reconnectTimer_;
+    QTimer maintenanceTimer_;
     QElapsedTimer clock_;
     QUrl url_;
-    QString state_{QStringLiteral("disabled")};
+    State state_{State::Disabled};
     QString sessionId_;
+    qint64 openedAt_{0};
+
+    // Reconnect backoff; reset after a stable connection.
+    QTimer reconnectTimer_;
     int retryAttempt_{0};
     bool reconnectEnabled_{false};
     qint64 readyAt_{0};
-    qint64 openedAt_{0};
+
+    // Request correlation and timeouts.
+    QHash<QString, Pending> pending_;
+    quint64 nextRequest_{0};
+
+    // Heartbeat.
     qint64 pingAt_{0};
     QByteArray pendingPing_;
-    quint64 nextRequest_{0};
+
+    // Identity, saved grants and one-use access invitation.
     std::shared_ptr<security::SigningKey> signingKey_;
     QJsonObject grants_;
     QString expectedAuthority_;

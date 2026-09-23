@@ -493,7 +493,7 @@ QString AppViewModel::signalingStatus() const {
     if (state == "connected") return "Подключён";
     if (state == "recovering") return "Подключён, восстановление комнаты…";
     if (state == "connecting") return "Подключение…";
-    if (state == "authenticating" || state == "authenticated") return "Проверка доступа…";
+    if (state == "authenticating") return "Проверка доступа…";
     if (state == "access-required") return "Требуется разрешение доступа";
     if (state == "unavailable") return "Недоступен, повторное подключение…";
     return "Отключён";

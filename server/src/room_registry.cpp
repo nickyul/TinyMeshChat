@@ -1,9 +1,10 @@
-#include "room_registry.h"
+#include "tmc/server/room_registry.h"
 
+#include "tmc/security/security.h"
+#include "tmc/server/limits.h"
 #include "tmc/signaling_protocol/message_codec.h"
 
 #include <QJsonArray>
-#include <QRandomGenerator>
 #include <QUuid>
 
 #include <algorithm>
@@ -16,7 +17,7 @@ QString RoomRegistry::roomForSession(const QString& sessionId) const {
 
 bool RoomRegistry::canJoinRoom(const QString& roomId) const {
     const auto room = rooms_.constFind(roomId);
-    return room != rooms_.cend() && room->peers.size() < signaling_protocol::RoomCapacity;
+    return room != rooms_.cend() && room->peers.size() < RoomCapacity;
 }
 
 namespace {
@@ -31,24 +32,53 @@ QString newUuid() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
-QString newToken() {
-    QByteArray bytes;
-    bytes.reserve(32);
-    for (int word = 0; word < 8; ++word) {
-        const auto random = QRandomGenerator::system()->generate();
-        for (int shift = 0; shift < 32; shift += 8) {
-            bytes.append(static_cast<char>((random >> shift) & 0xff));
-        }
+QString invitationErrorCode(RoomRegistry::InvitationError error) {
+    switch (error) {
+    case RoomRegistry::InvitationError::NotInRoom:
+        return QStringLiteral("not_in_room");
+    case RoomRegistry::InvitationError::RoomMismatch:
+        return QStringLiteral("room_mismatch");
+    case RoomRegistry::InvitationError::ResourceLimit:
+        return QStringLiteral("resource_limit");
+    case RoomRegistry::InvitationError::TokenGenerationFailed:
+        return QStringLiteral("internal_error");
     }
-    return QString::fromLatin1(bytes.toBase64(QByteArray::Base64UrlEncoding |
-                                             QByteArray::OmitTrailingEquals));
+    Q_UNREACHABLE();
 }
 
 Envelope event(const QString& type, const QJsonObject& body) {
-    return {1, type, std::nullopt, body};
+    return {signaling_protocol::ProtocolVersion, type, std::nullopt, body};
 }
 
 } // namespace
+
+RoomRegistry::InvitationResult RoomRegistry::createInvitation(
+    const QString& sessionId, const QString& roomId, qint64 now) {
+    expireInvitations(now);
+    const auto member = memberships_.constFind(sessionId);
+    if (member == memberships_.cend()) {
+        return InvitationError::NotInRoom;
+    }
+    if (member->roomId != roomId) {
+        return InvitationError::RoomMismatch;
+    }
+
+    auto& room = rooms_[roomId];
+    if (room.invitations.size() >= MaxInvitationsPerRoom) {
+        return InvitationError::ResourceLimit;
+    }
+
+    QString token;
+    do {
+        token = security::randomToken();
+        if (token.isEmpty()) {
+            return InvitationError::TokenGenerationFailed;
+        }
+    } while (room.invitations.contains(token));
+    room.invitations.insert(
+        token, {member->peerId, now + signaling_protocol::InvitationLifetimeSeconds * qint64{1000}});
+    return CreatedInvitation{token, signaling_protocol::InvitationLifetimeSeconds};
+}
 
 QVector<Delivery> RoomRegistry::handle(const QString& sessionId, const Envelope& request,
                                       qint64 now) {
@@ -57,7 +87,7 @@ QVector<Delivery> RoomRegistry::handle(const QString& sessionId, const Envelope&
         return {{sessionId, MessageCodec::error(request.requestId, code)}};
     };
     const auto reply = [&](const QString& type, const QJsonObject& body) -> Delivery {
-        return {sessionId, {1, type, request.requestId, body}};
+        return {sessionId, {signaling_protocol::ProtocolVersion, type, request.requestId, body}};
     };
 
     // The registry also guards its boundary for callers other than the transport.
@@ -93,7 +123,7 @@ QVector<Delivery> RoomRegistry::handle(const QString& sessionId, const Envelope&
         if (room == rooms_.end() || !room->invitations.contains(token)) {
             return fail(QStringLiteral("invalid_invitation"));
         }
-        if (room->peers.size() >= signaling_protocol::RoomCapacity) {
+        if (room->peers.size() >= RoomCapacity) {
             return fail(QStringLiteral("room_full"));
         }
         QString peerId;
@@ -120,6 +150,17 @@ QVector<Delivery> RoomRegistry::handle(const QString& sessionId, const Envelope&
         return deliveries;
     }
 
+    if (request.type == "invite.create") {
+        const auto result = createInvitation(sessionId, roomId, now);
+        if (const auto* error = std::get_if<InvitationError>(&result)) {
+            return fail(invitationErrorCode(*error));
+        }
+        const auto& invitation = std::get<CreatedInvitation>(result);
+        return {reply(QStringLiteral("invite.created"),
+                      {{"roomId", roomId}, {"token", invitation.token},
+                       {"expiresInSeconds", invitation.expiresInSeconds}})};
+    }
+
     const auto member = memberships_.constFind(sessionId);
     if (member == memberships_.cend()) {
         return fail(QStringLiteral("not_in_room"));
@@ -128,20 +169,6 @@ QVector<Delivery> RoomRegistry::handle(const QString& sessionId, const Envelope&
         return fail(QStringLiteral("room_mismatch"));
     }
     auto& room = rooms_[roomId];
-    if (request.type == "invite.create") {
-        if (room.invitations.size() >= MaxInvitationsPerRoom) {
-            return fail(QStringLiteral("resource_limit"));
-        }
-        QString token;
-        do {
-            token = newToken();
-        } while (room.invitations.contains(token));
-        room.invitations.insert(token, {member->peerId,
-            now + signaling_protocol::InvitationLifetimeSeconds * qint64{1000}});
-        return {reply(QStringLiteral("invite.created"),
-                      {{"roomId", roomId}, {"token", token},
-                       {"expiresInSeconds", signaling_protocol::InvitationLifetimeSeconds}})};
-    }
     if (request.type == "room.leave") {
         auto deliveries = leave(sessionId, QStringLiteral("leave"));
         deliveries.prepend(reply(QStringLiteral("room.left"), {{"roomId", roomId}}));

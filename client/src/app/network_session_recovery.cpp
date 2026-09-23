@@ -86,7 +86,12 @@ void NetworkSession::recoverServerRoom() {
     if (!serverRoomId_.isEmpty()) {
         // Leave only signaling membership; keep the logical mesh and every P2P link.
         serverOperation_ = QStringLiteral("recover-leave");
-        recoveryRequestId_ = signaling_->request("room.leave", {{"roomId", serverRoomId_}});
+        const auto result = signaling_->request("room.leave", {{"roomId", serverRoomId_}});
+        if (const auto* requestId = std::get_if<QString>(&result)) {
+            recoveryRequestId_ = *requestId;
+        } else {
+            recoveryRequestId_.clear();
+        }
         serverRoomId_.clear();
         serverPeerId_.clear();
         serverPeers_.clear();
@@ -103,7 +108,12 @@ void NetworkSession::recoverServerRoom() {
         }
     } else if (leader == app_.identity().peerId) {
         serverOperation_ = QStringLiteral("recover-create");
-        recoveryRequestId_ = signaling_->request("room.create");
+        const auto result = signaling_->request("room.create");
+        if (const auto* requestId = std::get_if<QString>(&result)) {
+            recoveryRequestId_ = *requestId;
+        } else {
+            recoveryRequestId_.clear();
+        }
     }
     if (serverOperation_.startsWith("recover-") && recoveryRequestId_.isEmpty()) {
         // request() can fail synchronously and emit connectionLost().
@@ -144,9 +154,12 @@ void NetworkSession::handleRecoveryPacket(const QString& connectionId, const Pac
             payload.sessionId != signaling_->sessionId() ||
             state->state.roomId != payload.roomId) return;
         serverOperation_ = QStringLiteral("recover-join");
-        recoveryRequestId_ = signaling_->request("room.join",
+        const auto result = signaling_->request("room.join",
             {{"roomId", payload.roomId}, {"token", payload.token}});
-        if (recoveryRequestId_.isEmpty()) {
+        if (const auto* requestId = std::get_if<QString>(&result)) {
+            recoveryRequestId_ = *requestId;
+        } else {
+            recoveryRequestId_.clear();
             serverOperation_.clear();
             recoveryJoin_.reset();
             recoveryAfter_ = now + 5000;
@@ -174,8 +187,10 @@ void NetworkSession::handleRecoveryPacket(const QString& connectionId, const Pac
         }
     }
     if (recoveryInvites_.size() >= policy_.maxPeers - 1) return;
-    const auto requestId = signaling_->request("invite.create", {{"roomId", serverRoomId_}});
-    if (!requestId.isEmpty()) recoveryInvites_.insert(requestId, {packet.senderId, payload, now});
+    const auto result = signaling_->request("invite.create", {{"roomId", serverRoomId_}});
+    if (const auto* requestId = std::get_if<QString>(&result)) {
+        recoveryInvites_.insert(*requestId, {packet.senderId, payload, now});
+    }
 }
 
 bool NetworkSession::handleRecoveryResponse(const signaling_protocol::Envelope& response) {
@@ -257,8 +272,11 @@ void NetworkSession::requestServerInvitationWhenReady() {
         return;
     }
     serverOperation_ = QStringLiteral("invite");
-    serverInvitationRequestId_ = signaling_->request("invite.create", {{"roomId", serverRoomId_}});
-    if (serverInvitationRequestId_.isEmpty()) {
+    const auto result = signaling_->request("invite.create", {{"roomId", serverRoomId_}});
+    if (const auto* requestId = std::get_if<QString>(&result)) {
+        serverInvitationRequestId_ = *requestId;
+    } else {
+        serverInvitationRequestId_.clear();
         serverOperation_.clear();
         serverInvitationRequested_ = false;
         emit errorOccurred("Не удалось запросить приглашение.");

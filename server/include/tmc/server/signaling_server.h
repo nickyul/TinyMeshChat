@@ -1,7 +1,7 @@
 #pragma once
 
-#include "room_registry.h"
-#include "presence_registry.h"
+#include "tmc/server/room_registry.h"
+#include "tmc/server/presence_registry.h"
 #include "tmc/security/security.h"
 
 #include <QByteArray>
@@ -12,9 +12,12 @@
 #include <QQueue>
 #include <QSet>
 #include <QString>
+#include <QSslConfiguration>
 #include <QTimer>
 #include <QWebSocketProtocol>
 #include <QWebSocketServer>
+
+#include <optional>
 
 class QWebSocket;
 
@@ -22,7 +25,9 @@ namespace tmc::server {
 
 class SignalingServer final : public QObject {
 public:
-    explicit SignalingServer(std::shared_ptr<security::SigningKey> authority, QObject* parent = nullptr);
+    explicit SignalingServer(std::shared_ptr<security::SigningKey> authority,
+                             const std::optional<QSslConfiguration>& tls = std::nullopt,
+                             QObject* parent = nullptr);
     ~SignalingServer() override;
 
     bool listen(const QHostAddress& address, quint16 port);
@@ -35,9 +40,6 @@ public:
 private:
     struct Session {
         QString id;
-        QSet<QString> requestIds;
-        double requestBudget{40};
-        qint64 budgetUpdatedAt{0};
         qint64 lastPingAt{0};
         QByteArray pendingPing;
         QString nonce;
@@ -67,7 +69,10 @@ private:
     QElapsedTimer clock_;
     QTimer maintenance_;
     std::shared_ptr<security::SigningKey> authority_;
-    struct AccessInvitation { QString issuerSession; qint64 expiresAt; };
+    struct AccessInvitation {
+        QString issuerSession;
+        qint64 expiresAt;
+    };
     QHash<QString, AccessInvitation> accessInvitations_;
 };
 

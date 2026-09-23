@@ -18,32 +18,6 @@ bool isLowerOrDigit(QChar character) {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
-std::optional<CodecError> validateFields(const Envelope& envelope) {
-    if (envelope.version != 1) {
-        return error(CodecErrorCode::UnsupportedVersion, "Unsupported protocol version");
-    }
-    if (envelope.type.isEmpty() || envelope.type.size() > EnvelopeCodec::MaxTypeLength) {
-        return error(CodecErrorCode::InvalidType, "Invalid message type");
-    }
-    for (const auto c : envelope.type) {
-        if (!isLowerOrDigit(c) && c != '.' && c != '_') {
-            return error(CodecErrorCode::InvalidType, "Invalid message type");
-        }
-    }
-    if (envelope.requestId) {
-        const auto& id = *envelope.requestId;
-        if (id.isEmpty() || id.size() > EnvelopeCodec::MaxRequestIdLength) {
-            return error(CodecErrorCode::InvalidRequestId, "Invalid request identifier");
-        }
-        for (const auto c : id) {
-            if (!isLowerOrDigit(c) && !(c >= 'A' && c <= 'Z') && c != '-' && c != '_') {
-                return error(CodecErrorCode::InvalidRequestId, "Invalid request identifier");
-            }
-        }
-    }
-    return std::nullopt;
-}
-
 bool isWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
@@ -94,8 +68,34 @@ bool hasDuplicateKeys(const QByteArray& bytes) {
 
 } // namespace
 
+std::optional<CodecError> EnvelopeCodec::validateHeader(const Envelope& envelope) {
+    if (envelope.version != ProtocolVersion) {
+        return error(CodecErrorCode::UnsupportedVersion, "Unsupported protocol version");
+    }
+    if (envelope.type.isEmpty() || envelope.type.size() > EnvelopeCodec::MaxTypeLength) {
+        return error(CodecErrorCode::InvalidType, "Invalid message type");
+    }
+    for (const auto c : envelope.type) {
+        if (!isLowerOrDigit(c) && c != '.' && c != '_') {
+            return error(CodecErrorCode::InvalidType, "Invalid message type");
+        }
+    }
+    if (envelope.requestId) {
+        const auto& id = *envelope.requestId;
+        if (id.isEmpty() || id.size() > EnvelopeCodec::MaxRequestIdLength) {
+            return error(CodecErrorCode::InvalidRequestId, "Invalid request identifier");
+        }
+        for (const auto c : id) {
+            if (!isLowerOrDigit(c) && !(c >= 'A' && c <= 'Z') && c != '-' && c != '_') {
+                return error(CodecErrorCode::InvalidRequestId, "Invalid request identifier");
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 EnvelopeCodec::EncodeResult EnvelopeCodec::encode(const Envelope& envelope) {
-    if (const auto failure = validateFields(envelope)) {
+    if (const auto failure = validateHeader(envelope)) {
         return *failure;
     }
     QJsonObject object{{QStringLiteral("v"), envelope.version},
@@ -109,14 +109,6 @@ EnvelopeCodec::EncodeResult EnvelopeCodec::encode(const Envelope& envelope) {
         return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
     }
     return bytes;
-}
-
-std::optional<CodecError> EnvelopeCodec::validate(const Envelope& envelope) {
-    const auto encoded = encode(envelope);
-    if (const auto* failure = std::get_if<CodecError>(&encoded)) {
-        return *failure;
-    }
-    return std::nullopt;
 }
 
 EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
@@ -149,7 +141,7 @@ EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
         !object.value(QStringLiteral("body")).isObject()) {
         return error(CodecErrorCode::InvalidEnvelope, "Missing or invalid envelope field");
     }
-    if (version.toDouble() != 1.0) {
+    if (version.toDouble() != ProtocolVersion) {
         return error(CodecErrorCode::UnsupportedVersion, "Unsupported protocol version");
     }
     Envelope envelope;
@@ -162,7 +154,7 @@ EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
         }
         envelope.requestId = id.toString();
     }
-    if (const auto failure = validateFields(envelope)) {
+    if (const auto failure = validateHeader(envelope)) {
         return *failure;
     }
     return envelope;

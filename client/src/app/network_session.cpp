@@ -839,8 +839,7 @@ QString NetworkSession::diagnostics() const {
     QStringList lines{"Состояние mesh: " + toString(mesh_.state()),
                       QString("Прямых каналов: %1/%2")
                           .arg(connectedPeerCount())
-                          .arg(qMax(0, knownPeerCount() - 1)),
-                      "TURN/relay: отключён"};
+                          .arg(qMax(0, knownPeerCount() - 1))};
     const auto connections = connections_->connections();
     if (connections.isEmpty()) {
         lines.append("Соединения: отсутствуют");

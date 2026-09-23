@@ -1,4 +1,5 @@
-#include "presence_registry.h"
+#include "tmc/server/presence_registry.h"
+#include "tmc/server/limits.h"
 #include "tmc/signaling_protocol/message_codec.h"
 #include <QUuid>
 #include <algorithm>
@@ -6,7 +7,7 @@
 namespace tmc::server {
 using namespace signaling_protocol;
 namespace {
-Envelope event(const QString& type, const QJsonObject& body) { return {1, type, std::nullopt, body}; }
+Envelope event(const QString& type, const QJsonObject& body) { return {signaling_protocol::ProtocolVersion, type, std::nullopt, body}; }
 }
 
 bool PresenceRegistry::mutual(const QString& first, const QString& second) const {
@@ -27,7 +28,7 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         return {{sessionId, MessageCodec::error(request.requestId, code)}};
     };
     const auto reply = [&](const QString& type, const QJsonObject& body = {}) -> Delivery {
-        return {sessionId, {1, type, request.requestId, body}};
+        return {sessionId, {signaling_protocol::ProtocolVersion, type, request.requestId, body}};
     };
     if (MessageCodec::validateRequest(request)) return fail("invalid_message");
     const auto& body = request.body;
@@ -36,7 +37,7 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         if ((sessionsByIdentity_.contains(identity) && sessionsByIdentity_.value(identity) != sessionId) ||
             (profiles_.contains(sessionId) && profiles_.value(sessionId).identityId != identity))
             return fail("identity_in_use");
-        if (!profiles_.contains(sessionId) && profiles_.size() >= 64) return fail("resource_limit");
+        if (!profiles_.contains(sessionId) && profiles_.size() >= MaxSessions) return fail("resource_limit");
         auto& profile = profiles_[sessionId];
         profile.identityId = identity;
         profile.displayName = body.value("displayName").toString();
@@ -45,7 +46,8 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         for (const auto& item : body.value("knownPeers").toArray()) profile.known.insert(item.toString());
         sessionsByIdentity_.insert(identity, sessionId);
         auto deliveries = QVector<Delivery>{reply("presence.published")};
-        deliveries += maintain(rooms, now);
+        deliveries += maintainInvitations(rooms, now);
+        deliveries += updateSnapshots();
         return deliveries;
     }
     if (!profiles_.contains(sessionId)) return fail("presence_required");
@@ -92,43 +94,64 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
     else if (decision == "decline") status = "declined";
     else if (!rooms.canJoinRoom(invitation.roomId)) status = "unavailable";
     else {
-        // Internal registry call only: its reply is NOT sent as a WS request response.
-        const auto issued = rooms.handle(invitation.fromSession,
-            {1, "invite.create", request.requestId, {{"roomId", invitation.roomId}}}, now);
-        if (issued.size() != 1 || issued.first().message.type != "invite.created") status = "unavailable";
-        else {
+        const auto result = rooms.createInvitation(invitation.fromSession, invitation.roomId, now);
+        if (const auto* issued = std::get_if<RoomRegistry::CreatedInvitation>(&result)) {
             deliveries.append({sessionId, event("contact.accepted", {{"invitationId", id},
                 {"roomId", invitation.roomId}, {"meshId", invitation.meshId},
-                {"token", issued.first().message.body.value("token")}})});
+                {"token", issued->token}})});
             status = "accepted";
+        } else {
+            status = "unavailable";
         }
     }
     deliveries += finish(invitation, status);
     return deliveries;
 }
 
-QVector<Delivery> PresenceRegistry::maintain(const RoomRegistry& rooms, qint64 now) {
+QVector<Delivery> PresenceRegistry::maintainInvitations(const RoomRegistry& rooms, qint64 now) {
     QVector<Delivery> deliveries;
     for (auto it = invitations_.begin(); it != invitations_.end();) {
         QString reason;
-        if (now >= it->expiresAt) reason = "expired";
-        else if (!mutual(it->fromSession, it->toSession) ||
-                 rooms.roomForSession(it->fromSession) != it->roomId) reason = "cancelled";
-        else if (profiles_.value(it->toSession).busy || !rooms.roomForSession(it->toSession).isEmpty()) reason = "busy";
-        if (reason.isEmpty()) { ++it; continue; }
+        if (now >= it->expiresAt) {
+            reason = "expired";
+        } else if (!mutual(it->fromSession, it->toSession) ||
+                   rooms.roomForSession(it->fromSession) != it->roomId) {
+            reason = "cancelled";
+        } else if (profiles_.value(it->toSession).busy ||
+                   !rooms.roomForSession(it->toSession).isEmpty()) {
+            reason = "busy";
+        }
+        if (reason.isEmpty()) {
+            ++it;
+            continue;
+        }
+
         deliveries += finish(it.value(), reason);
         it = invitations_.erase(it);
     }
     for (auto it = profiles_.begin(); it != profiles_.end(); ++it) {
         for (auto invite = it->lastInvite.begin(); invite != it->lastInvite.end();) {
-            if (now - invite.value() >= 10000) invite = it->lastInvite.erase(invite);
-            else ++invite;
+            if (now - invite.value() >= 10000) {
+                invite = it->lastInvite.erase(invite);
+            } else {
+                ++invite;
+            }
         }
+    }
+    return deliveries;
+}
+
+QVector<Delivery> PresenceRegistry::updateSnapshots() {
+    QVector<Delivery> deliveries;
+    for (auto it = profiles_.begin(); it != profiles_.end(); ++it) {
         auto ids = it->known.values();
         std::sort(ids.begin(), ids.end());
         QJsonArray snapshot;
-        for (const auto& id : ids) snapshot.append(QJsonObject{{"identityId", id},
-            {"online", mutual(it.key(), sessionsByIdentity_.value(id))}});
+        for (const auto& id : ids) {
+            snapshot.append(QJsonObject{{"identityId", id},
+                {"online", mutual(it.key(), sessionsByIdentity_.value(id))}});
+        }
+
         if (!it->published || snapshot != it->snapshot) {
             it->published = true;
             it->snapshot = snapshot;
@@ -140,12 +163,22 @@ QVector<Delivery> PresenceRegistry::maintain(const RoomRegistry& rooms, qint64 n
 
 QVector<Delivery> PresenceRegistry::disconnect(const QString& sessionId, const RoomRegistry& rooms, qint64 now) {
     const auto found = profiles_.find(sessionId);
-    if (found != profiles_.end()) {
+    const bool hadProfile = found != profiles_.end();
+    if (hadProfile) {
         sessionsByIdentity_.remove(found->identityId);
         profiles_.erase(found);
     }
-    return maintain(rooms, now);
+    auto deliveries = maintainInvitations(rooms, now);
+    if (hadProfile) {
+        deliveries += updateSnapshots();
+    }
+    return deliveries;
 }
 
-void PresenceRegistry::clear() { profiles_.clear(); sessionsByIdentity_.clear(); invitations_.clear(); }
+void PresenceRegistry::clear() {
+    profiles_.clear();
+    sessionsByIdentity_.clear();
+    invitations_.clear();
+}
+
 } // namespace tmc::server

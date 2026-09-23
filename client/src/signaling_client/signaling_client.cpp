@@ -1,4 +1,5 @@
 #include "tmc/signaling_client/signaling_client.h"
+#include "tmc/signaling_protocol/authentication.h"
 #include "tmc/signaling_protocol/message_codec.h"
 
 #include <QAbstractSocket>
@@ -9,39 +10,96 @@
 
 namespace tmc {
 using namespace signaling_protocol;
+namespace {
+
+constexpr int MaintenanceIntervalMs = 1000;
+constexpr qint64 ConnectionAttemptTimeoutMs = 15000;
+constexpr qint64 RequestTimeoutMs = 15000;
+constexpr qint64 HeartbeatIntervalMs = 30000;
+constexpr qint64 StableConnectionPeriodMs = 30000;
+constexpr int InitialReconnectDelayMs = 1000;
+constexpr int MaxReconnectDelayMs = 30000;
+constexpr int MaxReconnectBackoffExponent = 5;
+constexpr qsizetype MaxPendingRequests = 64;
+constexpr qint64 MaxQueuedBytes = 256 * 1024;
+constexpr qint64 OutgoingFrameOverheadAllowance = 16;
+
+} // namespace
 
 SignalingClient::SignalingClient(QObject* parent) : QObject(parent) {
     clock_.start();
     reconnectTimer_.setSingleShot(true);
     connect(&reconnectTimer_, &QTimer::timeout, this, &SignalingClient::openSocket);
-    timer_.setInterval(1000);
-    connect(&timer_, &QTimer::timeout, this, [this] {
-        const auto now = clock_.elapsed();
-        if (ready() && now - readyAt_ >= 30000) retryAttempt_ = 0;
-        if ((state_ == "connecting" || state_ == "authenticating" || state_ == "authenticated") && now - openedAt_ >= 15000) {
-            fail();
-            return;
-        }
-        for (const auto& request : pending_) {
-            if (now - request.sentAt >= 15000) {
-                // The outcome may be unknown; never automatically replay mutations.
-                fail();
-                return;
-            }
-        }
-        if (ready() && now - pingAt_ >= 30000) {
-            if (!pendingPing_.isEmpty()) {
-                fail();
-                return;
-            }
-            pingAt_ = now;
-            pendingPing_ = QByteArray::number(now);
-            socket_->ping(pendingPing_);
-        }
-    });
+    maintenanceTimer_.setInterval(MaintenanceIntervalMs);
+    connect(&maintenanceTimer_, &QTimer::timeout,
+            this, &SignalingClient::maintainConnection);
 }
 
 SignalingClient::~SignalingClient() { resetSocket(); }
+
+void SignalingClient::maintainConnection() {
+    const auto now = clock_.elapsed();
+    switch (state_) {
+    case State::Connecting:
+    case State::Authenticating:
+        maintainConnectionAttempt(now);
+        break;
+    case State::Ready:
+        maintainReadyConnection(now);
+        break;
+    case State::Disabled:
+    case State::Reconnecting:
+    case State::AccessRequired:
+        break;
+    }
+}
+
+void SignalingClient::maintainConnectionAttempt(qint64 now) {
+    // One deadline covers socket opening and authentication.
+    if (now - openedAt_ >= ConnectionAttemptTimeoutMs) {
+        fail();
+        return;
+    }
+    if (hasTimedOutRequest(now)) {
+        fail();
+        return;
+    }
+}
+
+void SignalingClient::maintainReadyConnection(qint64 now) {
+    if (now - readyAt_ >= StableConnectionPeriodMs) {
+        retryAttempt_ = 0;
+    }
+    if (hasTimedOutRequest(now)) {
+        fail();
+        return;
+    }
+    maintainHeartbeat(now);
+}
+
+bool SignalingClient::hasTimedOutRequest(qint64 now) const {
+    // A timeout leaves the outcome unknown; the caller closes the connection
+    // without replaying requests that may already have changed server state.
+    for (const auto& request : pending_) {
+        if (now - request.sentAt >= RequestTimeoutMs) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SignalingClient::maintainHeartbeat(qint64 now) {
+    if (now - pingAt_ < HeartbeatIntervalMs) {
+        return;
+    }
+    if (!pendingPing_.isEmpty()) {
+        fail();
+        return;
+    }
+    pingAt_ = now;
+    pendingPing_ = QByteArray::number(now);
+    socket_->ping(pendingPing_);
+}
 
 bool SignalingClient::validServerUrl(const QUrl& url) {
     return url.isValid() && (url.scheme() == "ws" || url.scheme() == "wss") &&
@@ -51,7 +109,7 @@ bool SignalingClient::validServerUrl(const QUrl& url) {
 }
 
 void SignalingClient::resetSocket() {
-    timer_.stop();
+    maintenanceTimer_.stop();
     pending_.clear();
     pendingPing_.clear();
     sessionId_.clear();
@@ -64,32 +122,41 @@ void SignalingClient::resetSocket() {
 }
 
 void SignalingClient::stop() {
+    if (state_ == State::Disabled) {
+        return;
+    }
     reconnectEnabled_ = false;
     reconnectTimer_.stop();
     retryAttempt_ = 0;
-    const bool hadConnection = state_ != "disabled" && state_ != "unavailable" && state_ != "access-required";
+    const bool hadConnection = state_ != State::Disabled && state_ != State::Reconnecting && state_ != State::AccessRequired;
     resetSocket();
-    state_ = QStringLiteral("disabled");
+    state_ = State::Disabled;
     url_.clear();
     accessToken_.clear();
     expectedAuthority_.clear();
-    emit stateChanged();
     if (hadConnection) {
         emit connectionLost();
+    }
+    if (state_ == State::Disabled) {
+        emit stateChanged();
     }
 }
 
 void SignalingClient::fail() {
-    if (state_ == "unavailable" || state_ == "disabled" || state_ == "access-required") {
+    if (state_ == State::Reconnecting ||
+        state_ == State::Disabled ||
+        state_ == State::AccessRequired) {
         return;
     }
     resetSocket();
-    state_ = QStringLiteral("unavailable");
-    emit stateChanged();
+    state_ = State::Reconnecting;
+    if (reconnectEnabled_) {
+        reconnectTimer_.start(std::min(MaxReconnectDelayMs, InitialReconnectDelayMs << retryAttempt_));
+        retryAttempt_ = std::min(retryAttempt_ + 1, MaxReconnectBackoffExponent);
+    }
     emit connectionLost();
-    if (reconnectEnabled_ && state_ == "unavailable") {
-        reconnectTimer_.start(std::min(30000, 1000 << retryAttempt_));
-        retryAttempt_ = std::min(retryAttempt_ + 1, 5);
+    if (state_ == State::Reconnecting) {
+        emit stateChanged();
     }
 }
 
@@ -100,6 +167,9 @@ void SignalingClient::configureAccess(std::shared_ptr<security::SigningKey> key,
 
 void SignalingClient::redeemAccess(const QUrl& url, const QString& authority, const QString& token) {
     stop();
+    if (state_ != State::Disabled) {
+        return;
+    }
     url_ = url;
     expectedAuthority_ = authority;
     accessToken_ = token;
@@ -118,21 +188,30 @@ void SignalingClient::requireAccess(const QString& reason) {
     resetSocket();
     accessToken_.clear();
     expectedAuthority_.clear();
-    state_ = "access-required";
+    state_ = State::AccessRequired;
     emit connectionLost();
-    emit stateChanged();
-    emit accessRequired(reason);
-}
-
-void SignalingClient::connectTo(const QUrl& url) {
-    stop();
-    url_ = url;
-    if (!validServerUrl(url)) {
-        requireAccess("Некорректный адрес сервера. Для внешнего сервера требуется wss://; ws:// разрешён только для localhost.");
+    if (state_ != State::AccessRequired) {
         return;
     }
+    emit stateChanged();
+    if (state_ == State::AccessRequired) {
+        emit accessRequired(reason);
+    }
+}
+
+bool SignalingClient::connectTo(const QUrl& url) {
+    if (!validServerUrl(url)) {
+        return false;
+    }
+    stop();
+    // A notification handler may have already started another connection.
+    if (state_ != State::Disabled) {
+        return true;
+    }
+    url_ = url;
     reconnectEnabled_ = true;
     openSocket();
+    return true;
 }
 
 void SignalingClient::openSocket() {
@@ -152,93 +231,83 @@ void SignalingClient::openSocket() {
     });
     nextRequest_ = 0;
     openedAt_ = pingAt_ = clock_.elapsed();
-    state_ = QStringLiteral("connecting");
+    state_ = State::Connecting;
+    maintenanceTimer_.start();
+    // TODO: Handle stop/reconnect from stateChanged before continuing with the socket.
     emit stateChanged();
-    timer_.start();
     socket_->open(url_);
 }
 
-bool SignalingClient::ready() const { return state_ == "connected"; }
-QString SignalingClient::state() const { return state_; }
+bool SignalingClient::ready() const { return state_ == State::Ready; }
+QString SignalingClient::state() const {
+    switch (state_) {
+    case State::Disabled:
+        return QStringLiteral("disabled");
+    case State::Connecting:
+        return QStringLiteral("connecting");
+    case State::Authenticating:
+        return QStringLiteral("authenticating");
+    case State::Ready:
+        return QStringLiteral("connected");
+    case State::Reconnecting:
+        return QStringLiteral("unavailable");
+    case State::AccessRequired:
+        return QStringLiteral("access-required");
+    }
+    Q_UNREACHABLE();
+}
 QUrl SignalingClient::url() const { return url_; }
 QString SignalingClient::sessionId() const { return ready() ? sessionId_ : QString{}; }
 
-QString SignalingClient::request(const QString& type, const QJsonObject& body) {
-    const bool auth = state_ == "authenticating" && (type == "auth.authenticate" || type == "access.redeem");
-    if ((!ready() && !auth) || pending_.size() >= 64) {
-        return {};
+SignalingClient::RequestResult SignalingClient::request(const QString& type, const QJsonObject& body) {
+    const bool auth = state_ == State::Authenticating && (type == "auth.authenticate" || type == "access.redeem");
+    if (!ready() && !auth) {
+        return RequestError::NotReady;
+    }
+    if (pending_.size() >= MaxPendingRequests) {
+        return RequestError::TooManyPendingRequests;
     }
     const auto id = QString::number(++nextRequest_);
-    const Envelope envelope{1, type, id, body};
+    const Envelope envelope{signaling_protocol::ProtocolVersion, type, id, body};
     if (MessageCodec::validateRequest(envelope)) {
-        return {};
+        return RequestError::InvalidMessage;
     }
     const auto encoded = EnvelopeCodec::encode(envelope);
     const auto* bytes = std::get_if<QByteArray>(&encoded);
-    if (!bytes || socket_->bytesToWrite() + bytes->size() + 16 > 256 * 1024) {
-        return {};
+    if (!bytes) {
+        return std::get<CodecError>(encoded).code == CodecErrorCode::MessageTooLarge
+            ? RequestError::MessageTooLarge : RequestError::InvalidMessage;
+    }
+    if (socket_->bytesToWrite() + bytes->size() + OutgoingFrameOverheadAllowance > MaxQueuedBytes) {
+        return RequestError::OutgoingQueueFull;
     }
     pending_.insert(id, {type, clock_.elapsed()});
     if (socket_->sendTextMessage(QString::fromUtf8(*bytes)) < 0) {
         fail();
-        return {};
+        return RequestError::SendFailed;
     }
     return id;
 }
 
 void SignalingClient::receive(const QString& text) {
+    // TODO: A signal handler can restart the connection into the same state.
     const auto decoded = EnvelopeCodec::decode(text.toUtf8());
     const auto* message = std::get_if<Envelope>(&decoded);
     if (!message || MessageCodec::validateServerMessage(*message)) {
         fail();
         return;
     }
+
     if (message->type == "auth.challenge") {
-        if (state_ != "connecting") {
-            fail();
-            return;
-        }
-        sessionId_ = message->body.value("sessionId").toString();
-        const auto authority = message->body.value("authority").toString();
-        if (!signingKey_) { requireAccess("Не найден личный ключ."); return; }
-        QStringList fields{sessionId_, message->body.value("nonce").toString(), authority, signingKey_->publicKey()};
-        state_ = "authenticating";
-        emit stateChanged();
-        QString id;
-        if (!accessToken_.isEmpty()) {
-            if (authority != expectedAuthority_) { requireAccess("Ключ сервера не совпадает с приглашением доступа."); return; }
-            const auto token = accessToken_;
-            accessToken_.clear();
-            fields.append(token);
-            id = request("access.redeem", {{"publicKey", signingKey_->publicKey()}, {"token", token},
-                {"signature", signingKey_->sign(security::transcript("tmc.ws-redeem.v1", fields))}});
-        } else {
-            const auto grant = grants_.value(url_.toString(QUrl::FullyEncoded)).toObject();
-            if (!security::verifyGrant(grant, authority, signingKey_->publicKey())) {
-                requireAccess("Для этого сервера нужно отдельное разрешение доступа. Приглашение в mesh его не предоставляет."); return;
-            }
-            id = request("auth.authenticate", {{"publicKey", signingKey_->publicKey()}, {"grant", grant},
-                {"signature", signingKey_->sign(security::transcript("tmc.ws-auth.v1", fields))}});
-        }
-        if (id.isEmpty()) requireAccess("Не удалось подтвердить доступ к серверу.");
+        handleChallenge(*message);
         return;
     }
-    if (message->type == "session.ready") {
-        if (state_ != "authenticated" || message->body.value("sessionId").toString() != sessionId_) {
-            requireAccess("Сервер не завершил проверку доступа.");
-            return;
-        }
-        state_ = QStringLiteral("connected");
-        sessionId_ = message->body.value("sessionId").toString();
-        readyAt_ = clock_.elapsed();
-        emit stateChanged();
-        emit readyChanged();
-        return;
-    }
-    if (!ready() && state_ != "authenticating") {
+
+    if (!ready() && state_ != State::Authenticating) {
         fail();
         return;
     }
+
     if (!message->requestId) {
         if (!ready() || message->type == "error") {
             fail();
@@ -247,46 +316,135 @@ void SignalingClient::receive(const QString& text) {
         }
         return;
     }
-    const auto found = pending_.find(*message->requestId);
+
+    handleResponse(*message);
+}
+
+void SignalingClient::handleChallenge(const Envelope& message) {
+    if (state_ != State::Connecting) {
+        fail();
+        return;
+    }
+
+    sessionId_ = message.body.value("sessionId").toString();
+    const auto authority = message.body.value("authority").toString();
+    if (!signingKey_) {
+        requireAccess("Не найден личный ключ.");
+        return;
+    }
+
+    const AuthenticationChallenge challenge{
+        sessionId_, message.body.value("nonce").toString(), authority};
+    state_ = State::Authenticating;
+    emit stateChanged();
+    if (state_ != State::Authenticating) {
+        return;
+    }
+
+    RequestResult result;
+    if (!accessToken_.isEmpty()) {
+        if (authority != expectedAuthority_) {
+            requireAccess("Ключ сервера не совпадает с приглашением доступа.");
+            return;
+        }
+
+        const auto token = accessToken_;
+        accessToken_.clear();
+        const auto signature =
+            signingKey_->sign(challenge.redemptionMessage(signingKey_->publicKey(), token));
+        result = request(
+            "access.redeem",
+            {{"publicKey", signingKey_->publicKey()},
+             {"token", token},
+             {"signature", signature}});
+    } else {
+        const auto grant = grants_.value(url_.toString(QUrl::FullyEncoded)).toObject();
+        if (!security::verifyGrant(grant, authority, signingKey_->publicKey())) {
+            requireAccess("Для этого сервера нужно отдельное разрешение доступа. "
+                          "Приглашение в mesh его не предоставляет.");
+            return;
+        }
+
+        const auto signature =
+            signingKey_->sign(challenge.authenticationMessage(signingKey_->publicKey()));
+        result = request(
+            "auth.authenticate",
+            {{"publicKey", signingKey_->publicKey()},
+             {"grant", grant},
+             {"signature", signature}});
+    }
+
+    if (const auto* error = std::get_if<RequestError>(&result)) {
+        // SendFailed already schedules reconnect; it does not revoke access.
+        if (*error != RequestError::SendFailed && state_ == State::Authenticating) {
+            requireAccess("Не удалось подтвердить доступ к серверу.");
+        }
+    }
+}
+
+void SignalingClient::handleResponse(const Envelope& message) {
+    const auto found = pending_.find(*message.requestId);
     if (found == pending_.end()) {
         fail();
         return;
     }
+
     const auto type = found->type;
     pending_.erase(found);
-    if (message->type == "error") {
+
+    if (message.type == "error") {
         if (type == "auth.authenticate" || type == "access.redeem") {
-            requireAccess("Доступ отклонён. Проверьте разрешение или получите новое приглашение доступа.");
+            if (message.body.value("code").toString() == "identity_in_use") {
+                requireAccess("Этот профиль уже подключён к серверу. Отключите другую сессию "
+                              "и подключитесь повторно.");
+            } else {
+                requireAccess("Доступ отклонён. Проверьте разрешение или получите новое "
+                              "приглашение доступа.");
+            }
             return;
         }
-        emit requestFailed(*message->requestId, type, message->body.value("code").toString());
+        emit requestFailed(*message.requestId, type, message.body.value("code").toString());
         return;
     }
-    static const QHash<QString, QString> responses{
-        {"auth.authenticate", "auth.authenticated"}, {"access.redeem", "access.granted"},
-        {"access.invite", "access.invited"},
-        {"presence.publish", "presence.published"}, {"contact.invite", "contact.invited"},
-        {"contact.respond", "contact.responded"}, {"room.create", "room.created"}, {"invite.create", "invite.created"},
-        {"room.join", "room.joined"}, {"room.leave", "room.left"},
-        {"signal.send", "signal.accepted"}};
-    if (responses.value(type) != message->type) {
+
+    if (!MessageCodec::isResponseFor(type, message.type)) {
         fail();
         return;
     }
+
     if (type == "auth.authenticate" || type == "access.redeem") {
-        if (type == "access.redeem") {
-            const auto grant = message->body.value("grant").toObject();
-            if (!security::verifyGrant(grant, expectedAuthority_, signingKey_->publicKey())) {
-                requireAccess("Некорректное разрешение сервера."); return;
-            }
-            grants_.insert(url_.toString(QUrl::FullyEncoded), grant);
-            emit accessGranted(url_.toString(QUrl::FullyEncoded), grant);
-        }
-        expectedAuthority_.clear();
-        state_ = "authenticated";
+        handleAuthenticationResponse(type, message);
         return;
     }
-    emit responseReceived(type, *message);
+
+    emit responseReceived(type, message);
+}
+
+void SignalingClient::handleAuthenticationResponse(const QString& requestType,
+                                                 const Envelope& message) {
+    QJsonObject grant;
+    if (requestType == "access.redeem") {
+        grant = message.body.value("grant").toObject();
+        if (!security::verifyGrant(grant, expectedAuthority_, signingKey_->publicKey())) {
+            requireAccess("Некорректное разрешение сервера.");
+            return;
+        }
+        grants_.insert(url_.toString(QUrl::FullyEncoded), grant);
+    }
+
+    expectedAuthority_.clear();
+    state_ = State::Ready;
+    readyAt_ = clock_.elapsed();
+    if (requestType == "access.redeem") {
+        emit accessGranted(url_.toString(QUrl::FullyEncoded), grant);
+    }
+    if (state_ != State::Ready) {
+        return;
+    }
+    emit stateChanged();
+    if (state_ == State::Ready) {
+        emit readyChanged();
+    }
 }
 
 } // namespace tmc

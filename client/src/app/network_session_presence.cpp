@@ -46,7 +46,8 @@ void NetworkSession::publishPresence() {
     const QJsonObject body{{"identityId", app_.identity().peerId}, {"displayName", app_.identity().displayName},
         {"knownPeers", known}, {"busy", !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()}};
     if (body == lastPresence_) return;
-    if (!signaling_->request("presence.publish", body).isEmpty()) lastPresence_ = body;
+    const auto result = signaling_->request("presence.publish", body);
+    if (std::holds_alternative<QString>(result)) lastPresence_ = body;
 }
 
 void NetworkSession::resetPresence() {
@@ -97,12 +98,12 @@ void NetworkSession::submitOnlineInvitation() {
     serverInvitationRequested_ = false;
     const auto request = signaling_->request("contact.invite", {{"toIdentityId", target},
         {"roomId", serverRoomId_}, {"meshId", mesh_.meshId()}});
-    if (request.isEmpty()) {
+    if (const auto* requestId = std::get_if<QString>(&request)) {
+        onlineInvitationRequests_.insert(*requestId, target);
+        emit statusChanged("Онлайн-приглашение отправляется…");
+    } else {
         onlineInvitationTargets_.remove(target);
         emit errorOccurred("Не удалось отправить онлайн-приглашение.");
-    } else {
-        onlineInvitationRequests_.insert(request, target);
-        emit statusChanged("Онлайн-приглашение отправляется…");
     }
     emit acquaintancesChanged();
     emit signalingServerChanged();
@@ -115,12 +116,13 @@ void NetworkSession::respondToOnlineInvitation(const QString& invitationId, bool
     const auto decision = !accept ? QStringLiteral("decline") : busy ? QStringLiteral("busy") : QStringLiteral("accept");
     incomingOnlineInvitation_->accepting = decision == "accept";
     const auto request = signaling_->request("contact.respond", {{"invitationId", invitationId}, {"decision", decision}});
-    if (!request.isEmpty()) onlineResponseRequests_.insert(request, invitationId);
-    if (decision != "accept" || request.isEmpty()) {
+    const auto* requestId = std::get_if<QString>(&request);
+    if (requestId) onlineResponseRequests_.insert(*requestId, invitationId);
+    if (decision != "accept" || !requestId) {
         incomingOnlineInvitation_.reset();
         emit onlineInvitationClosed(invitationId);
     }
-    if (request.isEmpty()) emit errorOccurred("Не удалось отправить ответ на приглашение.");
+    if (!requestId) emit errorOccurred("Не удалось отправить ответ на приглашение.");
 }
 
 bool NetworkSession::handlePresenceResponse(const QString& type, const signaling_protocol::Envelope& response) {
@@ -161,7 +163,8 @@ bool NetworkSession::handlePresenceEvent(const signaling_protocol::Envelope& eve
             [&](const auto& peer) { return peer.peerId == sender; });
         if (!known || incomingOnlineInvitation_ || !mesh_.meshId().isEmpty() ||
             !connections_->connections().isEmpty() || signalingBusy()) {
-            signaling_->request("contact.respond", {{"invitationId", id}, {"decision", "busy"}});
+            // Best effort: if this cannot be sent, the server invitation expires.
+            (void)signaling_->request("contact.respond", {{"invitationId", id}, {"decision", "busy"}});
             return true;
         }
         incomingOnlineInvitation_ = OnlineInvitation{id, sender, body.value("meshId").toString(), false};

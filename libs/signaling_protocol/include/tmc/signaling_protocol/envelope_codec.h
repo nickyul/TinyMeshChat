@@ -36,7 +36,10 @@ public:
     using EncodeResult = std::variant<QByteArray, CodecError>;
     using DecodeResult = std::variant<Envelope, CodecError>;
 
-    [[nodiscard]] static std::optional<CodecError> validate(const Envelope& envelope);
+    // Checks version, type and requestId without serializing or inspecting body.
+    [[nodiscard]] static std::optional<CodecError> validateHeader(const Envelope& envelope);
+
+    // Both byte conversions enforce MaxMessageBytes.
     [[nodiscard]] static EncodeResult encode(const Envelope& envelope);
     [[nodiscard]] static DecodeResult decode(const QByteArray& bytes);
 };
