@@ -1,0 +1,84 @@
+name: tinymesh
+
+x-runtime: &runtime
+  platform: linux/amd64
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  signaling:
+    <<: *runtime
+    build:
+      context: .
+      target: signaling
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP:?Set PUBLIC_IP in .env}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_TLS_PORT: ${TURN_TLS_PORT:-5349}
+      TURN_TTL: ${TURN_TTL:-86400}
+    ports:
+      - "${SIGNALING_PORT:-8443}:8443/tcp"
+    volumes:
+      - signaling-state:/var/lib/tinymesh
+      - turn-auth:/var/lib/turn-auth
+      - type: bind
+        source: ${CERTS_DIR:-/root/cert/ip}
+        target: /certs
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:mode=1777
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/8443"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  coturn:
+    <<: *runtime
+    build:
+      context: .
+      target: coturn
+    # Linux host networking keeps relay addresses/ports identical on the wire.
+    network_mode: host
+    depends_on:
+      signaling:
+        condition: service_healthy
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP:?Set PUBLIC_IP in .env}
+      TURN_LISTEN_IP: ${TURN_LISTEN_IP:-${PUBLIC_IP}}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_TLS_PORT: ${TURN_TLS_PORT:-5349}
+      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
+      TURN_MAX_PORT: ${TURN_MAX_PORT:-49200}
+    volumes:
+      - turn-auth:/var/lib/turn-auth:ro
+      - type: bind
+        source: ${CERTS_DIR:-/root/cert/ip}
+        target: /certs
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/coturn:mode=0700
+    healthcheck:
+      test: [CMD, bash, -c, 'exec 3<>"/dev/tcp/$${TURN_LISTEN_IP}/$${TURN_PORT}"']
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  signaling-state:
+  turn-auth:

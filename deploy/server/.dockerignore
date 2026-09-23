@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!common.sh
+!signaling-entrypoint.sh
+!coturn-entrypoint.sh
+!TinyMeshSignalingServer-Linux-x64.tar.gz
