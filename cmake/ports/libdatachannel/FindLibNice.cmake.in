@@ -1,0 +1,17 @@
+if(NOT TARGET LibNice::LibNice)
+    # pkgconf is a host dependency. Also locate it when consuming the exported target on Windows.
+    find_program(PKG_CONFIG_EXECUTABLE NAMES pkgconf pkg-config
+        HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_HOST_TRIPLET}/tools/pkgconf"
+              "${CMAKE_CURRENT_LIST_DIR}/../../tools/pkgconf")
+    find_package(PkgConfig REQUIRED)
+    set(_tmc_saved_pkg_args "${PKG_CONFIG_ARGN}")
+    if(@TMC_LIBNICE_STATIC@)
+        list(APPEND PKG_CONFIG_ARGN --static)
+    endif()
+    pkg_check_modules(TMC_NICE REQUIRED IMPORTED_TARGET nice>=0.1.19)
+    set(PKG_CONFIG_ARGN "${_tmc_saved_pkg_args}")
+    unset(_tmc_saved_pkg_args)
+    add_library(LibNice::LibNice INTERFACE IMPORTED)
+    target_link_libraries(LibNice::LibNice INTERFACE PkgConfig::TMC_NICE)
+endif()
+set(LibNice_FOUND TRUE)

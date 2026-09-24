@@ -1,4 +1,4 @@
-name: "Desktop release"
+name: "Release"
 
 on:
   push:
@@ -14,6 +14,11 @@ env:
   VCPKG_REF: "2026.06.24"
 
 jobs:
+  build-linux-server:
+    uses: ./.github/workflows/server-build.yml
+    with:
+      artifact-name: release-linux-server
+
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 180
@@ -27,6 +32,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
+          modules: qtwebsockets
           arch: win64_msvc2022_64
           cache: true
 
@@ -34,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/ports/**', 'cmake/triplets/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -84,19 +90,19 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: mac
           target: desktop
+          modules: qtwebsockets
           cache: true
 
       - name: Install build tools
         run: |
-          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
-          brew install nasm
+          brew install nasm autoconf autoconf-archive automake libtool pkgconf gettext bison flex gperf
 
       - name: Cache vcpkg binaries
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**') }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/ports/**', 'cmake/triplets/**') }}
           restore-keys: |
             vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-
 
@@ -128,7 +134,7 @@ jobs:
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux-server]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

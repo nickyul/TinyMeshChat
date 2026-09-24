@@ -1,0 +1,334 @@
+find_package(Qt6 6.5 REQUIRED COMPONENTS
+    Gui Qml Quick QuickControls2 Widgets
+)
+
+find_package(LibDataChannel CONFIG REQUIRED)
+if(NOT TMC_LIBDATACHANNEL_USES_LIBNICE)
+    message(FATAL_ERROR "TinyMesh TURN requires the libdatachannel overlay with USE_NICE; configure with the repository vcpkg-configuration.json")
+endif()
+find_package(Opus CONFIG REQUIRED)
+find_package(unofficial-webrtc CONFIG REQUIRED)
+find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
+
+if(TMC_ENABLE_UPDATER)
+    if(NOT EXISTS "${TMC_VELOPACK_ROOT}/include/Velopack.hpp")
+        message(FATAL_ERROR "TMC_ENABLE_UPDATER requires TMC_VELOPACK_ROOT with Velopack.hpp")
+    endif()
+    add_library(tmc_velopack SHARED IMPORTED)
+    set_target_properties(tmc_velopack PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${TMC_VELOPACK_ROOT}/include"
+    )
+    if(WIN32)
+        if(NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll" OR
+           NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll.lib")
+            message(FATAL_ERROR "The Windows Velopack runtime or import library is missing")
+        endif()
+        set_target_properties(tmc_velopack PROPERTIES
+            IMPORTED_IMPLIB "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll.lib"
+            IMPORTED_LOCATION "${TMC_VELOPACK_ROOT}/lib/velopack_libc_win_x64_msvc.dll"
+        )
+    elseif(APPLE)
+        if(NOT EXISTS "${TMC_VELOPACK_ROOT}/lib/velopack_libc_osx.dylib")
+            message(FATAL_ERROR "The macOS Velopack runtime is missing")
+        endif()
+        set_target_properties(tmc_velopack PROPERTIES
+            IMPORTED_LOCATION "${TMC_VELOPACK_ROOT}/lib/velopack_libc_osx.dylib"
+            IMPORTED_SONAME "@rpath/velopack_libc_osx.dylib"
+        )
+    else()
+        message(FATAL_ERROR "The TinyMesh updater currently supports Windows and macOS only")
+    endif()
+endif()
+
+add_library(tmc_core STATIC)
+target_sources(tmc_core
+    PRIVATE
+        src/core/app_config.cpp
+        src/core/logger.cpp
+        src/core/uuid.cpp
+        src/identity/peer_identity.cpp
+        src/identity/identity_manager.cpp
+        src/protocol/packet.cpp
+        src/protocol/packet_codec.cpp
+        src/messaging/chat_message.cpp
+        src/messaging/delivery_tracker.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/core/app_config.h
+            include/tmc/core/limits.h
+            include/tmc/core/logger.h
+            include/tmc/core/result.h
+            include/tmc/core/rtp_audio_frame.h
+            include/tmc/core/uuid.h
+            include/tmc/identity/identity_manager.h
+            include/tmc/identity/peer_identity.h
+            include/tmc/protocol/packet.h
+            include/tmc/protocol/packet_codec.h
+            include/tmc/messaging/chat_message.h
+            include/tmc/messaging/delivery_tracker.h
+)
+target_link_libraries(tmc_core
+    PUBLIC Qt6::Core
+    PRIVATE tmc_security
+)
+
+add_library(tmc_transport STATIC)
+target_sources(tmc_transport
+    PRIVATE
+        src/network/audio_transport_worker.cpp
+        src/network/peer_connection.cpp
+        src/network/sdp_description_codec.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/network/connection_attempt_state.h
+            include/tmc/network/connection_policy.h
+            include/tmc/network/connection_state.h
+            include/tmc/network/audio_transport_worker.h
+            include/tmc/network/peer_connection.h
+            include/tmc/network/relay_server.h
+            include/tmc/network/sdp_description_codec.h
+)
+target_link_libraries(tmc_transport
+    PUBLIC tmc_core Qt6::Core
+    PRIVATE
+        Qt6::Network
+        LibDataChannel::LibDataChannel
+)
+
+add_library(tmc_audio STATIC)
+target_sources(tmc_audio
+    PRIVATE
+        src/audio/remote_audio_stream.cpp
+        src/audio/rtp_audio_engine.cpp
+        include/tmc/audio/audio_network_stats.h
+        include/tmc/audio/remote_audio_stream.h
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/audio/rtp_audio_engine.h
+)
+target_include_directories(tmc_audio PRIVATE
+    "${MINIAUDIO_INCLUDE_DIR}"
+)
+target_link_libraries(tmc_audio
+    PUBLIC
+        tmc_core
+        Qt6::Core
+    PRIVATE
+        Opus::opus
+        unofficial::webrtc::webrtc
+)
+if(APPLE)
+    # TinyMesh Chat uses miniaudio's native CoreAudio backend on macOS. Keeping
+    # only that backend avoids probing desktop backends that do not apply to a
+    # signed .app bundle and makes the selected audio backend deterministic.
+    target_compile_definitions(tmc_audio PRIVATE
+        MA_ENABLE_ONLY_SPECIFIC_BACKENDS
+        MA_ENABLE_COREAUDIO
+    )
+endif()
+
+add_library(tmc_signaling_client STATIC)
+target_sources(tmc_signaling_client
+    PRIVATE
+        src/signaling_client/signaling_client.cpp
+        src/signaling_client/server_invitation.cpp
+        src/signaling_client/access_invitation.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/signaling_client/signaling_client.h
+            include/tmc/signaling_client/server_invitation.h
+            include/tmc/signaling_client/access_invitation.h
+)
+target_link_libraries(tmc_signaling_client
+    PUBLIC tmc_security tmc_signaling_protocol Qt6::Core
+    PRIVATE Qt6::Network Qt6::WebSockets
+)
+
+add_library(tmc_application STATIC)
+target_sources(tmc_application
+    PRIVATE
+        src/app/application_controller.cpp
+        src/app/connection_manager.cpp
+        src/app/mesh_coordinator.cpp
+        src/app/messaging_service.cpp
+        src/app/network_session.cpp
+        src/app/network_session_signaling.cpp
+        src/app/network_session_recovery.cpp
+        src/app/network_session_presence.cpp
+        src/app/network_session_packets.cpp
+        src/app/signaling_router.cpp
+        src/app/negotiation_policy.cpp
+        src/app/voice_session.cpp
+        src/app/update_service.cpp
+        src/signaling/invitation_codec.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/app/application_controller.h
+            include/tmc/app/connection_manager.h
+            include/tmc/app/mesh_session_state.h
+            include/tmc/app/mesh_coordinator.h
+            include/tmc/app/messaging_service.h
+            include/tmc/app/network_session.h
+            include/tmc/app/signaling_router.h
+            include/tmc/app/negotiation_policy.h
+            include/tmc/app/voice_session.h
+            include/tmc/app/update_service.h
+            include/tmc/signaling/invitation.h
+            include/tmc/signaling/invitation_codec.h
+)
+target_link_libraries(tmc_application
+    PUBLIC
+        tmc_core
+        tmc_transport
+        tmc_signaling_client
+        tmc_security
+        tmc_signaling_protocol
+        Qt6::Core
+    PRIVATE
+        tmc_audio
+        Qt6::Network
+)
+
+add_executable(TinyMeshChat)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Isolate vcpkg's static GLib from the system GLib loaded by Qt plugins.
+    # Other archives retain their normal visibility; shared GLib is unaffected.
+    include(CheckLinkerFlag)
+    set(tmc_glib_visibility "LINKER:--exclude-libs,libglib-2.0.a:libgobject-2.0.a:libgio-2.0.a:libgmodule-2.0.a:libgthread-2.0.a")
+    check_linker_flag(CXX "${tmc_glib_visibility}" TMC_LINKER_CAN_HIDE_GLIB)
+    if(NOT TMC_LINKER_CAN_HIDE_GLIB)
+        message(FATAL_ERROR "The Linux linker must support --exclude-libs to isolate static GLib from Qt plugins")
+    endif()
+    target_link_options(TinyMeshChat PRIVATE "${tmc_glib_visibility}")
+endif()
+# Keep the executable and macOS bundle at the paths used by packaging scripts.
+set_target_properties(TinyMeshChat PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+target_sources(TinyMeshChat
+    PRIVATE
+        src/main.cpp
+        src/bootstrap/application_options.cpp
+        src/bootstrap/console_runtime.cpp
+        src/bootstrap/gui_runtime.cpp
+        src/cli/console_controller.cpp
+        src/ui/app_link_controller.cpp
+        src/ui/app_view_model.cpp
+        src/ui/global_ptt_monitor.cpp
+        src/ui/tray_controller.cpp
+        resources/resources.qrc
+    PRIVATE
+        FILE_SET HEADERS
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        FILES
+            include/tmc/bootstrap/application_options.h
+            include/tmc/bootstrap/console_runtime.h
+            include/tmc/bootstrap/gui_runtime.h
+            include/tmc/cli/console_controller.h
+            include/tmc/ui/app_link_controller.h
+            include/tmc/ui/app_view_model.h
+            include/tmc/ui/global_ptt_monitor.h
+            include/tmc/ui/tray_controller.h
+)
+
+if(APPLE)
+    set(TMC_MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/tinymesh.icns")
+    set_source_files_properties("${TMC_MACOS_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+    target_sources(TinyMeshChat PRIVATE "${TMC_MACOS_ICON}")
+    set_target_properties(TinyMeshChat PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "TinyMesh Chat"
+        MACOSX_BUNDLE_ICON_FILE "tinymesh.icns"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "chat.tinymesh.app"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+elseif(WIN32)
+    set(TMC_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/tinymesh.ico")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/app.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmc_app.rc"
+        @ONLY
+    )
+    target_sources(TinyMeshChat PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/tmc_app.rc")
+    set_target_properties(TinyMeshChat PROPERTIES
+        WIN32_EXECUTABLE TRUE
+    )
+endif()
+
+target_link_libraries(TinyMeshChat PRIVATE
+    tmc_application
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Widgets
+)
+
+target_compile_definitions(TinyMeshChat PRIVATE TMC_APP_VERSION="${TMC_APP_VERSION}")
+if(TMC_ENABLE_UPDATER)
+    target_compile_definitions(tmc_application PRIVATE TMC_ENABLE_UPDATER=1)
+    target_link_libraries(tmc_application PRIVATE tmc_velopack)
+    target_compile_definitions(TinyMeshChat PRIVATE TMC_ENABLE_UPDATER=1)
+    target_link_libraries(TinyMeshChat PRIVATE tmc_velopack)
+    if(WIN32)
+        add_custom_command(TARGET TinyMeshChat POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:tmc_velopack>"
+                "$<TARGET_FILE_DIR:TinyMeshChat>/velopack_libc.dll"
+            COMMENT "Deploying the Velopack runtime"
+            VERBATIM
+        )
+    elseif(APPLE)
+        set_target_properties(TinyMeshChat PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "@executable_path/../Frameworks"
+        )
+        add_custom_command(TARGET TinyMeshChat POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:TinyMeshChat>/Contents/Frameworks"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:tmc_velopack>"
+                "$<TARGET_BUNDLE_DIR:TinyMeshChat>/Contents/Frameworks/velopack_libc_osx.dylib"
+            COMMENT "Deploying the Velopack runtime into the application bundle"
+            VERBATIM
+        )
+    endif()
+endif()
+
+if(WIN32)
+    target_link_libraries(TinyMeshChat PRIVATE user32)
+elseif(APPLE)
+    target_link_libraries(TinyMeshChat PRIVATE
+        "-framework ApplicationServices"
+        "-framework Carbon"
+    )
+endif()
+
+if(WIN32 AND TMC_DEPLOY_QT_AFTER_BUILD)
+    add_custom_command(TARGET TinyMeshChat POST_BUILD
+        COMMAND Qt6::windeployqt
+            --no-translations
+            --compiler-runtime
+            --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/qml"
+            --dir "$<TARGET_FILE_DIR:TinyMeshChat>"
+            "$<TARGET_FILE:TinyMeshChat>"
+        COMMENT "Deploying the Qt runtime for direct IDE execution"
+        VERBATIM
+    )
+endif()

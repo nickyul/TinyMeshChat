@@ -59,7 +59,7 @@ $deployArguments = @(
     '--no-translations'
     '--compiler-runtime'
     '--qmldir'
-    (Join-Path $root 'qml')
+    (Join-Path $root 'client/qml')
     $exeDestination
 )
 & $deployPath @deployArguments
@@ -75,7 +75,6 @@ Get-ChildItem -LiteralPath $exeDirectory -Filter '*.dll' -File |
 
 $requiredDlls = @(
     'datachannel.dll'
-    'juice.dll'
     'srtp2.dll'
     'libcrypto-3-x64.dll'
     'libssl-3-x64.dll'
@@ -86,6 +85,13 @@ foreach ($dll in $requiredDlls) {
     $dllPath = Join-Path $dist $dll
     if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) {
         throw "Required runtime library is missing from the package: $dll"
+    }
+}
+# Meson library names can carry a lib prefix and an ABI suffix.
+foreach ($library in @('nice', 'glib-2.0', 'gobject-2.0', 'gio-2.0')) {
+    $pattern = '^(lib)?' + [regex]::Escape($library) + '(-[0-9]+)?\.dll$'
+    if (-not (Get-ChildItem -LiteralPath $dist -File | Where-Object Name -Match $pattern)) {
+        throw "Required libnice runtime dependency is missing: $library"
     }
 }
 if ($updaterEnabled) {
@@ -114,6 +120,11 @@ function Invoke-PackagedSmoke {
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.EnvironmentVariables['TMC_DATA_DIR'] = $smokeData
+        # Smoke must resolve dependencies from the package, not the build SDKs.
+        $startInfo.EnvironmentVariables['PATH'] = "$env:SystemRoot/System32;$env:SystemRoot"
+        foreach ($variable in @('QT_PLUGIN_PATH', 'QML_IMPORT_PATH', 'QML2_IMPORT_PATH')) {
+            $startInfo.EnvironmentVariables.Remove($variable)
+        }
         $startInfo.Arguments = ($Arguments | ForEach-Object {
                 '"' + $_.Replace('"', '\"') + '"'
             }) -join ' '
@@ -123,6 +134,8 @@ function Invoke-PackagedSmoke {
         if (-not $process.Start()) {
             throw "Failed to start packaged smoke: $($Arguments -join ' ')"
         }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         if ($WriteConsoleQuit) {
             $process.StandardInput.AutoFlush = $true
             $process.StandardInput.WriteLine('/quit')
@@ -133,8 +146,8 @@ function Invoke-PackagedSmoke {
             $process.Kill()
             throw "Packaged smoke timed out: $($Arguments -join ' ')"
         }
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) {
             throw "Packaged smoke failed with exit code $($process.ExitCode):`n$stdout`n$stderr"
         }
@@ -204,7 +217,7 @@ if ($buildVelopack) {
         --packTitle 'TinyMesh Chat' `
         --packVersion $version `
         --packDir $dist `
-        --icon (Join-Path $root 'resources/icons/tinymesh.ico') `
+        --icon (Join-Path $root 'client/resources/icons/tinymesh.ico') `
         --mainExe TinyMeshChat.exe `
         --runtime win-x64 `
         --channel win-x64 `
