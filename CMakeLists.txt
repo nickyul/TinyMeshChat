@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-set(TMC_APP_VERSION "0.1.1")
+set(TMC_APP_VERSION "0.1.2")
 if(NOT TMC_APP_VERSION MATCHES
    "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")
     message(FATAL_ERROR "TMC_APP_VERSION must be a semantic version")
