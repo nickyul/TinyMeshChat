@@ -228,8 +228,20 @@ QPair<QString, QString> PeerConnection::fingerprints() const {
     const auto local = state_->pc->localDescription();
     const auto remote = state_->pc->remoteDescription();
     if (!local || !remote || !local->fingerprint() || !remote->fingerprint()) return {};
-    const auto text = [](const auto& fp) {
-        return QString::fromStdString(rtc::CertificateFingerprint::AlgorithmIdentifier(fp.algorithm) + ":" + fp.value).toLower();
+    const auto text = [](const rtc::CertificateFingerprint& fp) -> QString {
+        // libdatachannel 0.24.5 does not export CertificateFingerprint's methods
+        // from its Windows DLL. Preserve the SDP identifiers in the auth transcript.
+        using Algorithm = rtc::CertificateFingerprint::Algorithm;
+        QString algorithm;
+        switch (fp.algorithm) {
+        case Algorithm::Sha1: algorithm = QStringLiteral("sha-1"); break;
+        case Algorithm::Sha224: algorithm = QStringLiteral("sha-224"); break;
+        case Algorithm::Sha256: algorithm = QStringLiteral("sha-256"); break;
+        case Algorithm::Sha384: algorithm = QStringLiteral("sha-384"); break;
+        case Algorithm::Sha512: algorithm = QStringLiteral("sha-512"); break;
+        default: return {}; // Unknown algorithms must not produce an auth transcript.
+        }
+        return algorithm + QLatin1Char(':') + QString::fromStdString(fp.value).toLower();
     };
     return {text(*local->fingerprint()), text(*remote->fingerprint())};
 }

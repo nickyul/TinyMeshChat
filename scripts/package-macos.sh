@@ -59,6 +59,13 @@ while IFS= read -r libdir; do
 done < <(find "$build/vcpkg_installed" -type d -path '*/lib' ! -path '*/debug/*' 2>/dev/null)
 "$QT_ROOT/bin/macdeployqt" "$dist/TinyMeshChat.app" "-qmldir=$root/client/qml" "${deploy_args[@]}"
 
+# macdeployqt can pull in SQL drivers through transitive QML dependencies.
+# These optional drivers require external database SDKs absent on user machines;
+# TinyMesh does not use them. Keep SQLite and leave the installed Qt kit intact.
+for driver in qsqlmimer qsqlodbc qsqlpsql; do
+  rm -f "$dist/TinyMeshChat.app/Contents/PlugIns/sqldrivers/lib${driver}.dylib"
+done
+
 if [[ "$updater_enabled" == "1" ]]; then
   velopack_name="velopack_libc_osx.dylib"
   velopack_source="$velopack_root/lib/$velopack_name"
@@ -110,7 +117,7 @@ run_with_timeout 30 env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
   "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --console --display-name "CI Smoke" \
   <<< "/quit"
 run_with_timeout 30 env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
-  -u QT_PLUGIN_PATH -u QML_IMPORT_PATH -u QML2_IMPORT_PATH TMC_DATA_DIR="$smoke_data" QT_QPA_PLATFORM=offscreen \
+  -u QT_PLUGIN_PATH -u QML_IMPORT_PATH -u QML2_IMPORT_PATH TMC_DATA_DIR="$smoke_data" QT_QPA_PLATFORM=cocoa \
   "$dist/TinyMeshChat.app/Contents/MacOS/TinyMeshChat" --qml-smoke --display-name "CI Smoke"
 cleanup_smoke_data
 trap - EXIT
@@ -122,10 +129,22 @@ while IFS= read -r candidate; do
       echo "Packaged Mach-O file is not arm64: $candidate ($architectures)" >&2
       exit 1
     fi
-    # Only Apple system libraries and bundle-relative references are deployable.
-    if otool -L "$candidate" | tail -n +2 | awk '{print $1}' | \
-       grep '^/' | grep -Ev '^(/usr/lib/|/System/Library/)' >/dev/null; then
+    # Inspect dependency load commands, not LC_ID_DYLIB: otool -L also prints
+    # a dylib's own install name, which is not an external dependency.
+    load_commands="$(otool -l "$candidate")"
+    external_dependencies="$(awk '
+      $1 == "cmd" { dependency = ($2 ~ /^LC_(LOAD|LOAD_WEAK|REEXPORT|LOAD_UPWARD|LAZY_LOAD)_DYLIB$/) }
+      dependency && $1 == "name" {
+        path = $0
+        sub(/^[[:space:]]*name[[:space:]]+/, "", path)
+        sub(/[[:space:]]+[(]offset [0-9]+[)]$/, "", path)
+        if (path ~ /^\// && path !~ /^\/usr\/lib\// && path !~ /^\/System\/Library\//)
+          print path
+      }
+    ' <<< "$load_commands")"
+    if [[ -n "$external_dependencies" ]]; then
       echo "Packaged file still references a library outside the bundle: $candidate" >&2
+      printf '%s\n' "$external_dependencies" >&2
       exit 1
     fi
     if [[ "$updater_enabled" == "1" ]] &&
