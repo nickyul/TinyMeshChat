@@ -460,8 +460,7 @@ void SignalingClient::handleResponse(const Envelope& message) {
         }
         if (type == "auth.authenticate" || type == "access.redeem") {
             if (message.body.value("code").toString() == "identity_in_use") {
-                requireAccess("Этот профиль уже подключён к серверу. Отключите другую сессию "
-                              "и подключитесь повторно.");
+                fail();
             } else {
                 requireAccess("Доступ отклонён. Проверьте разрешение или получите новое "
                               "приглашение доступа.");
