@@ -4,8 +4,13 @@ import QtQuick.Controls
 Button {
     id: control
 
-    palette.button: control.palette.highlight
-    palette.buttonText: control.palette.highlightedText
+    AppPalette {
+        id: colors
+    }
+
+    palette.button: colors.accent
+    palette.buttonText: colors.accentText
+
     font.weight: Font.DemiBold
     implicitHeight: 42
 }
