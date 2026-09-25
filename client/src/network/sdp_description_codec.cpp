@@ -27,8 +27,13 @@ constexpr qsizetype MaxCandidates = 256;
 constexpr quint8 CandidateIpv6 = 1 << 0;
 constexpr quint8 CandidateServerReflexive = 1 << 1;
 constexpr quint8 CandidateHasScope = 1 << 2;
+constexpr quint8 CandidateRelayed = 1 << 3;
+
 constexpr quint8 CandidateFlagsMask =
-    CandidateIpv6 | CandidateServerReflexive | CandidateHasScope;
+    CandidateIpv6 |
+    CandidateServerReflexive |
+    CandidateHasScope |
+    CandidateRelayed;
 
 bool writeBytes(QDataStream& stream, const QByteArray& bytes, qsizetype maxBytes) {
     if (bytes.isEmpty() || bytes.size() > maxBytes) {
@@ -146,61 +151,108 @@ QString fingerprintText(const QByteArray& digest) {
 
 bool writeCandidate(QDataStream& stream, const rtc::Candidate& candidate) {
     const auto fields =
-        QString::fromStdString(candidate.candidate()).split(' ', Qt::SkipEmptyParts);
-    if (fields.size() < 8 || !fields[0].startsWith("candidate:") || fields[1] != "1" ||
-        fields[2].compare("UDP", Qt::CaseInsensitive) != 0 || fields[6] != "typ") {
+        QString::fromStdString(candidate.candidate())
+            .split(' ', Qt::SkipEmptyParts);
+
+    if (fields.size() < 8 ||
+        !fields[0].startsWith(QStringLiteral("candidate:")) ||
+        fields[1] != QStringLiteral("1") ||
+        fields[2].compare(QStringLiteral("UDP"), Qt::CaseInsensitive) != 0 ||
+        fields[6] != QStringLiteral("typ")) {
         return false;
     }
 
-    const auto foundation = fields[0].sliced(QString("candidate:").size()).toLatin1();
-    bool priorityOk{};
-    bool portOk{};
+    const auto type = candidate.type();
+    const bool serverReflexive =
+        type == rtc::Candidate::Type::ServerReflexive;
+    const bool relayed =
+        type == rtc::Candidate::Type::Relayed;
+
+    if (type != rtc::Candidate::Type::Host &&
+        !serverReflexive &&
+        !relayed) {
+        return false;
+    }
+
+    const auto expectedType =
+        relayed ? QStringLiteral("relay")
+                : serverReflexive ? QStringLiteral("srflx")
+                                  : QStringLiteral("host");
+
+    if (fields[7] != expectedType) {
+        return false;
+    }
+
+    const auto foundation =
+        fields[0].sliced(QStringLiteral("candidate:").size()).toLatin1();
+
+    bool priorityOk = false;
+    bool portOk = false;
+
     const auto priority = fields[3].toUInt(&priorityOk);
     const auto port = fields[5].toUShort(&portOk);
-    QHostAddress address(fields[4]);
-    const bool ipv6 = address.protocol() == QAbstractSocket::IPv6Protocol;
-    if (foundation.isEmpty() || foundation.size() > MaxFoundationBytes || !priorityOk ||
-        !portOk || port == 0 ||
-        (!ipv6 && address.protocol() != QAbstractSocket::IPv4Protocol)) {
-        return false;
-    }
 
-    bool serverReflexive{};
-    if (fields[7] == "host") {
-        if (fields.size() != 8) {
-            return false;
-        }
-    } else if (fields[7] == "srflx") {
-        serverReflexive = true;
-        if (fields.size() != 12 || fields[8] != "raddr" || fields[9] != "0.0.0.0" ||
-            fields[10] != "rport" || fields[11] != "0") {
-            return false;
-        }
-    } else {
+    QHostAddress address(fields[4]);
+
+    const bool ipv6 =
+        address.protocol() == QAbstractSocket::IPv6Protocol;
+
+    if (foundation.isEmpty() ||
+        foundation.size() > MaxFoundationBytes ||
+        !priorityOk ||
+        !portOk ||
+        port == 0 ||
+        (!ipv6 &&
+         address.protocol() != QAbstractSocket::IPv4Protocol)) {
         return false;
     }
 
     const auto scope = address.scopeId().toUtf8();
+
     if (scope.size() > MaxScopeBytes) {
         return false;
     }
-    quint8 flags = ipv6 ? CandidateIpv6 : 0;
-    flags |= serverReflexive ? CandidateServerReflexive : 0;
-    flags |= scope.isEmpty() ? 0 : CandidateHasScope;
 
-    stream << flags << static_cast<quint8>(foundation.size());
-    stream.writeRawData(foundation.constData(), foundation.size());
-    stream << static_cast<quint32>(priority) << static_cast<quint16>(port);
+    quint8 flags = ipv6 ? CandidateIpv6 : 0;
+
+    if (serverReflexive) {
+        flags |= CandidateServerReflexive;
+    }
+
+    if (relayed) {
+        flags |= CandidateRelayed;
+    }
+
+    if (!scope.isEmpty()) {
+        flags |= CandidateHasScope;
+    }
+
+    stream << flags
+           << static_cast<quint8>(foundation.size());
+
+    stream.writeRawData(
+        foundation.constData(),
+        foundation.size());
+
+    stream << static_cast<quint32>(priority)
+           << static_cast<quint16>(port);
+
     if (ipv6) {
         const auto bytes = address.toIPv6Address();
-        stream.writeRawData(reinterpret_cast<const char*>(bytes.c), 16);
+        stream.writeRawData(
+            reinterpret_cast<const char*>(bytes.c),
+            16);
     } else {
         stream << address.toIPv4Address();
     }
+
     if (!scope.isEmpty()) {
         stream << static_cast<quint8>(scope.size());
-        stream.writeRawData(scope.constData(), scope.size());
+        stream.writeRawData(
+            scope.constData(),
+            scope.size());
     }
+
     return stream.status() == QDataStream::Ok;
 }
 
@@ -208,33 +260,61 @@ Result<rtc::Candidate> readCandidate(QDataStream& stream) {
     quint8 flags{};
     quint8 foundationSize{};
     stream >> flags >> foundationSize;
-    if (stream.status() != QDataStream::Ok || (flags & ~CandidateFlagsMask) != 0 ||
-        foundationSize == 0 || foundationSize > MaxFoundationBytes ||
-        ((flags & CandidateHasScope) != 0 && (flags & CandidateIpv6) == 0)) {
-        return Result<rtc::Candidate>::failure("Invalid compact ICE candidate header");
+
+    const bool serverReflexive =
+        (flags & CandidateServerReflexive) != 0;
+    const bool relayed =
+        (flags & CandidateRelayed) != 0;
+
+    if (stream.status() != QDataStream::Ok ||
+        (flags & ~CandidateFlagsMask) != 0 ||
+        foundationSize == 0 ||
+        foundationSize > MaxFoundationBytes ||
+        ((flags & CandidateHasScope) != 0 &&
+         (flags & CandidateIpv6) == 0) ||
+        (serverReflexive && relayed)) {
+        return Result<rtc::Candidate>::failure(
+            "Invalid compact ICE candidate header");
     }
 
     QByteArray foundation(foundationSize, Qt::Uninitialized);
-    if (stream.readRawData(foundation.data(), foundation.size()) != foundation.size() ||
-        std::any_of(foundation.cbegin(), foundation.cend(), [](char value) {
-            return value <= ' ' || value > '~';
-        })) {
-        return Result<rtc::Candidate>::failure("Invalid compact ICE foundation");
+
+    if (stream.readRawData(
+            foundation.data(),
+            foundation.size()) != foundation.size() ||
+        std::any_of(
+            foundation.cbegin(),
+            foundation.cend(),
+            [](char value) {
+                return value <= ' ' || value > '~';
+            })) {
+        return Result<rtc::Candidate>::failure(
+            "Invalid compact ICE foundation");
     }
 
     quint32 priority{};
     quint16 port{};
+
     stream >> priority >> port;
-    if (stream.status() != QDataStream::Ok || port == 0) {
-        return Result<rtc::Candidate>::failure("Invalid compact ICE endpoint");
+
+    if (stream.status() != QDataStream::Ok ||
+        port == 0) {
+        return Result<rtc::Candidate>::failure(
+            "Invalid compact ICE endpoint");
     }
 
     QHostAddress address;
+
     if ((flags & CandidateIpv6) != 0) {
         Q_IPV6ADDR bytes{};
-        if (stream.readRawData(reinterpret_cast<char*>(bytes.c), 16) != 16) {
-            return Result<rtc::Candidate>::failure("Truncated compact IPv6 candidate");
+
+        if (stream.readRawData(
+                reinterpret_cast<char*>(bytes.c),
+                16) != 16) {
+            return Result<rtc::Candidate>::failure(
+                "Truncated compact IPv6 candidate");
         }
+
         address.setAddress(bytes);
     } else {
         quint32 bytes{};
@@ -245,35 +325,46 @@ Result<rtc::Candidate> readCandidate(QDataStream& stream) {
     if ((flags & CandidateHasScope) != 0) {
         quint8 scopeSize{};
         stream >> scopeSize;
-        if (stream.status() != QDataStream::Ok || scopeSize == 0 ||
+
+        if (stream.status() != QDataStream::Ok ||
+            scopeSize == 0 ||
             scopeSize > MaxScopeBytes) {
-            return Result<rtc::Candidate>::failure("Invalid compact IPv6 scope");
+            return Result<rtc::Candidate>::failure(
+                "Invalid compact IPv6 scope");
         }
+
         QByteArray scope(scopeSize, Qt::Uninitialized);
-        if (stream.readRawData(scope.data(), scope.size()) != scope.size()) {
-            return Result<rtc::Candidate>::failure("Truncated compact IPv6 scope");
+
+        if (stream.readRawData(
+                scope.data(),
+                scope.size()) != scope.size()) {
+            return Result<rtc::Candidate>::failure(
+                "Truncated compact IPv6 scope");
         }
+
         address.setScopeId(QString::fromUtf8(scope));
     }
 
     const auto type =
-        (flags & CandidateServerReflexive) != 0 ? QStringLiteral("srflx")
-                                                : QStringLiteral("host");
-    auto text = QString("candidate:%1 1 UDP %2 %3 %4 typ %5")
-                    .arg(QString::fromLatin1(foundation))
-                    .arg(priority)
-                    .arg(address.toString())
-                    .arg(port)
-                    .arg(type);
-    if ((flags & CandidateServerReflexive) != 0) {
-        text += " raddr 0.0.0.0 rport 0";
-    }
+        relayed ? QStringLiteral("relay")
+                : serverReflexive ? QStringLiteral("srflx")
+                                  : QStringLiteral("host");
+
+    auto text =
+        QString("candidate:%1 1 UDP %2 %3 %4 typ %5")
+            .arg(QString::fromLatin1(foundation))
+            .arg(priority)
+            .arg(address.toString())
+            .arg(port)
+            .arg(type);
 
     try {
-        return Result<rtc::Candidate>::success(rtc::Candidate(text.toStdString(), "0"));
+        return Result<rtc::Candidate>::success(
+            rtc::Candidate(text.toStdString(), "0"));
     } catch (const std::exception& error) {
         return Result<rtc::Candidate>::failure(
-            "Invalid compact ICE candidate: " + QString::fromUtf8(error.what()));
+            "Invalid compact ICE candidate: " +
+            QString::fromUtf8(error.what()));
     }
 }
 
@@ -291,7 +382,7 @@ bool hasExpectedShape(const rtc::Description& description) {
     }
 
     const auto options = description.iceOptions();
-    if (options != std::vector<std::string>{"ice2", "trickle"}) {
+    if (options != std::vector<std::string>{"trickle"}) {
         return false;
     }
 
@@ -393,7 +484,6 @@ Result<QString> SdpDescriptionCodec::unpack(const QByteArray& payload,
                                          ? rtc::Description::Type::Offer
                                          : rtc::Description::Type::Answer;
         rtc::Description description("", descriptionType, *role);
-        description.addIceOption("ice2");
         description.addIceOption("trickle");
         description.setIceAttribute(ufrag.toStdString(), password.toStdString());
         description.setFingerprint(

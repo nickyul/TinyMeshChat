@@ -16,16 +16,62 @@
 
 namespace tmc {
 namespace {
+
 bool validAcquaintance(const PeerIdentity& peer) {
     if (!peer.isValid() || peer.displayName.size() > 128) return false;
     for (const auto c : peer.displayName) if (!c.isPrint()) return false;
     return true;
 }
+
 bool validLegacyAcquaintance(const PeerIdentity& peer) {
     if (!isCanonicalUuid(peer.peerId) || peer.displayName.trimmed().isEmpty() || peer.displayName.size() > 128) return false;
     for (const auto c : peer.displayName) if (!c.isPrint()) return false;
     return true;
 }
+
+Result<void> ensureUserConfig(const QString& path) {
+    if (!QFile::exists(path)) {
+        QFile source(QStringLiteral(":/default-config.json"));
+        if (!source.open(QIODevice::ReadOnly)) {
+            return Result<void>::failure(
+                "Cannot read the default configuration: " + source.errorString());
+        }
+
+        const auto contents = source.readAll();
+
+        QSaveFile target(path);
+        if (!target.open(QIODevice::WriteOnly) ||
+            target.write(contents) != contents.size() ||
+            !target.commit()) {
+            return Result<void>::failure(
+                "Cannot create the user configuration: " + target.errorString());
+        }
+    }
+
+    // Repair installations where config.json was previously copied
+    // from the read-only Qt resource.
+    QFile probe(path);
+    if (probe.open(QIODevice::ReadWrite)) {
+        return Result<void>::success();
+    }
+
+    const auto permissions = QFile::permissions(path);
+    if (!QFile::setPermissions(
+            path,
+            permissions | QFileDevice::WriteOwner | QFileDevice::WriteUser)) {
+        return Result<void>::failure(
+            "Cannot make the user configuration writable: " + path);
+    }
+
+    QFile retry(path);
+    if (!retry.open(QIODevice::ReadWrite)) {
+        return Result<void>::failure(
+            "User configuration is not writable: " + retry.errorString());
+    }
+
+    return Result<void>::success();
+}
+
 } // namespace
 
 ApplicationController::ApplicationController(QObject* p) : QObject(p) {
@@ -58,10 +104,11 @@ Result<InitializationState> ApplicationController::initialize() {
     }
     Logger::instance().setFilePath(dataDir_ + "/debug.log");
     const auto configPath = dataDir_ + "/config.json";
-    if (!QFile::exists(configPath) && !QFile::copy(":/default-config.json", configPath)) {
-        return Result<InitializationState>::failure("Cannot create the user configuration: " +
-                                                    configPath);
+    const auto configReady = ensureUserConfig(configPath);
+    if (!configReady) {
+        return Result<InitializationState>::failure(configReady.error());
     }
+
     auto config = AppConfig::load(configPath);
     if (!config) {
         return Result<InitializationState>::failure(config.error());
