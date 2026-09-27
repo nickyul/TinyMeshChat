@@ -1,5 +1,6 @@
 #include "tmc/sharing/screen_share_service.h"
 #include "tmc/sharing/system_audio_capture.h"
+#include "window_source_filter.h"
 
 #include <QAudioFormat>
 #include <QAudioDevice>
@@ -12,6 +13,7 @@
 #include <QMediaCaptureSession>
 #include <QMediaDevices>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QScreenCapture>
 #include <QSet>
@@ -26,6 +28,7 @@
 #include <QtEndian>
 #include <opus/opus.h>
 #include <array>
+#include <algorithm>
 #include <cstring>
 
 namespace tmc {
@@ -149,10 +152,29 @@ QVariantList ScreenShareService::sources() {
         rows.append(QVariantMap{{"index", state_->sources.size()}, {"title", title}});
         state_->sources.append({title, screen, {}});
     }
-    for (const auto& window : QWindowCapture::capturableWindows()) {
+    const auto windows = QWindowCapture::capturableWindows();
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    const auto applications = applicationWindowTitles();
+#endif
+    QList<State::Source> windowSources;
+    static const QRegularExpression anonymousWindow(QStringLiteral("^windows?\\s+0x[0-9a-f]+$"),
+                                                    QRegularExpression::CaseInsensitiveOption);
+    for (const auto& window : windows) {
         if (!window.isValid() || window.description().trimmed().isEmpty()) continue;
-        rows.append(QVariantMap{{"index", state_->sources.size()}, {"title", window.description()}});
-        state_->sources.append({window.description(), {}, window});
+        auto title = window.description().trimmed();
+        if (anonymousWindow.match(title).hasMatch()) continue;
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+        title = applications.value(window.description());
+        if (title.isEmpty()) continue;
+#endif
+        windowSources.append({title, {}, window});
+    }
+    std::stable_sort(windowSources.begin(), windowSources.end(), [](const auto& a, const auto& b) {
+        return QString::localeAwareCompare(a.title, b.title) < 0;
+    });
+    for (const auto& source : windowSources) {
+        rows.append(QVariantMap{{"index", state_->sources.size()}, {"title", source.title}});
+        state_->sources.append(source);
     }
     return rows;
 }

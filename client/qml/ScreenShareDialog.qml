@@ -29,10 +29,19 @@ Dialog {
             model: control.sources
             textRole: "title"
             valueRole: "index"
+            displayText: currentIndex < 0 ? qsTr("Выберите экран или окно") : currentText
         }
         Button {
             text: qsTr("Обновить список")
-            onClicked: control.sources = control.viewModel.screenSources()
+            onClicked: {
+                control.sources = control.viewModel.screenSources();
+                sourcePicker.currentIndex = -1;
+            }
+        }
+        Label {
+            Layout.fillWidth: true
+            text: qsTr("Не видите нужное окно? Разверните его и обновите список.")
+            wrapMode: Text.WordWrap
         }
         Switch {
             id: systemSound
