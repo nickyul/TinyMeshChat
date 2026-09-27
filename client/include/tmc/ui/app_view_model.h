@@ -98,6 +98,8 @@ public:
     QVariantList fileTransfers() const;
     Q_INVOKABLE void sendFileToRecipients(const QUrl& file, const QStringList& peerIds);
     Q_INVOKABLE void sendFile(const QUrl& file, const QString& peerId = {});
+    Q_INVOKABLE QVariantMap fileSaveSuggestion(const QString& id, const QUrl& folder) const;
+    Q_INVOKABLE void openReceivedFile(const QString& id, bool showFolder = false);
     Q_INVOKABLE void acceptFile(const QString& transferId, const QUrl& destination);
     Q_INVOKABLE void cancelFile(const QString& transferId);
     Q_INVOKABLE void dismissFile(const QString& transferId);

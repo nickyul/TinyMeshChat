@@ -24,6 +24,7 @@ public:
     void removePeer(const QString& peerId);
     void clear();
     QVariantList transfers() const;
+    QString receivedFilePath(const QString& transferId) const;
     bool contains(const QString& transferId) const;
     bool hasActive(const QString& peerId) const;
 signals:

@@ -433,6 +433,11 @@ void FileTransferService::pump() {
     }
 }
 
+QString FileTransferService::receivedFilePath(const QString& id) const {
+    const auto transfer = state_->entries.value(id);
+    return transfer && !transfer->outgoing && transfer->phase == Phase::Complete ? transfer->path : QString{};
+}
+
 QVariantList FileTransferService::transfers() const {
     QVariantList rows;
     for (const auto& id : state_->order) {
@@ -444,7 +449,7 @@ QVariantList FileTransferService::transfers() const {
             {"currentSession", t.currentSession}, {"outgoing", t.outgoing}, {"size", t.size}, {"transferred", t.position},
             {"progress", t.size == 0 ? (t.phase == Phase::Complete ? 1.0 : 0.0) : double(t.position) / double(t.size)},
             {"status", t.error.isEmpty() ? phaseLabel(t.phase, state_->connected.contains(t.peerId)) : t.error},
-            {"canAccept", t.phase == Phase::Incoming}, {"finished", terminal(t.phase)}});
+            {"saved", !t.outgoing && t.phase == Phase::Complete}, {"canAccept", t.phase == Phase::Incoming}, {"finished", terminal(t.phase)}});
     }
     return rows;
 }

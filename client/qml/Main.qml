@@ -125,7 +125,7 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(270, root.width * 0.27)
+        width: collapsed ? 44 : Math.min(270, root.width * 0.27)
     }
 
     StackLayout {

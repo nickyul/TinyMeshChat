@@ -14,7 +14,11 @@ Dialog {
     standardButtons: Dialog.Close
     property string acceptingId: ""
     function saveTransfer(id) {
+        const suggestion = viewModel.fileSaveSuggestion(id, destinationDialog.currentFolder);
+        if (!suggestion.url) return;
         acceptingId = id;
+        destinationDialog.selectedFile = suggestion.url;
+        destinationDialog.defaultSuffix = suggestion.suffix;
         destinationDialog.open();
     }
 

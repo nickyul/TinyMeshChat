@@ -17,6 +17,10 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QStandardPaths>
+#include <QProcess>
 #include <QGuiApplication>
 #include <QVector>
 #include <QUuid>
@@ -1341,6 +1345,42 @@ void AppViewModel::sendFile(const QUrl& file, const QString& peerId) {
     if (!file.isLocalFile()) { reportError("Выберите локальный файл."); return; }
     const auto result = session_->sendFile(file.toLocalFile(), peerId);
     if (!result) reportError(result.error());
+}
+
+QVariantMap AppViewModel::fileSaveSuggestion(const QString& id, const QUrl& folder) const {
+    for (const auto& value : fileTransfers()) {
+        const auto row = value.toMap();
+        if (row.value("id").toString() != id || !row.value("canAccept").toBool()) continue;
+        auto directory = folder.isLocalFile() ? folder.toLocalFile() : QString{};
+        if (directory.isEmpty() || !QFileInfo(directory).isDir())
+            directory = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (directory.isEmpty() || !QFileInfo(directory).isDir()) directory = QDir::homePath();
+        const auto name = row.value("name").toString();
+        return {{"url", QUrl::fromLocalFile(QDir(directory).filePath(name))},
+                {"suffix", QFileInfo(name).suffix()}};
+    }
+    return {};
+}
+
+void AppViewModel::openReceivedFile(const QString& id, bool showFolder) {
+    if (!session_ || (!id.startsWith("mesh:") && !id.startsWith("personal:"))) return;
+    const auto* service = id.startsWith("mesh:") ? session_->fileTransfers() : session_->personalFileTransfers();
+    const auto path = service->receivedFilePath(id.section(':', 1));
+    if (path.isEmpty()) return;
+    const QFileInfo info(path);
+    if (!info.isFile()) { reportError("Файл перемещён или удалён."); return; }
+    bool opened = false;
+    if (!showFolder) opened = QDesktopServices::openUrl(QUrl::fromLocalFile(info.absoluteFilePath()));
+    else {
+#ifdef Q_OS_WIN
+        opened = QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(info.absoluteFilePath())});
+#elif defined(Q_OS_MACOS)
+        opened = QProcess::startDetached("/usr/bin/open", {"-R", info.absoluteFilePath()});
+#else
+        opened = QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+#endif
+    }
+    if (!opened) reportError(showFolder ? "Не удалось открыть папку с файлом." : "Не удалось открыть файл.");
 }
 
 void AppViewModel::acceptFile(const QString& id, const QUrl& destination) {

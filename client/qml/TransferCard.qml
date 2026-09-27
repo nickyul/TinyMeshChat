@@ -32,6 +32,19 @@ Pane {
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }
+        Flow {
+            Layout.fillWidth: true
+            visible: card.transfer.saved === true
+            spacing: 4
+            Button {
+                text: qsTr("Открыть")
+                onClicked: card.viewModel.openReceivedFile(card.transfer.id, false)
+            }
+            Button {
+                text: qsTr("Показать в папке")
+                onClicked: card.viewModel.openReceivedFile(card.transfer.id, true)
+            }
+        }
         RowLayout {
             Button {
                 visible: card.transfer.canAccept

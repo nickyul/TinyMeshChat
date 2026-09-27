@@ -6,16 +6,71 @@ import QtQml.Models
 Pane {
     id: control
     required property var viewModel
+    property bool collapsed: false
+    readonly property bool inConversation: viewModel.meshVisible
+    readonly property var filteredContacts: {
+        const query = searchInput.text.trim().toLocaleLowerCase();
+        return viewModel.acquaintances.filter(peer => peer.displayName.toLocaleLowerCase().includes(query));
+    }
+    onInConversationChanged: collapsed = inConversation
+    Component.onCompleted: collapsed = inConversation
     signal fileRequested(string peerId)
     signal filesDropped(var urls, string peerId)
     AppPalette { id: colors }
-    padding: 12
+    padding: collapsed ? 4 : 12
     background: Rectangle { color: colors.surface; border.color: colors.border }
 
+    ToolButton {
+        visible: control.collapsed
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        width: 36
+        text: "⋯"
+        Accessible.name: qsTr("Показать знакомых")
+        ToolTip.visible: hovered
+        ToolTip.text: Accessible.name
+        onClicked: control.collapsed = false
+    }
+
     ColumnLayout {
+        visible: !control.collapsed
         anchors.fill: parent
         spacing: 12
-        Label { text: qsTr("Знакомые"); font.pixelSize: 22; font.bold: true }
+        RowLayout {
+            Layout.fillWidth: true
+            Label { Layout.fillWidth: true; text: qsTr("Знакомые"); font.pixelSize: 22; font.bold: true }
+            ToolButton {
+                text: "‹"
+                Accessible.name: qsTr("Скрыть знакомых")
+                ToolTip.visible: hovered
+                ToolTip.text: Accessible.name
+                onClicked: control.collapsed = true
+            }
+        }
+        TextField {
+            id: searchInput
+            Layout.fillWidth: true
+            placeholderText: qsTr("Поиск по имени")
+            Accessible.name: placeholderText
+            maximumLength: 128
+            rightPadding: clearSearch.visible ? clearSearch.width + 4 : 8
+            ToolButton {
+                id: clearSearch
+                visible: searchInput.text.length > 0
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: "×"
+                Accessible.name: qsTr("Очистить поиск")
+                onClicked: { searchInput.clear(); searchInput.forceActiveFocus(); }
+            }
+        }
+        Label {
+            Layout.fillWidth: true
+            visible: control.viewModel.acquaintances.length > 0 && control.filteredContacts.length === 0
+            text: qsTr("Никого не нашли. Попробуйте другое имя.")
+            color: colors.textSecondary
+            wrapMode: Text.WordWrap
+        }
         Label {
             Layout.fillWidth: true
             text: qsTr("%1").arg(control.viewModel.signalingStatus)
@@ -32,7 +87,7 @@ Pane {
             Layout.fillHeight: true
             clip: true
             spacing: 8
-            model: control.viewModel.acquaintances
+            model: control.filteredContacts
             ScrollBar.vertical: ScrollBar {}
             delegate: ItemDelegate {
                 id: contact

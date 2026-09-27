@@ -70,6 +70,19 @@ Pane {
                     wrapMode: Text.WordWrap
                     font.pixelSize: 12
                 }
+                Flow {
+                    Layout.fillWidth: true
+                    visible: modelData.saved === true
+                    spacing: 4
+                    Button {
+                        text: qsTr("Открыть")
+                        onClicked: card.viewModel.openReceivedFile(modelData.id, false)
+                    }
+                    Button {
+                        text: qsTr("Показать в папке")
+                        onClicked: card.viewModel.openReceivedFile(modelData.id, true)
+                    }
+                }
                 RowLayout {
                     Button {
                         visible: modelData.canAccept
