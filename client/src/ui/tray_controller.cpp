@@ -21,7 +21,7 @@ TrayController::TrayController(QWindow& window, AppViewModel& viewModel, QObject
 
     auto* openAction = menu_->addAction(tr("Открыть TinyMesh Chat"));
     muteAction_ = menu_->addAction(tr("Выключить микрофон"));
-    leaveMeshAction_ = menu_->addAction(tr("Выйти из mesh"));
+    leaveMeshAction_ = menu_->addAction(tr("Выйти из беседы"));
     menu_->addSeparator();
     auto* quitAction = menu_->addAction(tr("Завершить TinyMesh Chat"));
     trayIcon_->setContextMenu(menu_.get());

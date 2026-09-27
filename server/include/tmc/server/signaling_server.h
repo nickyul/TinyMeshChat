@@ -51,7 +51,7 @@ private:
 
     void acceptPendingConnections();
     void registerClient(QWebSocket* socket);
-    void receive(QWebSocket* socket, const QString& text);
+    void receive(QWebSocket* socket, const QByteArray& bytes);
     bool send(QWebSocket* socket, const signaling_protocol::Envelope& message);
     void deliver(const QVector<Delivery>& deliveries);
     void removeClient(QWebSocket* socket);

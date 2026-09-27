@@ -6,6 +6,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
 
 namespace tmc {
 
@@ -60,6 +61,7 @@ private:
 
     // Current mesh membership and public state.
     QHash<QString, PeerIdentity> peers_;
+    QSet<QString> departedPeers_;
     QString meshId_;
     MeshSessionState state_{MeshSessionState::Disconnected};
     bool joined_{false};

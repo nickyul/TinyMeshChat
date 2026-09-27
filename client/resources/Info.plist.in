@@ -18,17 +18,6 @@
     <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}.signaling</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>tinymesh</string>
-            </array>
-        </dict>
-    </array>
     <key>CFBundleShortVersionString</key>
     <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundleVersion</key>
@@ -37,6 +26,10 @@
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>TinyMesh Chat показывает выбранный экран или окно участникам беседы только после вашего запуска трансляции.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>TinyMesh Chat передаёт системный звук, когда вы включаете звук трансляции.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>TinyMesh Chat использует микрофон только во время прямого голосового звонка.</string>
 </dict>

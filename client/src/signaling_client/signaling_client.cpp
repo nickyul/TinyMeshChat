@@ -157,6 +157,7 @@ bool SignalingClient::validServerUrl(const QUrl& url) {
 }
 
 void SignalingClient::resetSocket() {
+    ++connectionGeneration_;
     maintenanceTimer_.stop();
     pending_.clear();
     turn_ = {};
@@ -267,12 +268,13 @@ bool SignalingClient::connectTo(const QUrl& url) {
 
 void SignalingClient::openSocket() {
     if (!reconnectEnabled_) return;
+    const auto generation = ++connectionGeneration_;
     socket_ = std::make_unique<QWebSocket>();
     socket_->setParent(this);
     socket_->setMaxAllowedIncomingFrameSize(EnvelopeCodec::MaxMessageBytes);
     socket_->setMaxAllowedIncomingMessageSize(EnvelopeCodec::MaxMessageBytes);
-    connect(socket_.get(), &QWebSocket::textMessageReceived, this, &SignalingClient::receive);
-    connect(socket_.get(), &QWebSocket::binaryMessageReceived, this, [this] { fail(); });
+    connect(socket_.get(), &QWebSocket::binaryMessageReceived, this, &SignalingClient::receive);
+    connect(socket_.get(), &QWebSocket::textMessageReceived, this, [this] { fail(); });
     connect(socket_.get(), &QWebSocket::disconnected, this, &SignalingClient::fail);
     connect(socket_.get(), &QWebSocket::errorOccurred, this, [this] { fail(); });
     connect(socket_.get(), &QWebSocket::pong, this, [this](quint64, const QByteArray& payload) {
@@ -284,8 +286,8 @@ void SignalingClient::openSocket() {
     openedAt_ = pingAt_ = clock_.elapsed();
     state_ = State::Connecting;
     maintenanceTimer_.start();
-    // TODO: Handle stop/reconnect from stateChanged before continuing with the socket.
     emit stateChanged();
+    if (generation != connectionGeneration_ || state_ != State::Connecting || !socket_) return;
     socket_->open(url_);
 }
 
@@ -334,16 +336,21 @@ SignalingClient::RequestResult SignalingClient::request(const QString& type, con
         return RequestError::OutgoingQueueFull;
     }
     pending_.insert(id, {type, clock_.elapsed()});
-    if (socket_->sendTextMessage(QString::fromUtf8(*bytes)) < 0) {
-        fail();
+    const auto generation = connectionGeneration_;
+    if (socket_->sendBinaryMessage(*bytes) < 0) {
+        if (generation == connectionGeneration_) fail();
         return RequestError::SendFailed;
     }
+    if (generation != connectionGeneration_ || !socket_) return RequestError::SendFailed;
+    // Exit can be followed immediately by application shutdown. Push the
+    // explicit departure to the socket without waiting for another event turn.
+    if (type == "mesh.leave") socket_->flush();
+    if (generation != connectionGeneration_) return RequestError::SendFailed;
     return id;
 }
 
-void SignalingClient::receive(const QString& text) {
-    // TODO: A signal handler can restart the connection into the same state.
-    const auto decoded = EnvelopeCodec::decode(text.toUtf8());
+void SignalingClient::receive(const QByteArray& bytes) {
+    const auto decoded = EnvelopeCodec::decode(bytes);
     const auto* message = std::get_if<Envelope>(&decoded);
     if (!message || MessageCodec::validateServerMessage(*message)) {
         fail();
@@ -373,6 +380,7 @@ void SignalingClient::receive(const QString& text) {
 }
 
 void SignalingClient::handleChallenge(const Envelope& message) {
+    const auto generation = connectionGeneration_;
     if (state_ != State::Connecting) {
         fail();
         return;
@@ -389,7 +397,7 @@ void SignalingClient::handleChallenge(const Envelope& message) {
         sessionId_, message.body.value("nonce").toString(), authority};
     state_ = State::Authenticating;
     emit stateChanged();
-    if (state_ != State::Authenticating) {
+    if (generation != connectionGeneration_ || state_ != State::Authenticating) {
         return;
     }
 
@@ -490,6 +498,7 @@ void SignalingClient::handleResponse(const Envelope& message) {
 
 void SignalingClient::handleAuthenticationResponse(const QString& requestType,
                                                  const Envelope& message) {
+    const auto generation = connectionGeneration_;
     QJsonObject grant;
     if (requestType == "access.redeem") {
         grant = message.body.value("grant").toObject();
@@ -504,17 +513,17 @@ void SignalingClient::handleAuthenticationResponse(const QString& requestType,
     state_ = State::Ready;
     readyAt_ = clock_.elapsed();
     updateTurnCredentials(message.body);
-    if (state_ != State::Ready) {
+    if (generation != connectionGeneration_ || state_ != State::Ready) {
         return;
     }
     if (requestType == "access.redeem") {
         emit accessGranted(url_.toString(QUrl::FullyEncoded), grant);
     }
-    if (state_ != State::Ready) {
+    if (generation != connectionGeneration_ || state_ != State::Ready) {
         return;
     }
     emit stateChanged();
-    if (state_ == State::Ready) {
+    if (generation == connectionGeneration_ && state_ == State::Ready) {
         emit readyChanged();
     }
 }

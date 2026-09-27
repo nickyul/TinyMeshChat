@@ -16,8 +16,6 @@ ApplicationOptions parseApplicationOptions(int argc, char** argv) {
                 break;
             }
             options.displayName = QString::fromLocal8Bit(argv[++index]);
-        } else if (argument.startsWith("tinymesh://")) {
-            options.appLink = QUrl(argument);
         }
     }
     return options;

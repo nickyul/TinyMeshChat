@@ -10,8 +10,6 @@ namespace tmc::signaling_protocol {
 
 enum class CodecErrorCode {
     MessageTooLarge,
-    InvalidJson,
-    DuplicateKey,
     InvalidEnvelope,
     UnknownField,
     UnsupportedVersion,

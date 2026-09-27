@@ -3,6 +3,9 @@
 #include "tmc/app/application_controller.h"
 #include "tmc/app/negotiation_policy.h"
 #include "tmc/app/voice_session.h"
+#include "tmc/transfers/file_transfer_service.h"
+#include "tmc/app/personal_connections.h"
+#include "tmc/sharing/screen_share_service.h"
 #include "tmc/core/logger.h"
 #include "tmc/core/uuid.h"
 #include "tmc/network/audio_transport_worker.h"
@@ -34,6 +37,7 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     : QObject(parent), app_(app), policy_(policy),
       connections_(std::make_unique<ConnectionManager>(app.config().stunServers, policy)),
       mesh_(policy), voice_(std::make_unique<VoiceSession>(app.config().audio)) {
+    configurePeerServices();
     Q_ASSERT(policy_.isValid());
     qRegisterMetaType<ChatMessage>();
     qRegisterMetaType<ConnectionKind>();
@@ -48,6 +52,10 @@ NetworkSession::NetworkSession(ApplicationController& app, ConnectionPolicy poli
     connectMeshSignals();
     connectVoiceSignals();
     configureKeepalive();
+    reachabilityClock_.start();
+    reachabilityTimer_.setInterval(1000);
+    connect(&reachabilityTimer_, &QTimer::timeout, this, &NetworkSession::maintainPeerReachability);
+    reachabilityTimer_.start();
     connectApplicationSignals();
 }
 
@@ -83,9 +91,9 @@ void NetworkSession::connectConnectionSignals() {
             });
     connect(connections_.get(), &ConnectionManager::attemptFailed, this,
             [this](const PeerIdentity& peer, ConnectionKind kind, const QString&) {
-                if ((isOffer(kind) && !isServerManaged(kind)) ||
-                    (isServerManaged(kind) && mesh_.joined() &&
-                     shouldInitiateNegotiation(app_.identity().peerId, peer.peerId))) {
+                Q_UNUSED(kind);
+                if (mesh_.joined() &&
+                    shouldInitiateNegotiation(app_.identity().peerId, peer.peerId)) {
                     mesh_.scheduleRetry(peer);
                 }
             });
@@ -113,11 +121,13 @@ void NetworkSession::handleLinkOpened(const QString& connectionId, const PeerIde
 
     serverJoinDeadline_.stop();
     mesh_.connectionOpened(remote);
-    if (signaling_) {
-        const auto saved = app_.rememberAcquaintance(remote);
-        if (!saved) emit errorOccurred(saved.error());
-    }
+    notePeerReachable(remote.peerId);
+    files_->setPeerConnected(remote.peerId, true);
+    sharing_->setPeerConnected(remote.peerId, true);
+    const auto saved = app_.rememberAcquaintance(remote);
+    if (!saved) emit errorOccurred(saved.error());
     router_.observeDirect(remote.peerId, connectionId);
+    voice_->setPeerVolume(remote.peerId, app_.peerVolume(remote.peerId));
     Logger::instance().log(QtInfoMsg, "network",
                            "DataChannel opened for " + connectionId.left(8));
 
@@ -160,6 +170,8 @@ void NetworkSession::handleLinkRemoved(const QString& connectionId, const PeerId
 
     const auto replacement = connections_->infoForPeer(remote.peerId);
     if (!remote.peerId.isEmpty() && (!replacement || !replacement->open)) {
+        files_->setPeerConnected(remote.peerId, false);
+        sharing_->setPeerConnected(remote.peerId, false);
         emit peerRttChanged(remote.peerId, -1);
         emit peerChanged(remote.peerId, remote.displayName, false);
         voice_->removePeer(remote.peerId);
@@ -167,6 +179,8 @@ void NetworkSession::handleLinkRemoved(const QString& connectionId, const PeerId
 
     if (wasOpen) {
         emit statusChanged("Участник отключился от прямого P2P-канала.");
+        if (shouldInitiateNegotiation(app_.identity().peerId, remote.peerId))
+            mesh_.scheduleRetry(remote);
     }
     updateMesh();
 }
@@ -264,6 +278,8 @@ void NetworkSession::connectApplicationSignals() {
 }
 
 NetworkSession::~NetworkSession() {
+    sharing_->clear();
+    sharing_.reset();
     if (signaling_) {
         signaling_->disconnect(this);
         signaling_.reset();
@@ -297,6 +313,8 @@ Result<void> NetworkSession::createMesh() {
 }
 
 void NetworkSession::leaveMesh() {
+    if (signalingConnected() && mesh_.joined())
+        (void)signaling_->request("mesh.leave", {{"meshId", mesh_.meshId()}});
     leaveServerRoom();
     if (mesh_.meshId().isEmpty() && connections_->connections().isEmpty()) {
         return;
@@ -472,6 +490,7 @@ void NetworkSession::emitSignaling(const QString& connectionId, const QString& s
         // every established edge is more reliable than trusting one possibly stale route;
         // packet-id deduplication and TTL keep the traffic bounded.
         broadcastService(packet);
+        relayMeshSignaling(packet);
         emit statusChanged(isOffer(connection->kind)
                                ? "Mesh offer отправлен через доступные P2P-каналы."
                                : "Mesh answer отправлен через доступные P2P-каналы.");
@@ -721,6 +740,10 @@ Result<void> NetworkSession::startCall() {
     if (!started) {
         return started;
     }
+    for (const auto& peer : mesh_.peers()) {
+        if (peer.peerId != app_.identity().peerId)
+            voice_->setPeerVolume(peer.peerId, app_.peerVolume(peer.peerId));
+    }
     emit statusChanged("Вы присоединились к голосовому звонку.");
     return Result<void>::success();
 }
@@ -750,6 +773,7 @@ void NetworkSession::setMuted(bool muted) {
 }
 
 void NetworkSession::setDeafened(bool deafened) {
+    sharing_->setAudioMuted(deafened);
     voice_->setDeafened(deafened);
     emit audioStateChanged();
 }
@@ -924,6 +948,11 @@ void NetworkSession::updateAudioTransportGates() {
 }
 
 void NetworkSession::clearSessionData() {
+    meshRelayRequests_.clear();
+    files_->clear();
+    sharing_->clear();
+    lastReachable_.clear();
+    peerSignalingServers_.clear();
     localHelloNonces_.clear();
     remoteHellos_.clear();
     recoveryCapableConnections_.clear();
@@ -940,5 +969,6 @@ void NetworkSession::clearSessionData() {
     audioNegotiations_.clear();
     pendingPings_.clear();
 }
+
 
 } // namespace tmc

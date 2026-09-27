@@ -124,11 +124,23 @@ std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope
     } else if (type == "access.invite" || type == "turn.refresh") {
         valid = body.isEmpty();
     } else if (type == "presence.publish") {
-        valid = fields(body, {"identityId", "displayName", "knownPeers", "busy"}) &&
+        valid = fields(body, {"identityId", "displayName", "knownPeers", "busy", "meshId"}) &&
                 identity(body.value("identityId")) && displayName(body.value("displayName")) &&
-                identifiers(body.value("knownPeers")) && body.value("busy").isBool();
+                identifiers(body.value("knownPeers")) && body.value("busy").isBool() &&
+                body.value("meshId").isString() && (body.value("meshId").toString().isEmpty() || uuid(body.value("meshId")));
         for (const auto& peer : body.value("knownPeers").toArray())
             if (peer == body.value("identityId")) valid = false;
+    } else if (type == "mesh.leave") {
+        valid = fields(body, {"meshId"}) && uuid(body.value("meshId"));
+    } else if (type == "direct.send") {
+        valid = fields(body, {"identityId", "connectionId", "kind", "sdp"}) &&
+                identity(body.value("identityId")) && uuid(body.value("connectionId")) &&
+                (body.value("kind").toString() == "offer" || body.value("kind").toString() == "answer") &&
+                body.value("sdp").isString() && !body.value("sdp").toString().isEmpty() &&
+                body.value("sdp").toString().toUtf8().size() <= MaxSignalBytes;
+    } else if (type == "mesh.relay") {
+        valid = fields(body, {"meshId", "identityId", "payload"}) && uuid(body.value("meshId")) &&
+                identity(body.value("identityId")) && base64(body.value("payload"), MaxSignalBytes);
     } else if (type == "contact.invite") {
         valid = fields(body, {"toIdentityId", "roomId", "meshId"}) &&
                 identity(body.value("toIdentityId")) && uuid(body.value("roomId")) && uuid(body.value("meshId"));
@@ -166,7 +178,7 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
     if (type == "error") {
         return errorBody(body) ? std::nullopt : std::optional<CodecError>{invalidBody()};
     }
-    const bool event = type == "auth.challenge" || type == "peer.joined" ||
+    const bool event = type == "mesh.departed" || type == "direct.received" || type == "mesh.received" || type == "auth.challenge" || type == "peer.joined" ||
                        type == "peer.left" || type == "signal.received" ||
                        type == "presence.snapshot" || type == "contact.invitation" ||
                        type == "contact.accepted" || type == "contact.result" || type == "contact.closed";
@@ -252,7 +264,14 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
         valid = valid && peers.size() <= MaxRoomPeers;
     } else if (type == "room.left") {
         valid = fields(body, {"roomId"}) && uuid(body.value("roomId"));
-    } else if (type == "signal.accepted") {
+    } else if (type == "mesh.departed") {
+        valid = fields(body, {"meshId", "identityId"}) && uuid(body.value("meshId")) && identity(body.value("identityId"));
+    } else if (type == "direct.received") {
+        return validateRequest({envelope.version, "direct.send", "validate", body});
+    } else if (type == "mesh.received") {
+        valid = fields(body, {"meshId", "identityId", "payload"}) && uuid(body.value("meshId")) &&
+                identity(body.value("identityId")) && base64(body.value("payload"), MaxSignalBytes);
+    } else if (type == "signal.accepted" || type == "mesh.relayed" || type == "direct.accepted" || type == "mesh.left") {
         valid = body.isEmpty();
     } else if (type == "peer.joined") {
         valid = fields(body, {"roomId", "peerId"}) &&
@@ -289,6 +308,9 @@ bool MessageCodec::isResponseFor(const QString& requestType, const QString& resp
         {"room.join", "room.joined"},
         {"room.leave", "room.left"},
         {"signal.send", "signal.accepted"},
+        {"mesh.relay", "mesh.relayed"},
+        {"direct.send", "direct.accepted"},
+        {"mesh.leave", "mesh.left"},
     };
 
     for (const auto& pair : pairs) {

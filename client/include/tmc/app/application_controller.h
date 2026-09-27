@@ -6,6 +6,7 @@
 
 #include <QObject>
 #include <QList>
+#include <QHash>
 #include "tmc/security/security.h"
 
 namespace tmc {
@@ -32,6 +33,8 @@ public:
     QJsonObject serverAccess() const;
     Result<void> saveServerAccess(const QString& url, const QJsonObject& grant);
     Result<void> rememberAcquaintance(const PeerIdentity& peer);
+    int peerVolume(const QString& peerId) const;
+    Result<void> savePeerVolume(const QString& peerId, int percent);
 
     Result<void> updateSignalingServer(const QString& url);
     Result<void> updateStunServers(const QStringList& servers);
@@ -45,10 +48,13 @@ signals:
     void audioPreferencesChanged(tmc::AudioPreferences preferences);
 
 private:
+    Result<void> saveAcquaintances(const QList<PeerIdentity>& peers,
+                                  const QHash<QString, int>& volumes) const;
     QString dataDir_;
     QString identityPath_;
     PeerIdentity identity_;
     QList<PeerIdentity> acquaintances_;
+    QHash<QString, int> peerVolumes_;
     std::shared_ptr<security::SigningKey> signingKey_;
     QJsonObject serverAccess_;
     AppConfig config_;

@@ -42,6 +42,7 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         profile.identityId = identity;
         profile.displayName = body.value("displayName").toString();
         profile.busy = body.value("busy").toBool();
+        profile.meshId = body.value("meshId").toString();
         profile.known.clear();
         for (const auto& item : body.value("knownPeers").toArray()) profile.known.insert(item.toString());
         sessionsByIdentity_.insert(identity, sessionId);
@@ -51,6 +52,35 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         return deliveries;
     }
     if (!profiles_.contains(sessionId)) return fail("presence_required");
+    if (request.type == "mesh.leave") {
+        auto& profile = profiles_[sessionId];
+        const auto meshId = body.value("meshId").toString();
+        if (profile.meshId != meshId) return fail("not_in_mesh");
+        profile.meshId.clear();
+        auto deliveries = QVector<Delivery>{reply("mesh.left")};
+        for (auto peer = profiles_.cbegin(); peer != profiles_.cend(); ++peer) {
+            if (peer.key() != sessionId && peer->meshId == meshId)
+                deliveries.append({peer.key(), event("mesh.departed", {{"meshId", meshId}, {"identityId", profile.identityId}})});
+        }
+        return deliveries;
+    }
+    if (request.type == "direct.send") {
+        const auto target = sessionsByIdentity_.value(body.value("identityId").toString());
+        if (!mutual(sessionId, target)) return fail("recipient_unavailable");
+        auto forwarded = body;
+        forwarded.insert("identityId", profiles_.value(sessionId).identityId);
+        return {{target, event("direct.received", forwarded)}, reply("direct.accepted")};
+    }
+    if (request.type == "mesh.relay") {
+        const auto target = sessionsByIdentity_.value(body.value("identityId").toString());
+        const auto meshId = body.value("meshId").toString();
+        if (profiles_.value(sessionId).meshId != meshId) return fail("not_in_mesh");
+        if (target.isEmpty() || target == sessionId || !profiles_.contains(target)) return fail("recipient_unavailable");
+        if (profiles_.value(target).meshId != meshId) return fail("recipient_left");
+        return {{target, event("mesh.received", {{"meshId", meshId},
+                    {"identityId", profiles_.value(sessionId).identityId}, {"payload", body.value("payload")}})},
+                reply("mesh.relayed")};
+    }
     if (request.type == "contact.invite") {
         const auto identity = body.value("toIdentityId").toString();
         const auto target = sessionsByIdentity_.value(identity);

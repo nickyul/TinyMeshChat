@@ -5,7 +5,6 @@
     <file alias="icons/tray.png">icons/tray.png</file>
     <file alias="icons/tray@2x.png">icons/tray@2x.png</file>
     <file alias="qml/AppPalette.qml">../qml/AppPalette.qml</file>
-    <file alias="qml/AppLinkSettingsDialog.qml">../qml/AppLinkSettingsDialog.qml</file>
     <file alias="qml/AudioSettingsDialog.qml">../qml/AudioSettingsDialog.qml</file>
     <file alias="qml/DiagnosticsDialog.qml">../qml/DiagnosticsDialog.qml</file>
     <file alias="qml/Main.qml">../qml/Main.qml</file>
@@ -13,6 +12,8 @@
     <file alias="qml/SignalingOutputDialog.qml">../qml/SignalingOutputDialog.qml</file>
     <file alias="qml/SignalingSettingsDialog.qml">../qml/SignalingSettingsDialog.qml</file>
     <file alias="qml/ServerAccessDialog.qml">../qml/ServerAccessDialog.qml</file>
-    <file alias="qml/AcquaintancesDialog.qml">../qml/AcquaintancesDialog.qml</file>
+    <file alias="qml/AcquaintancesPanel.qml">../qml/AcquaintancesPanel.qml</file>
+    <file alias="qml/FileTransfersDialog.qml">../qml/FileTransfersDialog.qml</file>
+    <file alias="qml/ScreenShareDialog.qml">../qml/ScreenShareDialog.qml</file>
   </qresource>
 </RCC>

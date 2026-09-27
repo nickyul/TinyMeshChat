@@ -2,7 +2,7 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/update_service.h"
-#include "tmc/ui/app_link_controller.h"
+#include "tmc/ui/application_instance.h"
 #include "tmc/ui/app_view_model.h"
 #include "tmc/ui/tray_controller.h"
 
@@ -39,8 +39,8 @@ int GuiRuntime::run() {
         return 2;
     }
 
-    appLinks_ = std::make_unique<AppLinkController>();
-    const auto instance = appLinks_->startPrimary(options_.appLink);
+    instance_ = std::make_unique<ApplicationInstance>();
+    const auto instance = instance_->startPrimary();
     if (!instance) {
         fprintf(stderr, "%s\n", instance.error().toUtf8().constData());
         return 1;
@@ -67,8 +67,12 @@ int GuiRuntime::run() {
     }
 
     updates_ = std::make_unique<UpdateService>();
-    viewModel_ = std::make_unique<AppViewModel>(*controller_, *appLinks_, *updates_,
+    viewModel_ = std::make_unique<AppViewModel>(*controller_, *updates_,
                                                 identityRequired);
+    QObject::connect(application_.get(), &QCoreApplication::aboutToQuit, viewModel_.get(),
+                     [this] {
+                         if (viewModel_->meshVisible()) viewModel_->leaveMesh();
+                     });
     engine_ = std::make_unique<QQmlApplicationEngine>();
     engine_->rootContext()->setContextProperty("appViewModel", viewModel_.get());
     engine_->rootContext()->setContextProperty("qmlSmoke", options_.qmlSmoke);
@@ -77,7 +81,7 @@ int GuiRuntime::run() {
         return 1;
     }
 
-    wireAppLinks();
+    wireActivation();
     QObject::connect(updates_.get(), &UpdateService::restartRequested, application_.get(),
                      [this] {
                          if (tray_) {
@@ -89,11 +93,6 @@ int GuiRuntime::run() {
                              QCoreApplication::quit();
                          }
                      });
-    if (options_.appLink.isValid()) {
-        QTimer::singleShot(0, viewModel_.get(), [this] {
-            viewModel_->importSignalingText(options_.appLink.toString(QUrl::FullyEncoded));
-        });
-    }
     if (options_.qmlSmoke) {
         if (!identityRequired) {
             viewModel_->createMesh();
@@ -125,13 +124,8 @@ void GuiRuntime::bringMainWindowToFront() {
     }
 }
 
-void GuiRuntime::wireAppLinks() {
-    QObject::connect(appLinks_.get(), &AppLinkController::urlReceived, engine_.get(),
-                      [this](const QUrl& url) {
-                          bringMainWindowToFront();
-                          viewModel_->importSignalingText(url.toString(QUrl::FullyEncoded));
-                      });
-    QObject::connect(appLinks_.get(), &AppLinkController::activationRequested, engine_.get(),
+void GuiRuntime::wireActivation() {
+    QObject::connect(instance_.get(), &ApplicationInstance::activationRequested, engine_.get(),
                      [this] { bringMainWindowToFront(); });
 }
 

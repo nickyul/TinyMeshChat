@@ -77,7 +77,7 @@ Dialog {
             Label {
                 Layout.fillWidth: true
                 visible: !control.editable || (accessText.text.trim().length > 0 && preview.text.length === 0)
-                text: !control.editable ? qsTr("Выйдите из mesh для изменения доступа.")
+                text: !control.editable ? qsTr("Выйдите из беседы для изменения доступа.")
                     : qsTr("Проверьте ссылку, адрес сервера и соответствие разрешения вашему публичному ключу.")
                 wrapMode: Text.WordWrap
             }
@@ -92,7 +92,7 @@ Dialog {
             Rectangle { Layout.fillWidth: true; height: 1; color: control.palette.mid }
             Label {
                 Layout.fillWidth: true
-                text: qsTr("Выдать другому пользователю постоянный доступ к этому серверу, включая право приглашать других. Это не добавит его в знакомые или в mesh. Ссылка одноразовая, действует 10 минут и пока вы подключены к серверу.")
+                text: qsTr("Выдать другому пользователю постоянный доступ к этому серверу, включая право приглашать других. Это не добавит его в знакомые или в беседу. Ссылка одноразовая, действует 10 минут и пока вы подключены к серверу.")
                 wrapMode: Text.WordWrap
             }
             Button {

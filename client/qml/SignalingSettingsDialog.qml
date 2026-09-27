@@ -6,7 +6,7 @@ Dialog {
     id: control
     required property var viewModel
     readonly property bool editable: !viewModel.meshVisible && !viewModel.connecting && !viewModel.serverBusy
-    title: qsTr("Сервер сигналинга")
+    title: qsTr("Сервер подключения")
     modal: true
     anchors.centerIn: parent
     width: Math.min(620, parent.width - 48)
@@ -40,7 +40,7 @@ Dialog {
             Layout.fillWidth: true
             text: control.editable
                 ? qsTr("Сервер помогает установить соединение. Сообщения и голос передаются между участниками по WebRTC. Ручные приглашения доступны без сервера.")
-                : qsTr("При обрыве подключение восстанавливается автоматически. Для изменения адреса выйдите из mesh. Ручные приглашения доступны и без сервера.")
+                : qsTr("При обрыве подключение восстанавливается автоматически. Для изменения адреса выйдите из беседы. Ручные приглашения доступны и без сервера.")
             wrapMode: Text.WordWrap
         }
         RowLayout {

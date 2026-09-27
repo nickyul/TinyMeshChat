@@ -2,6 +2,8 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/core/limits.h"
+#include "tmc/protocol/packet_codec.h"
+#include "tmc/app/personal_connections.h"
 #include "tmc/core/uuid.h"
 #include "tmc/signaling_client/signaling_client.h"
 #include "tmc/signaling_client/access_invitation.h"
@@ -41,6 +43,7 @@ void NetworkSession::initializeSignalingClient() {
         for (const auto& url : credentials.urls) {
             servers.append({url, credentials.username, credentials.password});
         }
+        personal_->setTurnServers(servers, credentials.expiresInSeconds);
         connections_->setTurnServers(std::move(servers), credentials.expiresInSeconds);
     });
     connect(signaling_.get(), &SignalingClient::accessRequired, this, &NetworkSession::errorOccurred);
@@ -69,12 +72,14 @@ void NetworkSession::initializeSignalingClient() {
     connect(signaling_.get(), &SignalingClient::connectionLost, this, [this] {
         const bool affected = serverMesh_;
         connections_->setTurnServers({}, 0);
+        personal_->setTurnServers({}, 0);
         resetPresence();
         serverRoomId_.clear();
         serverPeerId_.clear();
         serverPeers_.clear();
         serverBootstrapAttempts_.clear();
         serverSignalRequests_.clear();
+        meshRelayRequests_.clear();
         serverOperation_.clear();
         serverInvitationRequested_ = false;
         serverInvitationRequestId_.clear();
@@ -104,6 +109,14 @@ void NetworkSession::initializeSignalingClient() {
     });
     connect(signaling_.get(), &SignalingClient::requestFailed, this,
             [this](const QString& requestId, const QString& type, const QString& code) {
+                // A peer may still be reconnecting or publishing presence. The mesh
+                // retry scheduler owns the next attempt; this is not a UI error.
+                if (type == "mesh.relay") {
+                    const auto peer = meshRelayRequests_.take(requestId);
+                    if (code == "recipient_left" && !peer.isEmpty()) removeMeshPeer(peer);
+                    return;
+                }
+                if (type == "direct.send" || type == "mesh.leave") return;
                 if (type == "access.invite") {
                     emit errorOccurred("Не удалось создать приглашение доступа. Попробуйте позже.");
                     return;
@@ -234,6 +247,8 @@ void NetworkSession::submitServerJoin() {
 }
 
 void NetworkSession::handleServerResponse(const QString& type, const Envelope& response) {
+    if (type == "mesh.relay") { meshRelayRequests_.remove(*response.requestId); return; }
+    if (type == "mesh.leave" || type == "direct.send") return;
     if (type == "access.invite") {
         const auto link = encodeAccessInvitation({signaling_->url(), response.body.value("authority").toString(),
                                                    response.body.value("token").toString()});
@@ -297,6 +312,21 @@ void NetworkSession::handleServerResponse(const QString& type, const Envelope& r
 }
 
 void NetworkSession::handleServerEvent(const Envelope& event) {
+    if (event.type == "mesh.departed") {
+        if (mesh_.joined() && event.body.value("meshId").toString() == mesh_.meshId())
+            removeMeshPeer(event.body.value("identityId").toString());
+        return;
+    }
+    if (event.type == "direct.received") {
+        const auto& body = event.body;
+        personal_->receiveSignal(body.value("identityId").toString(), body.value("connectionId").toString(),
+            body.value("kind").toString(), body.value("sdp").toString());
+        return;
+    }
+    if (event.type == "mesh.received") {
+        receiveMeshSignaling(event);
+        return;
+    }
     if (handlePresenceEvent(event)) return;
     if (!serverMesh_ || serverRoomId_.isEmpty() ||
         event.body.value("roomId").toString() != serverRoomId_) {
@@ -316,6 +346,33 @@ void NetworkSession::handleServerEvent(const Envelope& event) {
             handleServerPayload(sender, event.body.value("payload").toString());
         }
     }
+}
+
+bool NetworkSession::relayMeshSignaling(const Packet& packet) {
+    if (!signalingConnected() || !mesh_.joined() || mesh_.peer(packet.targetId).peerId.isEmpty()) return false;
+    const auto encoded = PacketCodec::encode(packet);
+    if (!encoded || encoded.value().size() > signaling_protocol::MaxSignalBytes) return false;
+    const auto result = signaling_->request("mesh.relay", {{"meshId", mesh_.meshId()},
+        {"identityId", packet.targetId}, {"payload", QString::fromLatin1(encoded.value().toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+    if (const auto* requestId = std::get_if<QString>(&result)) {
+        meshRelayRequests_.insert(*requestId, packet.targetId);
+        return true;
+    }
+    return false;
+}
+
+void NetworkSession::receiveMeshSignaling(const Envelope& event) {
+    const auto sender = event.body.value("identityId").toString();
+    if (!mesh_.joined() || event.body.value("meshId").toString() != mesh_.meshId() ||
+        sender == app_.identity().peerId || mesh_.peer(sender).peerId.isEmpty()) return;
+    const auto bytes = QByteArray::fromBase64(event.body.value("payload").toString().toLatin1(),
+        QByteArray::Base64UrlEncoding | QByteArray::AbortOnBase64DecodingErrors);
+    const auto decoded = PacketCodec::decode(bytes, mesh_.meshId());
+    if (!decoded || decoded.value().senderId != sender || decoded.value().targetId != app_.identity().peerId) return;
+    peerSignalingServers_.insert(sender, signaling_->url().toString(QUrl::FullyEncoded));
+    if (decoded.value().type == PacketType::LinkOffer) handleLinkOffer({}, decoded.value());
+    else if (decoded.value().type == PacketType::LinkAnswer) handleLinkAnswer({}, decoded.value());
 }
 
 void NetworkSession::continueServerBootstrap() {

@@ -10,13 +10,15 @@
 #include <QUrl>
 #include <QVariantMap>
 #include <QVariantList>
+#include <QPointer>
 
 #include <memory>
+
+class QVideoSink;
 
 namespace tmc {
 
 class ApplicationController;
-class AppLinkController;
 class NetworkSession;
 class UpdateService;
 class MessagesModel;
@@ -46,6 +48,11 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool serverBusy READ serverBusy NOTIFY signalingServerChanged)
     Q_PROPERTY(bool serverMesh READ serverMesh NOTIFY signalingServerChanged)
     Q_PROPERTY(QVariantList acquaintances READ acquaintances NOTIFY acquaintancesChanged)
+    Q_PROPERTY(QVariantList fileTransfers READ fileTransfers NOTIFY fileTransfersChanged)
+    Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY screenShareChanged)
+    Q_PROPERTY(bool viewingScreen READ viewingScreen NOTIFY screenShareChanged)
+    Q_PROPERTY(QString screenShareTitle READ screenShareTitle NOTIFY screenShareChanged)
+    Q_PROPERTY(bool systemAudioSupported READ systemAudioSupported CONSTANT)
 
     // Audio properties
     Q_PROPERTY(QStringList captureDevices READ captureDevices NOTIFY audioDevicesChanged)
@@ -72,7 +79,6 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool deafened READ deafened NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool microphoneTest READ microphoneTest NOTIFY audioSettingsChanged)
     Q_PROPERTY(double microphoneLevel READ microphoneLevel NOTIFY microphoneLevelChanged)
-    Q_PROPERTY(bool appLinksRegistered READ appLinksRegistered NOTIFY appLinksRegisteredChanged)
     Q_PROPERTY(QString updateState READ updateState NOTIFY updateStateChanged)
     Q_PROPERTY(QString updateVersion READ updateVersion NOTIFY updateStateChanged)
     Q_PROPERTY(QString updateReleaseNotes READ updateReleaseNotes NOTIFY updateStateChanged)
@@ -82,7 +88,20 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(QAbstractItemModel* peers READ peers CONSTANT)
 
 public:
-    AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
+    QVariantList fileTransfers() const;
+    Q_INVOKABLE void sendFile(const QUrl& file, const QString& peerId = {});
+    Q_INVOKABLE void acceptFile(const QString& transferId, const QUrl& destination);
+    Q_INVOKABLE void cancelFile(const QString& transferId);
+    Q_INVOKABLE void dismissFile(const QString& transferId);
+    bool sharingScreen() const;
+    bool viewingScreen() const;
+    QString screenShareTitle() const;
+    bool systemAudioSupported() const;
+    Q_INVOKABLE QVariantList screenSources();
+    Q_INVOKABLE void startScreenShare(int sourceIndex, bool systemAudio);
+    Q_INVOKABLE void stopScreenShare();
+    Q_INVOKABLE void setScreenVideoSink(QObject* sink);
+    AppViewModel(ApplicationController& controller,
                  UpdateService& updates,
                  bool identityRequired, QObject* parent = nullptr);
     ~AppViewModel() override;
@@ -131,7 +150,6 @@ public:
     bool deafened() const;
     bool microphoneTest() const;
     double microphoneLevel() const;
-    bool appLinksRegistered() const;
     QString updateState() const;
     QString updateVersion() const;
     QString updateReleaseNotes() const;
@@ -172,8 +190,6 @@ public:
     Q_INVOKABLE void beginPttBindingCapture();
     Q_INVOKABLE void updateAudioPreferences(const QVariantMap& settings);
     Q_INVOKABLE void setPeerVolume(const QString& peerId, int percent);
-    Q_INVOKABLE void registerAppLinks();
-    Q_INVOKABLE void unregisterAppLinks();
     Q_INVOKABLE void checkForUpdates();
     Q_INVOKABLE void downloadUpdate();
     Q_INVOKABLE void installUpdate();
@@ -182,6 +198,9 @@ public:
     void checkForUpdatesAutomatically();
 
 signals:
+    void fileTransfersChanged();
+    void fileOffered();
+    void screenShareChanged();
     void identityRequiredChanged();
     void displayNameChanged();
     void statusChanged();
@@ -203,14 +222,14 @@ signals:
     void pttPressedChanged();
     void pttBindingChanged();
     void talkingStateChanged();
-    void appLinksRegisteredChanged();
     void updateStateChanged();
     void updateProgressChanged();
     void updatePromptRequested();
     void errorRequested(QString message);
-    void signalingRequested(QString kind, QString text, QString link);
+    void signalingRequested(QString kind, QString text);
 
 private:
+    QPointer<QVideoSink> screenVideoSink_;
     void initializeSession();
     void setMeshPeerCounts(int connected, int expected);
     void setStatus(const QString& status);
@@ -222,7 +241,6 @@ private:
     void setPttPressed(bool pressed);
 
     ApplicationController& controller_;
-    AppLinkController& appLinks_;
     UpdateService& updates_;
     std::unique_ptr<NetworkSession> session_;
     std::unique_ptr<MessagesModel> messages_;

@@ -44,7 +44,7 @@ void NetworkSession::publishPresence() {
     QJsonArray known;
     for (const auto& peer : app_.acquaintances()) if (security::validKey(peer.peerId)) known.append(peer.peerId);
     const QJsonObject body{{"identityId", app_.identity().peerId}, {"displayName", app_.identity().displayName},
-        {"knownPeers", known}, {"busy", !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()}};
+        {"knownPeers", known}, {"meshId", mesh_.joined() ? mesh_.meshId() : QString{}}, {"busy", !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()}};
     if (body == lastPresence_) return;
     const auto result = signaling_->request("presence.publish", body);
     if (std::holds_alternative<QString>(result)) lastPresence_ = body;

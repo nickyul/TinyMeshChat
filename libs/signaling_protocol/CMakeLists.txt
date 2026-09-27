@@ -1,4 +1,8 @@
+find_package(Protobuf CONFIG REQUIRED)
 add_library(tmc_signaling_protocol STATIC)
+protobuf_generate(TARGET tmc_signaling_protocol LANGUAGE cpp
+    PROTOS "${CMAKE_CURRENT_SOURCE_DIR}/proto/signaling.proto")
+target_include_directories(tmc_signaling_protocol PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_sources(tmc_signaling_protocol
     PRIVATE
         src/turn_credentials.cpp
@@ -17,5 +21,5 @@ target_sources(tmc_signaling_protocol
 )
 target_link_libraries(tmc_signaling_protocol
     PUBLIC Qt6::Core
-    PRIVATE tmc_security
+    PRIVATE tmc_security protobuf::libprotobuf
 )

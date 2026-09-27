@@ -41,6 +41,8 @@ struct PeerConnection::State {
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> controlDc;
     std::shared_ptr<rtc::DataChannel> chatDc;
+    std::shared_ptr<rtc::DataChannel> transferDc;
+    std::shared_ptr<rtc::DataChannel> streamDc;
     std::shared_ptr<rtc::Track> audioTrack;
     std::shared_ptr<AudioTransportEndpoint> audioEndpoint{
         std::make_shared<AudioTransportEndpoint>()};
@@ -443,6 +445,10 @@ PeerConnection::PeerConnection(const QStringList& stunServers, const QList<Relay
                         self->configureControlChannel(dc);
                     } else if (dc->label() == "tiny-mesh-chat") {
                         self->configureChatChannel(dc);
+                    } else if (dc->label() == "tiny-mesh-transfer") {
+                        self->configureTransferChannel(dc);
+                    } else if (dc->label() == "tiny-mesh-stream") {
+                        self->configureStreamChannel(dc);
                     } else {
                         emit self->errorOccurred("Unknown DataChannel received: " +
                                                  QString::fromStdString(dc->label()));
@@ -464,6 +470,8 @@ PeerConnection::~PeerConnection() {
         if (s->chatDc) {
             s->chatDc->close();
         }
+        if (s->transferDc) s->transferDc->close();
+        if (s->streamDc) s->streamDc->close();
         if (s->controlDc) {
             s->controlDc->close();
         }
@@ -481,6 +489,54 @@ void PeerConnection::configureControlChannel(const std::shared_ptr<rtc::DataChan
 void PeerConnection::configureChatChannel(const std::shared_ptr<rtc::DataChannel>& dc) {
     state_->chatDc = dc;
     configureTextChannel(dc, TextChannel::Chat);
+}
+
+void PeerConnection::configureTransferChannel(const std::shared_ptr<rtc::DataChannel>& dc) {
+    if (state_->transferDc) { dc->close(); return; }
+    state_->transferDc = dc;
+    QPointer<PeerConnection> self(this);
+    const auto queued = std::make_shared<std::atomic<size_t>>(0);
+    const auto closed = [self] {
+        if (self) QMetaObject::invokeMethod(self, [self] {
+            if (self) emit self->transferChannelClosed();
+        }, Qt::QueuedConnection);
+    };
+    dc->onClosed(closed);
+    dc->onError([closed](const std::string&) { closed(); });
+    std::weak_ptr<rtc::DataChannel> weakChannel = dc;
+    dc->onMessage([self, queued, weakChannel](std::variant<rtc::binary, rtc::string> message) {
+        const auto* binary = std::get_if<rtc::binary>(&message);
+        if (!self || !binary || binary->size() > 64 * 1024) return;
+        const auto size = binary->size();
+        if (queued->fetch_add(size) + size > 1024 * 1024) {
+            queued->fetch_sub(size);
+            if (const auto channel = weakChannel.lock()) channel->close();
+            return;
+        }
+        QByteArray bytes(reinterpret_cast<const char*>(binary->data()), static_cast<qsizetype>(size));
+        QMetaObject::invokeMethod(self, [self, queued, bytes = std::move(bytes), size] {
+            queued->fetch_sub(size);
+            if (self) emit self->transferReceived(bytes);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void PeerConnection::configureStreamChannel(const std::shared_ptr<rtc::DataChannel>& dc) {
+    if (state_->streamDc) { dc->close(); return; }
+    state_->streamDc = dc;
+    QPointer<PeerConnection> self(this);
+    const auto queued = std::make_shared<std::atomic<size_t>>(0);
+    dc->onMessage([self, queued](std::variant<rtc::binary, rtc::string> message) {
+        const auto* binary = std::get_if<rtc::binary>(&message);
+        if (!self || !binary || binary->size() > 16 * 1024) return;
+        const auto size = binary->size();
+        if (queued->fetch_add(size) + size > 1024 * 1024) { queued->fetch_sub(size); return; }
+        QByteArray bytes(reinterpret_cast<const char*>(binary->data()), static_cast<qsizetype>(size));
+        QMetaObject::invokeMethod(self, [self, queued, bytes = std::move(bytes), size] {
+            queued->fetch_sub(size);
+            if (self) emit self->streamReceived(bytes);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void PeerConnection::configureTextChannel(const std::shared_ptr<rtc::DataChannel>& dc,
@@ -634,6 +690,14 @@ void PeerConnection::createOffer() {
     rtc::DataChannelInit chatInit;
     chatInit.protocol = "application/tinymesh-chat+json;v=0";
     configureChatChannel(state_->pc->createDataChannel("tiny-mesh-chat", chatInit));
+    rtc::DataChannelInit transferInit;
+    transferInit.protocol = "application/tinymesh-file;v=1";
+    configureTransferChannel(state_->pc->createDataChannel("tiny-mesh-transfer", transferInit));
+    rtc::DataChannelInit streamInit;
+    streamInit.protocol = "application/tinymesh-stream;v=1";
+    streamInit.reliability.unordered = true;
+    streamInit.reliability.maxRetransmits = 0;
+    configureStreamChannel(state_->pc->createDataChannel("tiny-mesh-stream", streamInit));
     state_->pc->setLocalDescription(rtc::Description::Type::Offer);
 }
 
@@ -701,6 +765,27 @@ bool PeerConnection::sendControl(const QString& text) {
 
 bool PeerConnection::sendChat(const QString& text) {
     return sendText(state_->chatDc, text, TextChannel::Chat);
+}
+
+bool PeerConnection::sendTransfer(const QByteArray& bytes) {
+    const auto& channel = state_->transferDc;
+    if (!channel || !channel->isOpen() || bytes.isEmpty() || bytes.size() > 64 * 1024 ||
+        static_cast<size_t>(bytes.size()) > channel->maxMessageSize() || channel->bufferedAmount() > 64 * 1024)
+        return false;
+    try {
+        channel->send(reinterpret_cast<const std::byte*>(bytes.constData()), static_cast<size_t>(bytes.size()));
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+bool PeerConnection::sendStream(const QByteArray& bytes) {
+    const auto& channel = state_->streamDc;
+    if (!channel || !channel->isOpen() || bytes.isEmpty() || bytes.size() > 16 * 1024 ||
+        static_cast<size_t>(bytes.size()) > channel->maxMessageSize() || channel->bufferedAmount() > 128 * 1024) return false;
+    try {
+        channel->send(reinterpret_cast<const std::byte*>(bytes.constData()), static_cast<size_t>(bytes.size()));
+        return true;
+    } catch (const std::exception&) { return false; }
 }
 
 bool PeerConnection::sendText(const std::shared_ptr<rtc::DataChannel>& channel, const QString& text,

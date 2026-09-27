@@ -147,12 +147,12 @@ void SignalingServer::registerClient(QWebSocket* socket) {
     const auto sessionId = session.id;
     clients_.insert(socket, session);
 
-    connect(socket, &QWebSocket::textMessageReceived, this,
-            [this, socket](const QString& text) { receive(socket, text); });
     connect(socket, &QWebSocket::binaryMessageReceived, this,
-            [this, socket](const QByteArray&) {
+            [this, socket](const QByteArray& bytes) { receive(socket, bytes); });
+    connect(socket, &QWebSocket::textMessageReceived, this,
+            [this, socket](const QString&) {
                 closeClient(socket, QWebSocketProtocol::CloseCodeDatatypeNotSupported,
-                            QStringLiteral("Binary messages are not supported"));
+                            QStringLiteral("Text messages are not supported"));
             });
     connect(socket, &QWebSocket::pong, this,
             [this, socket](quint64, const QByteArray& payload) {
@@ -168,13 +168,13 @@ void SignalingServer::registerClient(QWebSocket* socket) {
                    {"authority", authority_->publicKey()}}});
 }
 
-void SignalingServer::receive(QWebSocket* socket, const QString& text) {
+void SignalingServer::receive(QWebSocket* socket, const QByteArray& bytes) {
     auto session = clients_.find(socket);
     if (session == clients_.end()) {
         return;
     }
     const auto now = clock_.elapsed();
-    const auto decoded = EnvelopeCodec::decode(text.toUtf8());
+    const auto decoded = EnvelopeCodec::decode(bytes);
     if (const auto* failure = std::get_if<CodecError>(&decoded)) {
         send(socket, MessageCodec::error(std::nullopt, failureCode(failure->code)));
         closeClient(socket, QWebSocketProtocol::CloseCodePolicyViolated,
@@ -214,7 +214,7 @@ void SignalingServer::receive(QWebSocket* socket, const QString& text) {
         send(socket, MessageCodec::error(request.requestId, "identity_mismatch"));
         return;
     }
-    if (request.type.startsWith("presence.") || request.type.startsWith("contact.")) {
+    if (request.type.startsWith("presence.") || request.type.startsWith("contact.") || request.type == "mesh.relay" || request.type == "direct.send" || request.type == "mesh.leave") {
         deliver(presence_.handle(sessionId, request, rooms_, now));
     } else {
         auto deliveries = rooms_.handle(sessionId, request, now);
@@ -348,7 +348,7 @@ bool SignalingServer::send(QWebSocket* socket, const Envelope& message) {
                     QStringLiteral("Outgoing queue limit exceeded"));
         return false;
     }
-    if (socket->sendTextMessage(QString::fromUtf8(*bytes)) < 0) {
+    if (socket->sendBinaryMessage(*bytes) < 0) {
         closeClient(socket, QWebSocketProtocol::CloseCodeGoingAway,
                     QStringLiteral("Cannot queue outgoing message"));
         return false;
@@ -372,12 +372,12 @@ void SignalingServer::deliver(const QVector<Delivery>& deliveries) {
         bool relayFailed = false;
         for (const auto& delivery : batch) {
             auto* socket = socketForSession(delivery.sessionId);
-            if (delivery.message.type == "signal.accepted" && relayFailed) {
+            if ((delivery.message.type == "signal.accepted" || delivery.message.type == "mesh.relayed" || delivery.message.type == "direct.accepted") && relayFailed) {
                 send(socket, MessageCodec::error(delivery.message.requestId,
                                                  QStringLiteral("recipient_unavailable")));
             } else {
                 const bool sent = send(socket, delivery.message);
-                if (delivery.message.type == "signal.received" && !sent) {
+                if ((delivery.message.type == "signal.received" || delivery.message.type == "mesh.received" || delivery.message.type == "direct.received") && !sent) {
                     relayFailed = true;
                 }
             }

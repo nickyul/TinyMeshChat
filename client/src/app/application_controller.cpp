@@ -165,6 +165,14 @@ Result<InitializationState> ApplicationController::initialize() {
                     return Result<InitializationState>::failure("Invalid acquaintance");
                 seen.insert(peer.peerId);
                 acquaintances_.append(peer);
+                const auto volume = entry.value("volume");
+                if (!volume.isUndefined()) {
+                    const auto percent = volume.toInt(-1);
+                    if (!volume.isDouble() || percent < 0 || percent > 200 ||
+                        volume.toDouble() != percent)
+                        return Result<InitializationState>::failure("Некорректная громкость знакомого.");
+                    peerVolumes_.insert(peer.peerId, percent);
+                }
             }
         }
     }
@@ -236,15 +244,44 @@ Result<void> ApplicationController::rememberAcquaintance(const PeerIdentity& pee
             return Result<void>::failure("Достигнут лимит списка знакомых (256).");
         updated.append(peer);
     }
+    const auto saved = saveAcquaintances(updated, peerVolumes_);
+    if (!saved) return saved;
+    acquaintances_ = std::move(updated);
+    emit acquaintancesChanged();
+    return Result<void>::success();
+}
+
+Result<void> ApplicationController::saveAcquaintances(const QList<PeerIdentity>& contacts,
+                                                     const QHash<QString, int>& volumes) const {
     QJsonArray peers;
-    for (const auto& item : updated) peers.append(QJsonObject{{"id", item.peerId}, {"name", item.displayName}});
+    for (const auto& item : contacts)
+        peers.append(QJsonObject{{"id", item.peerId}, {"name", item.displayName},
+                                 {"volume", volumes.value(item.peerId, 100)}});
     const auto bytes = QJsonDocument(QJsonObject{{"v", 2}, {"identityId", identity_.peerId},
                                                 {"peers", peers}}).toJson(QJsonDocument::Indented);
     QSaveFile file(dataDir_ + "/acquaintances.json");
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return Result<void>::failure("Не удалось сохранить список знакомых.");
-    acquaintances_ = std::move(updated);
-    emit acquaintancesChanged();
+    return Result<void>::success();
+}
+
+int ApplicationController::peerVolume(const QString& peerId) const {
+    return peerVolumes_.value(peerId, 100);
+}
+
+Result<void> ApplicationController::savePeerVolume(const QString& peerId, int percent) {
+    bool known = false;
+    for (const auto& peer : acquaintances_) {
+        if (peer.peerId == peerId) { known = true; break; }
+    }
+    if (!known || percent < 0 || percent > 200)
+        return Result<void>::failure("Некорректные настройки громкости знакомого.");
+    if (peerVolume(peerId) == percent) return Result<void>::success();
+    auto updated = peerVolumes_;
+    updated.insert(peerId, percent);
+    const auto saved = saveAcquaintances(acquaintances_, updated);
+    if (!saved) return saved;
+    peerVolumes_ = std::move(updated);
     return Result<void>::success();
 }
 

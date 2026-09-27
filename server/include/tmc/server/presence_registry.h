@@ -20,6 +20,7 @@ private:
     struct Profile {
         QString identityId;
         QString displayName;
+        QString meshId;
         QSet<QString> known;
         bool busy{false};
         QJsonArray snapshot;

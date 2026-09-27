@@ -143,14 +143,6 @@ Result<QString> InvitationCodec::encodeText(const Invitation& invitation) {
             QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)));
 }
 
-Result<QString> InvitationCodec::encodeLink(const Invitation& invitation) {
-    const auto text = encodeText(invitation);
-    if (!text) {
-        return Result<QString>::failure(text.error());
-    }
-    return Result<QString>::success("tinymesh://signal/0/" + text.value().sliced(5));
-}
-
 Result<Invitation> InvitationCodec::decode(const QByteArray& bytes) {
     if (bytes.size() > MaxBytes) {
         return Result<Invitation>::failure("Signaling document is too large");
@@ -175,11 +167,8 @@ Result<Invitation> InvitationCodec::decode(const QByteArray& bytes) {
 
 Result<Invitation> InvitationCodec::decodeText(const QString& value) {
     auto text = value.trimmed();
-    if (text.startsWith("tinymesh://signal/0/")) {
-        text = "tmc0:" + text.sliced(QString("tinymesh://signal/0/").size());
-    }
     if (!text.startsWith("tmc0:")) {
-        return Result<Invitation>::failure("Text must start with tmc0: or tinymesh://signal/0/");
+        return Result<Invitation>::failure("Код ручного приглашения должен начинаться с tmc0:");
     }
     const auto encoded = QByteArray::fromBase64(text.sliced(5).toLatin1(),
                                                 QByteArray::Base64UrlEncoding |
