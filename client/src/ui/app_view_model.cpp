@@ -1022,6 +1022,7 @@ void AppViewModel::initializeSession() {
     session_ = std::make_unique<NetworkSession>(controller_, controller_.connectionPolicy());
     connect(session_->screenShare(), &ScreenShareService::changed, this, &AppViewModel::screenShareChanged);
     connect(session_->screenShare(), &ScreenShareService::frameReady, this, [this](const QImage& image) {
+        lastStreamFrame_ = image;
         if (screenVideoSink_) screenVideoSink_->setVideoFrame(image.isNull() ? QVideoFrame{} : QVideoFrame(image));
     });
     connect(session_->fileTransfers(), &FileTransferService::changed, this, &AppViewModel::fileTransfersChanged);
@@ -1198,6 +1199,18 @@ void AppViewModel::setPttPressed(bool pressed) {
     emit pttPressedChanged();
 }
 
+void AppViewModel::setStreamVolume(int percent) {
+    percent = qBound(0, percent, 100);
+    if (streamVolume_ == percent) return;
+    streamVolume_ = percent;
+    if (session_) session_->screenShare()->setAudioVolume(percent);
+    emit streamVolumeChanged();
+}
+
+QVariantList AppViewModel::fileRecipients() const {
+    return session_ ? session_->fileRecipients() : QVariantList{};
+}
+
 QVariantList AppViewModel::fileTransfers() const {
     if (!session_) return {};
     QVariantList rows;
@@ -1257,6 +1270,9 @@ void AppViewModel::startScreenShare(int sourceIndex, bool systemAudio) {
     if (!result) reportError(result.error());
 }
 void AppViewModel::stopScreenShare() { if (session_) session_->screenShare()->stop(); }
-void AppViewModel::setScreenVideoSink(QObject* sink) { screenVideoSink_ = qobject_cast<QVideoSink*>(sink); }
+void AppViewModel::setScreenVideoSink(QObject* sink) {
+    screenVideoSink_ = qobject_cast<QVideoSink*>(sink);
+    if (screenVideoSink_) screenVideoSink_->setVideoFrame(lastStreamFrame_.isNull() ? QVideoFrame{} : QVideoFrame(lastStreamFrame_));
+}
 
 } // namespace tmc

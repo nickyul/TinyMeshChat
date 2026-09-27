@@ -40,6 +40,16 @@ void NetworkSession::configurePeerServices() {
             });
 }
 
+QVariantList NetworkSession::fileRecipients() const {
+    QVariantList result;
+    for (const auto& peer : mesh_.peers()) {
+        const auto link = connections_->infoForPeer(peer.peerId);
+        if (peer.peerId != app_.identity().peerId && link && link->open)
+            result.append(QVariantMap{{"peerId", peer.peerId}, {"displayName", peer.displayName}});
+    }
+    return result;
+}
+
 FileTransferService* NetworkSession::fileTransfers() const { return files_.get(); }
 FileTransferService* NetworkSession::personalFileTransfers() const { return personal_->files(); }
 ScreenShareService* NetworkSession::screenShare() const { return sharing_.get(); }

@@ -7,6 +7,23 @@ import QtMultimedia
 ApplicationWindow {
     id: root
 
+    function confirmFiles(urls, peerId) {
+        const files = Array.from(urls).filter(url => url.toString().startsWith("file:"));
+        if (!files.length) return;
+        let recipients = appViewModel.fileRecipients();
+        if (peerId) {
+            const known = appViewModel.acquaintances.find(peer => peer.peerId === peerId);
+            recipients = [{ peerId: peerId, displayName: known ? known.displayName : peerId }];
+        }
+        if (!recipients.length) return;
+        fileConfirmation.showTransfers = peerId.length > 0 &&
+            !appViewModel.fileRecipients().some(peer => peer.peerId === peerId);
+        fileConfirmation.files = files;
+        fileConfirmation.recipients = recipients;
+        fileConfirmation.open();
+    }
+
+
     AppPalette {
         id: appPalette
     }
@@ -98,6 +115,7 @@ ApplicationWindow {
     AcquaintancesPanel {
         id: acquaintancesPanel
         viewModel: appViewModel
+        onFilesDropped: function(urls, peerId) { root.confirmFiles(urls, peerId); }
         onFileRequested: function(peerId) {
             outgoingFileDialog.peerId = peerId;
             outgoingFileDialog.open();
@@ -350,63 +368,56 @@ ApplicationWindow {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: 12
 
-                    Label {
-                        text: qsTr("TinyMesh Chat")
-                        font.pixelSize: 23
-                        font.bold: true
-                        color: appPalette.textPrimary
-                    }
-
-                    Label {
-                        text: appViewModel.degraded ? qsTr("Восстанавливаем связь…") : qsTr("Беседа")
-                        color: appViewModel.degraded ? appPalette.warning : appPalette.textSecondary
-                    }
-
-                    Item {
+                    ColumnLayout {
                         Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: qsTr("Беседа")
+                            font.pixelSize: 23
+                            font.bold: true
+                            color: appPalette.textPrimary
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: appViewModel.degraded ? qsTr("Восстанавливаем связь…")
+                                : qsTr("На связи: %1 из %2").arg(appViewModel.connectedPeerCount).arg(appViewModel.expectedPeerCount)
+                            color: appViewModel.degraded ? appPalette.warning : appPalette.textSecondary
+                            elide: Text.ElideRight
+                        }
                     }
-
-                    PrimaryButton {
-                        text: qsTr("Вставить код")
-                        onClicked: codeImportDialog.open()
-                    }
-
                     PrimaryButton {
                         id: inviteButton
-                        text: appViewModel.invitationPending ? qsTr("Подготовка ICE…") : qsTr("Пригласить")
-                        enabled: !appViewModel.invitationPending
+                        text: qsTr("Пригласить")
                         onClicked: invitationMenu.open()
                         Menu {
                             id: invitationMenu
+                            x: inviteButton.width - width
                             y: inviteButton.height
                             MenuItem {
                                 text: appViewModel.serverBusy ? qsTr("Через сервер — ожидание…") : qsTr("Через сервер")
-                                enabled: appViewModel.serverReady && !appViewModel.serverBusy
+                                enabled: appViewModel.serverReady && !appViewModel.serverBusy && !appViewModel.invitationPending
                                 onTriggered: appViewModel.createServerInvitation()
                             }
                             MenuItem {
-                                text: qsTr("Вручную")
+                                text: qsTr("Создать ручное приглашение")
+                                enabled: !appViewModel.invitationPending
                                 onTriggered: appViewModel.createInvitation()
+                            }
+                            MenuSeparator {}
+                            MenuItem {
+                                text: qsTr("Вставить код приглашения или ответа…")
+                                onTriggered: codeImportDialog.open()
                             }
                         }
                     }
-
                     Button {
                         text: qsTr("Выйти")
+                        Accessible.name: qsTr("Выйти из беседы")
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Покинуть беседу и отключиться от её участников")
                         onClicked: appViewModel.leaveMesh()
-                    }
-
-                    Label {
-                        text: qsTr("На связи: %1 из %2").arg(appViewModel.connectedPeerCount).arg(appViewModel.expectedPeerCount)
-                        color: appPalette.accentMutedText
-                        font.bold: true
-                        padding: 9
-
-                        background: Rectangle {
-                            color: appPalette.accentMuted
-                            radius: 9
-                        }
                     }
                 }
 
@@ -431,60 +442,50 @@ ApplicationWindow {
                     }
                 }
 
-                RowLayout {
+                Pane {
                     Layout.fillWidth: true
-
-                    Item {
-                        Layout.fillWidth: true
+                    padding: 8
+                    background: Rectangle {
+                        color: appPalette.surface
+                        radius: 10
+                        border.color: appPalette.border
                     }
-
-                    PrimaryButton {
-                        text: appViewModel.callActive ? qsTr("Выйти из звонка") : qsTr("Начать звонок")
-                        enabled: appViewModel.callActive || appViewModel.connectedPeerCount > 0
-                        ToolTip.visible: hovered && !enabled
-                        ToolTip.text: qsTr("Пригласите участника, чтобы начать звонок")
-                        onClicked: appViewModel.toggleCall()
-                    }
-
-                    Button {
-                        visible: appViewModel.callActive
-                        text: appViewModel.muted ? qsTr("Включить микрофон") : qsTr("Выключить микрофон")
-                        onClicked: appViewModel.toggleMute()
-                    }
-
-                    Button {
-                        visible: appViewModel.callActive
-                        text: appViewModel.deafened ? qsTr("Включить звук") : qsTr("Заглушить звук")
-                        onClicked: appViewModel.toggleDeafen()
-                    }
-
-                    ProgressBar {
-                        Layout.preferredWidth: 90
-                        visible: appViewModel.callActive
-                        from: 0
-                        to: 1
-                        value: appViewModel.microphoneLevel
+                    contentItem: Flow {
+                        spacing: 6
+                        PrimaryButton {
+                            text: appViewModel.callActive ? qsTr("Покинуть звонок") : qsTr("Начать звонок")
+                            enabled: appViewModel.callActive || appViewModel.connectedPeerCount > 0
+                            onClicked: appViewModel.toggleCall()
+                        }
+                        Button {
+                            visible: appViewModel.callActive
+                            text: appViewModel.muted ? qsTr("Микрофон выключен") : qsTr("Микрофон включён")
+                            checkable: true
+                            checked: !appViewModel.muted
+                            onClicked: appViewModel.toggleMute()
+                        }
+                        Button {
+                            visible: appViewModel.callActive || appViewModel.viewingScreen
+                            text: appViewModel.deafened ? qsTr("Звук выключен") : qsTr("Звук включён")
+                            checkable: true
+                            checked: !appViewModel.deafened
+                            onClicked: appViewModel.toggleDeafen()
+                        }
+                        Button {
+                            text: appViewModel.sharingScreen ? qsTr("Остановить показ") : qsTr("Показать экран…")
+                            enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0 && !appViewModel.viewingScreen)
+                            onClicked: appViewModel.sharingScreen ? appViewModel.stopScreenShare() : screenShareDialog.open()
+                        }
                     }
                 }
 
-                RowLayout {
+                Label {
                     Layout.fillWidth: true
-                    Button {
-                        text: appViewModel.sharingScreen ? qsTr("Остановить показ") : qsTr("Показать экран…")
-                        enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0 && !appViewModel.viewingScreen)
-                        onClicked: appViewModel.sharingScreen ? appViewModel.stopScreenShare() : screenShareDialog.open()
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        text: (appViewModel.sharingScreen || appViewModel.viewingScreen) ? appViewModel.screenShareTitle : ""
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                    }
-                    Button {
-                        visible: appViewModel.viewingScreen
-                        text: appViewModel.deafened ? qsTr("Включить звук") : qsTr("Выключить звук")
-                        onClicked: appViewModel.toggleDeafen()
-                    }
+                    visible: appViewModel.sharingScreen || appViewModel.viewingScreen
+                    text: visible ? appViewModel.screenShareTitle : ""
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    color: appPalette.textSecondary
                 }
 
                 Rectangle {
@@ -494,11 +495,32 @@ ApplicationWindow {
                     color: "#17232f"
                     radius: 10
                     VideoOutput {
+                        id: previewVideo
                         anchors.fill: parent
                         fillMode: VideoOutput.PreserveAspectFit
                         Component.onCompleted: appViewModel.setScreenVideoSink(videoSink)
                         Component.onDestruction: appViewModel.setScreenVideoSink(null)
                     }
+                    Button {
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        text: qsTr("Развернуть")
+                        onClicked: expandedStream.open()
+                    }
+                }
+
+                RowLayout {
+                    visible: appViewModel.viewingScreen
+                    Layout.fillWidth: true
+                    Label { text: qsTr("Звук трансляции") }
+                    Slider {
+                        from: 0; to: 100; stepSize: 1
+                        value: appViewModel.streamVolume
+                        onMoved: appViewModel.streamVolume = Math.round(value)
+                        Accessible.name: qsTr("Громкость трансляции")
+                    }
+                    Label { text: appViewModel.streamVolume + "%" }
                 }
 
                 SplitView {
@@ -516,6 +538,24 @@ ApplicationWindow {
                             border.color: appPalette.border
                         }
 
+                        DropArea {
+                            anchors.fill: parent
+                            z: 2
+                            enabled: appViewModel.connectedPeerCount > 0
+                            onEntered: function(drag) { drag.accepted = drag.hasUrls; }
+                            onDropped: function(drop) {
+                                if (drop.hasUrls) { root.confirmFiles(drop.urls, ""); drop.acceptProposedAction(); }
+                            }
+                            Rectangle {
+                                anchors.fill: parent
+                                visible: parent.containsDrag
+                                color: "transparent"
+                                border.color: appPalette.accent
+                                border.width: 3
+                                radius: 10
+                                z: 2
+                            }
+                        }
                         ListView {
                             id: messageList
 
@@ -525,6 +565,20 @@ ApplicationWindow {
                             spacing: 5
                             model: appViewModel.messages
                             onCountChanged: positionViewAtEnd()
+                            footer: Column {
+                                width: messageList.width
+                                spacing: 8
+                                Repeater {
+                                    model: appViewModel.fileTransfers.filter(item => item.id.startsWith("mesh:") && item.currentSession)
+                                    delegate: TransferCard {
+                                        required property var modelData
+                                        width: messageList.width
+                                        transfer: modelData
+                                        viewModel: appViewModel
+                                        onSaveRequested: function(id) { fileTransfersDialog.saveTransfer(id); }
+                                    }
+                                }
+                            }
 
                             delegate: Item {
                                 id: messageDelegate
@@ -570,6 +624,7 @@ ApplicationWindow {
                                             Label {
                                                 Layout.fillWidth: true
                                                 text: messageDelegate.author
+                                                textFormat: Text.PlainText
                                                 color: appPalette.textPrimary
                                                 font.pixelSize: 12
                                                 font.weight: Font.DemiBold
@@ -588,6 +643,7 @@ ApplicationWindow {
 
                                             Layout.fillWidth: true
                                             text: messageDelegate.text
+                                            textFormat: Text.PlainText
                                             wrapMode: Text.Wrap
                                             color: appPalette.textPrimary
                                         }
@@ -675,14 +731,29 @@ ApplicationWindow {
                                             Label {
                                                 Layout.fillWidth: true
                                                 text: peerDelegate.displayName
+                                                textFormat: Text.PlainText
                                                 elide: Text.ElideRight
                                             }
 
-                                            Button {
-                                                text: qsTr("Файл…")
+                                            ToolButton {
+                                                id: peerActionsButton
+                                                text: "⋯"
+                                                implicitWidth: 30
                                                 visible: !peerDelegate.isSelf
-                                                enabled: peerDelegate.connected
-                                                onClicked: { outgoingFileDialog.peerId = peerDelegate.peerId; outgoingFileDialog.open(); }
+                                                Accessible.name: qsTr("Действия с участником")
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: Accessible.name
+                                                onClicked: peerActions.open()
+                                                Menu {
+                                                    id: peerActions
+                                                    x: peerActionsButton.width - width
+                                                    y: peerActionsButton.height
+                                                    MenuItem {
+                                                        text: qsTr("Отправить файл…")
+                                                        enabled: peerDelegate.connected
+                                                        onTriggered: { outgoingFileDialog.peerId = peerDelegate.peerId; outgoingFileDialog.open(); }
+                                                    }
+                                                }
                                             }
                                             Label {
                                                 visible: peerDelegate.connected && !peerDelegate.isSelf && peerDelegate.rttMs >= 0
@@ -695,6 +766,7 @@ ApplicationWindow {
                                         RowLayout {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 22
+                                            visible: peerDelegate.voiceJoined
                                             spacing: 6
 
                                             Rectangle {
@@ -716,14 +788,7 @@ ApplicationWindow {
                                                 font.pixelSize: 10
                                             }
 
-                                            Label {
-                                                Layout.fillWidth: true
-                                                visible: peerDelegate.voiceJoined && !peerDelegate.isSelf && peerDelegate.packetLossPercent >= 0
-                                                text: qsTr("Потери %1% · джиттер %2 мс · буфер %3 мс").arg(peerDelegate.packetLossPercent.toFixed(1)).arg(peerDelegate.audioJitterMs).arg(peerDelegate.audioBufferMs)
-                                                color: meshPage.audioQualityColor(peerDelegate.packetLossPercent, peerDelegate.audioJitterMs)
-                                                font.pixelSize: 10
-                                                elide: Text.ElideRight
-                                            }
+                                            Item { Layout.fillWidth: true }
 
                                             Slider {
                                                 id: peerVolumeSlider
@@ -758,10 +823,62 @@ ApplicationWindow {
                         placeholderText: qsTr("Введите сообщение…")
                         maximumLength: 4096
                         onAccepted: meshPage.sendMessage()
+                        persistentSelection: true
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: function(eventPoint) {
+                                messageEditMenu.popup(eventPoint.position.x, eventPoint.position.y);
+                            }
+                        }
+                        Menu {
+                            id: messageEditMenu
+                            MenuItem {
+                                text: qsTr("Копировать выделенное")
+                                enabled: messageInput.selectedText.length > 0
+                                onTriggered: messageInput.copy()
+                            }
+                            MenuItem {
+                                text: qsTr("Вставить")
+                                enabled: messageInput.canPaste
+                                onTriggered: { messageInput.paste(); messageInput.forceActiveFocus(); }
+                            }
+                        }
                     }
 
-                    Button {
-                        text: qsTr("Файл…")
+                    ToolButton {
+                        implicitWidth: 40
+                        implicitHeight: 40
+                        contentItem: Item {
+                            implicitWidth: 24
+                            implicitHeight: 24
+                            Canvas {
+                                anchors.centerIn: parent
+                                width: 24
+                                height: 24
+                                opacity: parent.enabled ? 1 : 0.4
+                                onPaint: {
+                                    const ctx = getContext("2d");
+                                    ctx.clearRect(0, 0, width, height);
+                                    ctx.strokeStyle = appPalette.textPrimary;
+                                    ctx.lineWidth = 1.8;
+                                    ctx.lineCap = "round";
+                                    ctx.lineJoin = "round";
+                                    ctx.beginPath();
+                                    ctx.moveTo(8, 12);
+                                    ctx.lineTo(15, 5);
+                                    ctx.bezierCurveTo(19, 1, 24, 6, 20, 10);
+                                    ctx.lineTo(11, 19);
+                                    ctx.bezierCurveTo(5, 25, -2, 18, 4, 12);
+                                    ctx.lineTo(13, 3);
+                                    ctx.stroke();
+                                    ctx.beginPath();
+                                    ctx.moveTo(7, 15);
+                                    ctx.lineTo(16, 6);
+                                    ctx.stroke();
+                                }
+                            }
+                        }
+                        Accessible.name: qsTr("Отправить файл в беседу")
                         enabled: appViewModel.connectedPeerCount > 0
                         ToolTip.visible: hovered
                         ToolTip.text: qsTr("Предложить файл всем участникам беседы")
@@ -784,7 +901,11 @@ ApplicationWindow {
         leftPadding: 12
         verticalAlignment: Text.AlignVCenter
         text: appViewModel.status
+        textFormat: Text.PlainText
         color: appPalette.textSecondary
+        HoverHandler { id: statusHover }
+        ToolTip.visible: statusHover.hovered
+        ToolTip.text: appViewModel.status
         elide: Text.ElideRight
 
         background: Rectangle {
@@ -820,14 +941,88 @@ ApplicationWindow {
         onAccepted: appViewModel.importSignalingFile(selectedFile)
     }
 
+    Dialog {
+        id: fileConfirmation
+        property var files: []
+        property var recipients: []
+        property bool showTransfers: false
+        title: qsTr("Отправить файлы?")
+        anchors.centerIn: parent
+        width: Math.min(480, root.width - 40)
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: ScrollView {
+            id: confirmationScroll
+            implicitHeight: Math.min(320, confirmationText.implicitHeight)
+            contentWidth: availableWidth
+            clip: true
+            Label {
+                id: confirmationText
+                width: confirmationScroll.availableWidth
+                text: qsTr("Файлы:\n%1\n\nПолучатели:\n%2")
+                    .arg(fileConfirmation.files.map(url => decodeURIComponent(url.toString().split("/").pop())).join("\n"))
+                    .arg(fileConfirmation.recipients.map(peer => peer.displayName).join("\n"))
+                textFormat: Text.PlainText
+                wrapMode: Text.WrapAnywhere
+            }
+        }
+        onAccepted: {
+            for (const file of files)
+                for (const peer of recipients) appViewModel.sendFile(file, peer.peerId);
+            if (showTransfers) fileTransfersDialog.open();
+            else Qt.callLater(function() { messageList.positionViewAtEnd(); });
+        }
+    }
+
+    Dialog {
+        id: expandedStream
+        parent: Overlay.overlay
+        x: 8; y: 8
+        width: parent.width - 16
+        height: parent.height - 16
+        modal: true
+        title: appViewModel.screenShareTitle
+        onOpened: appViewModel.setScreenVideoSink(expandedVideo.videoSink)
+        onClosed: appViewModel.setScreenVideoSink(previewVideo.videoSink)
+        contentItem: ColumnLayout {
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: "#17232f"
+                VideoOutput {
+                    id: expandedVideo
+                    anchors.fill: parent
+                    fillMode: VideoOutput.PreserveAspectFit
+                }
+            }
+            RowLayout {
+                Label { visible: appViewModel.viewingScreen; text: qsTr("Звук трансляции") }
+                Slider {
+                    visible: appViewModel.viewingScreen
+                    from: 0; to: 100; stepSize: 1
+                    value: appViewModel.streamVolume
+                    onMoved: appViewModel.streamVolume = Math.round(value)
+                    Accessible.name: qsTr("Громкость трансляции")
+                }
+                Label { visible: appViewModel.viewingScreen; text: appViewModel.streamVolume + "%" }
+                Item { Layout.fillWidth: true }
+                Button {
+                    visible: appViewModel.sharingScreen
+                    text: qsTr("Остановить показ")
+                    onClicked: appViewModel.stopScreenShare()
+                }
+                Button { text: qsTr("Свернуть"); onClicked: expandedStream.close() }
+            }
+        }
+    }
+
     FileDialog {
         id: outgoingFileDialog
         property string peerId: ""
         title: qsTr("Выбрать файл для отправки")
         fileMode: FileDialog.OpenFile
         onAccepted: {
-            appViewModel.sendFile(selectedFile, peerId);
-            fileTransfersDialog.open();
+            root.confirmFiles([selectedFile], peerId);
         }
     }
 
@@ -1119,7 +1314,14 @@ ApplicationWindow {
 
     Connections {
         target: appViewModel
-        function onFileOffered() { fileTransfersDialog.open(); }
+        function onFileOffered() {
+            if (appViewModel.fileTransfers.some(item => item.id.startsWith("personal:") && item.canAccept))
+                fileTransfersDialog.open();
+            else Qt.callLater(function() { messageList.positionViewAtEnd(); });
+        }
+        function onScreenShareChanged() {
+            if (!appViewModel.sharingScreen && !appViewModel.viewingScreen) expandedStream.close();
+        }
         function onErrorRequested(message) {
             if (errorDialog.visible && errorDialog.text === message)
                 return;

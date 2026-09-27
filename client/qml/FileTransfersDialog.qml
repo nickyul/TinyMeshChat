@@ -13,6 +13,10 @@ Dialog {
     modal: false
     standardButtons: Dialog.Close
     property string acceptingId: ""
+    function saveTransfer(id) {
+        acceptingId = id;
+        destinationDialog.open();
+    }
 
     FileDialog {
         id: destinationDialog
@@ -36,55 +40,12 @@ Dialog {
             spacing: 12
             model: control.viewModel.fileTransfers
             ScrollBar.vertical: ScrollBar {}
-            delegate: Pane {
+            delegate: TransferCard {
                 required property var modelData
                 width: ListView.view.width
-                padding: 12
-                background: Rectangle { color: "#edf1f3"; radius: 8 }
-                contentItem: ColumnLayout {
-                    Label {
-                        Layout.fillWidth: true
-                        text: modelData.name
-                        textFormat: Text.PlainText
-                        elide: Text.ElideMiddle
-                        font.bold: true
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        text: (modelData.outgoing ? qsTr("Кому: %1") : qsTr("От: %1")).arg(modelData.peerName)
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                    }
-                    ProgressBar { Layout.fillWidth: true; value: modelData.progress }
-                    Label {
-                        Layout.fillWidth: true
-                        text: qsTr("%1 · %2 / %3 МБ").arg(modelData.status)
-                            .arg((modelData.transferred / 1048576).toFixed(1))
-                            .arg((modelData.size / 1048576).toFixed(1))
-                        textFormat: Text.PlainText
-                        wrapMode: Text.WordWrap
-                    }
-                    RowLayout {
-                        Button {
-                            visible: modelData.canAccept
-                            text: qsTr("Сохранить…")
-                            onClicked: {
-                                control.acceptingId = modelData.id;
-                                destinationDialog.open();
-                            }
-                        }
-                        Button {
-                            visible: !modelData.finished
-                            text: modelData.canAccept ? qsTr("Отклонить") : qsTr("Отменить")
-                            onClicked: control.viewModel.cancelFile(modelData.id)
-                        }
-                        Button {
-                            visible: modelData.finished
-                            text: qsTr("Убрать из списка")
-                            onClicked: control.viewModel.dismissFile(modelData.id)
-                        }
-                    }
-                }
+                transfer: modelData
+                viewModel: control.viewModel
+                onSaveRequested: function(id) { control.saveTransfer(id); }
             }
         }
     }

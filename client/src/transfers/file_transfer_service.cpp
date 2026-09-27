@@ -64,6 +64,7 @@ struct FileTransferService::State {
     struct Transfer {
         QString id, peerId, peerName, name, path, error;
         bool outgoing{false};
+        bool currentSession{true};
         Phase phase{Phase::Incoming};
         qint64 size{0}, position{0}, sent{0}, lastOffer{-2000};
         QByteArray digest, reply;
@@ -197,6 +198,7 @@ void FileTransferService::removePeer(const QString& peerId) {
 
 void FileTransferService::clear() {
     for (const auto& transfer : state_->entries) {
+        transfer->currentSession = false;
         if (!terminal(transfer->phase)) {
             state_->sender(transfer->peerId, frame(Kind::Cancel, transfer->id));
             transfer->phase = Phase::Cancelled;
@@ -381,7 +383,7 @@ QVariantList FileTransferService::transfers() const {
     for (const auto& id : state_->order) {
         const auto& t = *state_->entries.value(id);
         rows.append(QVariantMap{{"id", id}, {"peerId", t.peerId}, {"peerName", t.peerName}, {"name", t.name},
-            {"outgoing", t.outgoing}, {"size", t.size}, {"transferred", t.position},
+            {"currentSession", t.currentSession}, {"outgoing", t.outgoing}, {"size", t.size}, {"transferred", t.position},
             {"progress", t.size == 0 ? (t.phase == Phase::Complete ? 1.0 : 0.0) : double(t.position) / double(t.size)},
             {"status", t.error.isEmpty() ? phaseLabel(t.phase, state_->connected.contains(t.peerId)) : t.error},
             {"canAccept", t.phase == Phase::Incoming}, {"finished", terminal(t.phase)}});

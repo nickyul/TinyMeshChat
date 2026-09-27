@@ -13,6 +13,7 @@
     <file alias="qml/SignalingSettingsDialog.qml">../qml/SignalingSettingsDialog.qml</file>
     <file alias="qml/ServerAccessDialog.qml">../qml/ServerAccessDialog.qml</file>
     <file alias="qml/AcquaintancesPanel.qml">../qml/AcquaintancesPanel.qml</file>
+    <file alias="qml/TransferCard.qml">../qml/TransferCard.qml</file>
     <file alias="qml/FileTransfersDialog.qml">../qml/FileTransfersDialog.qml</file>
     <file alias="qml/ScreenShareDialog.qml">../qml/ScreenShareDialog.qml</file>
   </qresource>

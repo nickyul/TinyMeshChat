@@ -65,6 +65,7 @@ public:
     void respondToOnlineInvitation(const QString& invitationId, bool accept);
 
     Result<void> sendMessage(const QString& text);
+    QVariantList fileRecipients() const;
     FileTransferService* fileTransfers() const;
     FileTransferService* personalFileTransfers() const;
     ScreenShareService* screenShare() const;

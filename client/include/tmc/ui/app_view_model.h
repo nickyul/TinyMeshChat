@@ -11,6 +11,7 @@
 #include <QVariantMap>
 #include <QVariantList>
 #include <QPointer>
+#include <QImage>
 
 #include <memory>
 
@@ -48,6 +49,7 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(bool serverBusy READ serverBusy NOTIFY signalingServerChanged)
     Q_PROPERTY(bool serverMesh READ serverMesh NOTIFY signalingServerChanged)
     Q_PROPERTY(QVariantList acquaintances READ acquaintances NOTIFY acquaintancesChanged)
+    Q_PROPERTY(int streamVolume READ streamVolume WRITE setStreamVolume NOTIFY streamVolumeChanged)
     Q_PROPERTY(QVariantList fileTransfers READ fileTransfers NOTIFY fileTransfersChanged)
     Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY screenShareChanged)
     Q_PROPERTY(bool viewingScreen READ viewingScreen NOTIFY screenShareChanged)
@@ -88,6 +90,9 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(QAbstractItemModel* peers READ peers CONSTANT)
 
 public:
+    int streamVolume() const { return streamVolume_; }
+    void setStreamVolume(int percent);
+    Q_INVOKABLE QVariantList fileRecipients() const;
     QVariantList fileTransfers() const;
     Q_INVOKABLE void sendFile(const QUrl& file, const QString& peerId = {});
     Q_INVOKABLE void acceptFile(const QString& transferId, const QUrl& destination);
@@ -198,6 +203,7 @@ public:
     void checkForUpdatesAutomatically();
 
 signals:
+    void streamVolumeChanged();
     void fileTransfersChanged();
     void fileOffered();
     void screenShareChanged();
@@ -229,6 +235,8 @@ signals:
     void signalingRequested(QString kind, QString text);
 
 private:
+    QImage lastStreamFrame_;
+    int streamVolume_{100};
     QPointer<QVideoSink> screenVideoSink_;
     void initializeSession();
     void setMeshPeerCounts(int connected, int expected);

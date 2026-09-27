@@ -26,6 +26,7 @@ public:
     QString title() const;
     bool systemAudioSupported() const;
     void setAudioMuted(bool muted);
+    void setAudioVolume(int percent);
 signals:
     void changed();
     void frameReady(QImage image);

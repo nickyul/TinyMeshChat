@@ -76,6 +76,7 @@ struct ScreenShareService::State {
     int piecesReceived{0};
     QSet<QString> stoppedStreams;
     QStringList stoppedOrder;
+    double volume{1.0};
     QByteArray pcm, playback;
     OpusEncoder* encoder{nullptr};
     OpusDecoder* decoder{nullptr};
@@ -233,9 +234,14 @@ bool ScreenShareService::viewing() const { return !state_->remoteStream.isEmpty(
 QString ScreenShareService::owner() const { return sharing() ? state_->localIdentity : state_->remoteIdentity; }
 QString ScreenShareService::title() const { return sharing() ? state_->sourceTitle : state_->remoteTitle; }
 bool ScreenShareService::systemAudioSupported() const { return SystemAudioCapture::supported(); }
+void ScreenShareService::setAudioVolume(int percent) {
+    state_->volume = qBound(0, percent, 100) / 100.0;
+    if (state_->output) state_->output->setVolume(state_->muted ? 0.0 : state_->volume);
+}
+
 void ScreenShareService::setAudioMuted(bool muted) {
     state_->muted = muted;
-    if (state_->output) state_->output->setVolume(muted ? 0.0 : 1.0);
+    if (state_->output) state_->output->setVolume(muted ? 0.0 : state_->volume);
 }
 
 void ScreenShareService::setPeerConnected(const QString& peer, bool connected) {
@@ -356,7 +362,7 @@ void ScreenShareService::receive(const QString& peer, const QByteArray& bytes) {
                 format.setSampleFormat(QAudioFormat::Int16);
                 state_->output = std::make_unique<QAudioSink>(QMediaDevices::defaultAudioOutput(), format);
                 state_->output->setBufferSize(19200);
-                state_->output->setVolume(state_->muted ? 0.0 : 1.0);
+                state_->output->setVolume(state_->muted ? 0.0 : state_->volume);
                 state_->outputDevice = state_->output->start();
             }
             emit changed();
