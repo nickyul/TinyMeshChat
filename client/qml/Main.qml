@@ -6,6 +6,7 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
+    NotificationSounds { id: notificationSounds }
 
     function confirmFiles(urls, peerId) {
         const files = Array.from(urls).filter(url => url.toString().startsWith("file:"));
@@ -322,6 +323,7 @@ ApplicationWindow {
             function sendMessage() {
                 if (canSendMessage && appViewModel.sendMessage(messageText)) {
                     messageInput.clear();
+                    messageList.scrollToLatest();
                 }
             }
 
@@ -556,6 +558,35 @@ ApplicationWindow {
                                 z: 2
                             }
                         }
+                        RoundButton {
+                            id: scrollToLatestButton
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 14
+                            z: 3
+                            width: 42; height: 42
+                            radius: 21
+                            text: "↓"
+                            font.pixelSize: 24
+                            contentItem: Text {
+                                text: scrollToLatestButton.text
+                                font: scrollToLatestButton.font
+                                color: appPalette.accentText
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: width / 2
+                                color: scrollToLatestButton.down ? Qt.darker(appPalette.accent, 1.3)
+                                    : scrollToLatestButton.hovered ? Qt.darker(appPalette.accent, 1.12)
+                                    : appPalette.accent
+                                border.width: scrollToLatestButton.visualFocus ? 3 : 2
+                                border.color: appPalette.surface
+                            }
+                            visible: !messageList.atYEnd && messageList.count > 0
+                            Accessible.name: qsTr("К последнему сообщению")
+                            onClicked: messageList.scrollToLatest()
+                        }
                         ListView {
                             id: messageList
 
@@ -564,25 +595,66 @@ ApplicationWindow {
                             clip: true
                             spacing: 5
                             model: appViewModel.messages
-                            onCountChanged: positionViewAtEnd()
-                            footer: Column {
-                                width: messageList.width
-                                spacing: 8
-                                Repeater {
-                                    model: appViewModel.fileTransfers.filter(item => item.id.startsWith("mesh:") && item.currentSession)
-                                    delegate: TransferCard {
-                                        required property var modelData
-                                        width: messageList.width
-                                        transfer: modelData
-                                        viewModel: appViewModel
-                                        onSaveRequested: function(id) { fileTransfersDialog.saveTransfer(id); }
-                                    }
+                            property bool followTail: true
+                            property string readingAnchor: ""
+                            property real readingOffset: 0
+                            function rememberReadingPosition() {
+                                if (followTail || readingAnchor.length > 0) return;
+                                const index = indexAt(width / 2, contentY + 8);
+                                const item = itemAtIndex(index);
+                                if (item) {
+                                    readingAnchor = item.entryId;
+                                    readingOffset = item.y - contentY;
+                                }
+                            }
+                            function restoreReadingPosition() {
+                                if (followTail) { readingAnchor = ""; keepTailVisible(); return; }
+                                if (!readingAnchor.length) return;
+                                Qt.callLater(function() {
+                                    if (messageList.followTail || !messageList.readingAnchor.length) return;
+                                    const index = appViewModel.chatIndexForId(messageList.readingAnchor);
+                                    messageList.readingAnchor = "";
+                                    if (index < 0) return;
+                                    messageList.forceLayout();
+                                    messageList.positionViewAtIndex(index, ListView.Beginning);
+                                    messageList.forceLayout();
+                                    const item = messageList.itemAtIndex(index);
+                                    if (item) messageList.contentY = Math.max(messageList.originY,
+                                        Math.min(item.y - messageList.readingOffset,
+                                            messageList.originY + messageList.contentHeight - messageList.height));
+                                });
+                            }
+                            function scrollToLatest() {
+                                followTail = true;
+                                forceLayout();
+                                positionViewAtEnd();
+                            }
+                            function keepTailVisible() {
+                                if (followTail) Qt.callLater(function() {
+                                    if (messageList.followTail) messageList.scrollToLatest();
+                                });
+                            }
+                            onCountChanged: {
+                                if (count === 0) { followTail = true; readingAnchor = ""; }
+                                keepTailVisible();
+                            }
+                            onContentHeightChanged: keepTailVisible()
+                            onHeightChanged: keepTailVisible()
+                            onMovementStarted: { followTail = false; readingAnchor = ""; }
+                            onMovementEnded: followTail = atYEnd
+                            ScrollBar.vertical: ScrollBar {
+                                onPressedChanged: {
+                                    if (pressed) { messageList.followTail = false; messageList.readingAnchor = ""; }
+                                    else messageList.followTail = messageList.atYEnd;
                                 }
                             }
 
                             delegate: Item {
                                 id: messageDelegate
 
+                                required property string entryId
+                                required property string entryKind
+                                required property var fileCard
                                 required property string author
                                 required property string text
                                 required property date createdAt
@@ -591,7 +663,18 @@ ApplicationWindow {
                                 required property int expectedCount
 
                                 width: messageList.width
-                                height: bubble.height + 6
+                                height: (entryKind === "file" ? inlineFile.height : bubble.height) + 6
+                                ConversationFileCard {
+                                    id: inlineFile
+                                    visible: messageDelegate.entryKind === "file"
+                                    width: Math.min(380, parent.width * 0.88)
+                                    x: messageDelegate.local ? parent.width - width - 6 : 6
+                                    transfer: messageDelegate.fileCard
+                                    viewModel: appViewModel
+                                    onSaveRequested: function(id) { fileTransfersDialog.saveTransfer(id); }
+                                    onImageRequested: function(source, name) { imageViewer.showImage(source, name); }
+                                    onHeightChanged: messageList.keepTailVisible()
+                                }
 
                                 TextMetrics {
                                     id: messageMetrics
@@ -602,6 +685,7 @@ ApplicationWindow {
 
                                 Rectangle {
                                     id: bubble
+                                    visible: messageDelegate.entryKind === "message"
 
                                     x: messageDelegate.local ? parent.width - width - 6 : 6
                                     width: Math.min(parent.width * 0.78, Math.max(230, messageMetrics.advanceWidth + 20))
@@ -968,9 +1052,46 @@ ApplicationWindow {
         }
         onAccepted: {
             for (const file of files)
-                for (const peer of recipients) appViewModel.sendFile(file, peer.peerId);
+                appViewModel.sendFileToRecipients(file, recipients.map(peer => peer.peerId));
             if (showTransfers) fileTransfersDialog.open();
-            else Qt.callLater(function() { messageList.positionViewAtEnd(); });
+            else messageList.keepTailVisible();
+        }
+    }
+
+    Dialog {
+        id: imageViewer
+        property string imageSource: ""
+        property string imageName: ""
+        function showImage(source, name) {
+            imageSource = source;
+            imageName = name;
+            open();
+        }
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.max(200, parent.width - 40)
+        height: Math.max(200, parent.height - 40)
+        modal: true
+        title: imageName
+        standardButtons: Dialog.Close
+        closePolicy: Popup.CloseOnEscape
+        onClosed: imageSource = ""
+        contentItem: Item {
+            Image {
+                id: viewedImage
+                anchors.fill: parent
+                source: imageViewer.imageSource
+                sourceSize.width: 1920
+                sourceSize.height: 1080
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                autoTransform: true
+            }
+            Label {
+                anchors.centerIn: parent
+                visible: viewedImage.status === Image.Error
+                text: qsTr("Не удалось открыть изображение")
+            }
         }
     }
 
@@ -1056,6 +1177,50 @@ ApplicationWindow {
 
         viewModel: appViewModel
         onSaveRequested: saveDialog.open()
+    }
+
+    Pane {
+        id: entryRequestCard
+        property string requestId: ""
+        property string senderName: ""
+        property bool accepting: false
+        visible: requestId.length > 0
+        z: 110
+        x: Math.max(12, parent.width - width - 16)
+        y: 16
+        width: Math.min(380, parent.width - 24)
+        padding: 16
+        background: Rectangle {
+            color: appPalette.surface
+            radius: 12
+            border.width: 2
+            border.color: appPalette.accent
+        }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Label { text: qsTr("Запрос на вход"); font.bold: true; font.pixelSize: 18 }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("%1 просится в вашу беседу").arg(entryRequestCard.senderName)
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                PrimaryButton {
+                    text: entryRequestCard.accepting ? qsTr("Подключаем…") : qsTr("Принять")
+                    enabled: !entryRequestCard.accepting
+                    onClicked: {
+                        entryRequestCard.accepting = true;
+                        appViewModel.respondToEntryRequest(entryRequestCard.requestId, true);
+                    }
+                }
+                Button {
+                    text: qsTr("Отклонить")
+                    enabled: !entryRequestCard.accepting
+                    onClicked: appViewModel.respondToEntryRequest(entryRequestCard.requestId, false)
+                }
+            }
+        }
     }
 
     Pane {
@@ -1314,10 +1479,23 @@ ApplicationWindow {
 
     Connections {
         target: appViewModel
+        function onChatLayoutAboutToChange() { messageList.rememberReadingPosition(); }
+        function onChatLayoutChanged() { messageList.restoreReadingPosition(); }
+        function onEntryRequestReceived(id, displayName) {
+            entryRequestCard.senderName = displayName;
+            entryRequestCard.accepting = false;
+            entryRequestCard.requestId = id;
+        }
+        function onEntryRequestClosed(id) {
+            if (entryRequestCard.requestId === id) entryRequestCard.requestId = "";
+        }
+        function onNotificationSound(kind) {
+            if (kind !== "message" || !root.active) notificationSounds.play(kind);
+        }
         function onFileOffered() {
             if (appViewModel.fileTransfers.some(item => item.id.startsWith("personal:") && item.canAccept))
                 fileTransfersDialog.open();
-            else Qt.callLater(function() { messageList.positionViewAtEnd(); });
+            else messageList.keepTailVisible();
         }
         function onScreenShareChanged() {
             if (!appViewModel.sharingScreen && !appViewModel.viewingScreen) expandedStream.close();

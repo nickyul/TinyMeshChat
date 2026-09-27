@@ -15,7 +15,7 @@ public:
     using Sender = std::function<bool(const QString&, const QByteArray&)>;
     explicit FileTransferService(Sender sender, QObject* parent = nullptr);
     ~FileTransferService() override;
-    Result<void> offer(const QString& peerId, const QString& peerName, const QString& path);
+    Result<void> offer(const QString& peerId, const QString& peerName, const QString& path, const QString& groupId = {});
     Result<void> accept(const QString& transferId, const QString& path);
     void cancel(const QString& transferId);
     void dismiss(const QString& transferId);

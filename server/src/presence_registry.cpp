@@ -22,6 +22,12 @@ QVector<Delivery> PresenceRegistry::finish(const Invitation& invitation, const Q
             {invitation.toSession, event("contact.closed", {{"invitationId", invitation.id}, {"status", status}})}};
 }
 
+QVector<Delivery> PresenceRegistry::finishKnock(const Invitation& request, const QString& status) const {
+    return {{request.fromSession, event("knock.result", {{"invitationId", request.id},
+                {"toIdentityId", request.toIdentity}, {"status", status}})},
+            {request.toSession, event("knock.closed", {{"invitationId", request.id}, {"status", status}})}};
+}
+
 QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envelope& request,
                                           RoomRegistry& rooms, qint64 now) {
     const auto fail = [&](const QString& code) -> QVector<Delivery> {
@@ -62,6 +68,8 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
             if (peer.key() != sessionId && peer->meshId == meshId)
                 deliveries.append({peer.key(), event("mesh.departed", {{"meshId", meshId}, {"identityId", profile.identityId}})});
         }
+        deliveries += maintainInvitations(rooms, now);
+        deliveries += updateSnapshots();
         return deliveries;
     }
     if (request.type == "direct.send") {
@@ -80,6 +88,52 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
         return {{target, event("mesh.received", {{"meshId", meshId},
                     {"identityId", profiles_.value(sessionId).identityId}, {"payload", body.value("payload")}})},
                 reply("mesh.relayed")};
+    }
+    if (request.type == "knock.request") {
+        const auto identity = body.value("toIdentityId").toString();
+        const auto target = sessionsByIdentity_.value(identity);
+        if (!mutual(sessionId, target)) return fail("recipient_unavailable");
+        if (profiles_.value(sessionId).busy || !rooms.roomForSession(sessionId).isEmpty()) return fail("busy");
+        const auto mesh = profiles_.value(target).meshId;
+        if (mesh.isEmpty()) return fail("not_in_mesh");
+        for (const auto& knock : knocks_)
+            if (knock.fromSession == sessionId || knock.toSession == target) return fail("busy");
+        if (knocks_.size() >= 64) return fail("resource_limit");
+        auto& profile = profiles_[sessionId];
+        if (profile.lastInvite.contains(identity) && now - profile.lastInvite.value(identity) < 10000)
+            return fail("rate_limited");
+        profile.lastInvite.insert(identity, now);
+        const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        knocks_.insert(id, {id, sessionId, target, identity, {}, mesh, now + 60000});
+        return {reply("knock.requested", {{"invitationId", id}}),
+            {target, event("knock.invitation", {{"invitationId", id}, {"fromIdentityId", profile.identityId},
+                {"displayName", profile.displayName}, {"meshId", mesh}, {"expiresInSeconds", 60}})}};
+    }
+    if (request.type == "knock.respond") {
+        const auto id = body.value("invitationId").toString();
+        auto found = knocks_.find(id);
+        if (found == knocks_.end() || found->toSession != sessionId) return fail("invitation_unavailable");
+        const auto knock = found.value();
+        knocks_.erase(found);
+        QVector<Delivery> deliveries{reply("knock.responded")};
+        QString status;
+        const auto decision = body.value("decision").toString();
+        const auto room = body.value("roomId").toString();
+        if (now >= knock.expiresAt) status = "expired";
+        else if (!mutual(knock.fromSession, sessionId) || profiles_.value(sessionId).meshId != knock.meshId) status = "cancelled";
+        else if (profiles_.value(knock.fromSession).busy || !rooms.roomForSession(knock.fromSession).isEmpty() || decision == "busy") status = "busy";
+        else if (decision == "decline") status = "declined";
+        else if (rooms.roomForSession(sessionId) != room || !rooms.canJoinRoom(room)) status = "unavailable";
+        else {
+            const auto result = rooms.createInvitation(sessionId, room, now);
+            if (const auto* issued = std::get_if<RoomRegistry::CreatedInvitation>(&result)) {
+                deliveries.append({knock.fromSession, event("knock.accepted", {{"invitationId", id},
+                    {"roomId", room}, {"meshId", knock.meshId}, {"token", issued->token}})});
+                status = "accepted";
+            } else status = "unavailable";
+        }
+        deliveries += finishKnock(knock, status);
+        return deliveries;
     }
     if (request.type == "contact.invite") {
         const auto identity = body.value("toIdentityId").toString();
@@ -140,6 +194,15 @@ QVector<Delivery> PresenceRegistry::handle(const QString& sessionId, const Envel
 
 QVector<Delivery> PresenceRegistry::maintainInvitations(const RoomRegistry& rooms, qint64 now) {
     QVector<Delivery> deliveries;
+    for (auto it = knocks_.begin(); it != knocks_.end();) {
+        QString reason;
+        if (now >= it->expiresAt) reason = "expired";
+        else if (!mutual(it->fromSession, it->toSession) || profiles_.value(it->toSession).meshId != it->meshId) reason = "cancelled";
+        else if (profiles_.value(it->fromSession).busy || !rooms.roomForSession(it->fromSession).isEmpty()) reason = "busy";
+        if (reason.isEmpty()) { ++it; continue; }
+        deliveries += finishKnock(it.value(), reason);
+        it = knocks_.erase(it);
+    }
     for (auto it = invitations_.begin(); it != invitations_.end();) {
         QString reason;
         if (now >= it->expiresAt) {
@@ -179,7 +242,9 @@ QVector<Delivery> PresenceRegistry::updateSnapshots() {
         QJsonArray snapshot;
         for (const auto& id : ids) {
             snapshot.append(QJsonObject{{"identityId", id},
-                {"online", mutual(it.key(), sessionsByIdentity_.value(id))}});
+                {"online", mutual(it.key(), sessionsByIdentity_.value(id))},
+                {"inConversation", mutual(it.key(), sessionsByIdentity_.value(id)) &&
+                    !profiles_.value(sessionsByIdentity_.value(id)).meshId.isEmpty()}});
         }
 
         if (!it->published || snapshot != it->snapshot) {
@@ -209,6 +274,7 @@ void PresenceRegistry::clear() {
     profiles_.clear();
     sessionsByIdentity_.clear();
     invitations_.clear();
+    knocks_.clear();
 }
 
 } // namespace tmc::server

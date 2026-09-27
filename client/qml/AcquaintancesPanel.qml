@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQml.Models
 
 Pane {
     id: control
@@ -92,7 +93,7 @@ Pane {
                         }
                         Label {
                             Layout.fillWidth: true
-                            text: contact.modelData.inviting ? qsTr("Ожидаем ответ…")
+                            text: contact.modelData.inviting || contact.modelData.requestingEntry ? qsTr("Ожидаем ответ…")
                                 : contact.modelData.inMesh ? qsTr("В беседе")
                                 : contact.modelData.presence === "online" ? qsTr("Онлайн")
                                 : contact.modelData.presence === "offline" ? qsTr("Офлайн") : qsTr("Недоступен")
@@ -121,6 +122,17 @@ Pane {
                             && !contact.modelData.inMesh && !control.viewModel.connecting
                             && !control.viewModel.serverBusy && !control.viewModel.invitationPending
                         onTriggered: control.viewModel.inviteAcquaintance(contact.modelData.peerId)
+                    }
+                    Instantiator {
+                        model: contact.modelData.presence === "online" && contact.modelData.inConversation ? 1 : 0
+                        delegate: MenuItem {
+                            text: contact.modelData.requestingEntry ? qsTr("Ожидаем входа…") : qsTr("Попроситься в беседу")
+                            enabled: !control.viewModel.meshVisible && !control.viewModel.connecting
+                                && !control.viewModel.serverBusy && !contact.modelData.requestingEntry
+                            onTriggered: control.viewModel.requestConversationEntry(contact.modelData.peerId)
+                        }
+                        onObjectAdded: function(index, object) { actions.insertItem(1, object); }
+                        onObjectRemoved: function(index, object) { actions.removeItem(object); }
                     }
                     MenuItem {
                         text: qsTr("Отправить файл…")

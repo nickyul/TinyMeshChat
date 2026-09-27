@@ -54,7 +54,7 @@ FileTransferService* NetworkSession::fileTransfers() const { return files_.get()
 FileTransferService* NetworkSession::personalFileTransfers() const { return personal_->files(); }
 ScreenShareService* NetworkSession::screenShare() const { return sharing_.get(); }
 
-Result<void> NetworkSession::sendFile(const QString& path, const QString& peerId) {
+Result<void> NetworkSession::sendFile(const QString& path, const QString& peerId, const QString& groupId) {
     if (!peerId.isEmpty() && mesh_.peer(peerId).peerId.isEmpty()) {
         if (!signalingConnected()) return Result<void>::failure("Подключитесь к серверу для передачи знакомому.");
         return personal_->sendFile(peerId, path);
@@ -65,7 +65,7 @@ Result<void> NetworkSession::sendFile(const QString& path, const QString& peerId
         if (peer.peerId == app_.identity().peerId || (!peerId.isEmpty() && peer.peerId != peerId)) continue;
         const auto link = connections_->infoForPeer(peer.peerId);
         if (!link || !link->open) continue;
-        const auto result = files_->offer(peer.peerId, peer.displayName, path);
+        const auto result = files_->offer(peer.peerId, peer.displayName, path, groupId);
         if (!result) return result;
         ++recipients;
     }

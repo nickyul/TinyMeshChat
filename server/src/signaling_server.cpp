@@ -214,7 +214,7 @@ void SignalingServer::receive(QWebSocket* socket, const QByteArray& bytes) {
         send(socket, MessageCodec::error(request.requestId, "identity_mismatch"));
         return;
     }
-    if (request.type.startsWith("presence.") || request.type.startsWith("contact.") || request.type == "mesh.relay" || request.type == "direct.send" || request.type == "mesh.leave") {
+    if (request.type.startsWith("knock.") || request.type.startsWith("presence.") || request.type.startsWith("contact.") || request.type == "mesh.relay" || request.type == "direct.send" || request.type == "mesh.leave") {
         deliver(presence_.handle(sessionId, request, rooms_, now));
     } else {
         auto deliveries = rooms_.handle(sessionId, request, now);

@@ -62,6 +62,8 @@ public:
     Result<void> createAccessInvitation();
     QVariantList acquaintances() const;
     Result<void> inviteAcquaintance(const QString& peerId);
+    Result<void> requestConversationEntry(const QString& peerId);
+    void respondToEntryRequest(const QString& id, bool accept);
     void respondToOnlineInvitation(const QString& invitationId, bool accept);
 
     Result<void> sendMessage(const QString& text);
@@ -69,7 +71,7 @@ public:
     FileTransferService* fileTransfers() const;
     FileTransferService* personalFileTransfers() const;
     ScreenShareService* screenShare() const;
-    Result<void> sendFile(const QString& path, const QString& peerId = {});
+    Result<void> sendFile(const QString& path, const QString& peerId = {}, const QString& groupId = {});
 
     Result<void> startCall();
     void leaveCall();
@@ -121,6 +123,8 @@ signals:
     void serverInvitationReady(QString link);
     void accessInvitationReady(QString link);
     void acquaintancesChanged();
+    void entryRequestReceived(QString id, QString displayName);
+    void entryRequestClosed(QString id);
     void onlineInvitationReceived(QString invitationId, QString displayName, QString server);
     void onlineInvitationClosed(QString invitationId);
 
@@ -275,6 +279,9 @@ private:
     QTimer presencePublishTimer_;
     QJsonObject lastPresence_;
     QHash<QString, bool> contactPresence_;
+    QSet<QString> contactConversations_;
+    QString outgoingKnockPeer_, outgoingKnockId_, outgoingKnockRequest_;
+    QHash<QString, QString> knockAcceptanceRequests_;
     bool presenceRegistered_{false};
     bool presenceConflictReported_{false};
     QString pendingContactTarget_;
@@ -286,6 +293,7 @@ private:
         bool accepting{false};
     };
     std::optional<OnlineInvitation> incomingOnlineInvitation_;
+    std::optional<OnlineInvitation> incomingKnock_;
 
     struct PendingPing {
         QString nonce;

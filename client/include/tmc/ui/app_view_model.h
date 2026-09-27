@@ -12,6 +12,7 @@
 #include <QVariantList>
 #include <QPointer>
 #include <QImage>
+#include <QSet>
 
 #include <memory>
 
@@ -93,7 +94,9 @@ public:
     int streamVolume() const { return streamVolume_; }
     void setStreamVolume(int percent);
     Q_INVOKABLE QVariantList fileRecipients() const;
+    Q_INVOKABLE int chatIndexForId(const QString& id) const;
     QVariantList fileTransfers() const;
+    Q_INVOKABLE void sendFileToRecipients(const QUrl& file, const QStringList& peerIds);
     Q_INVOKABLE void sendFile(const QUrl& file, const QString& peerId = {});
     Q_INVOKABLE void acceptFile(const QString& transferId, const QUrl& destination);
     Q_INVOKABLE void cancelFile(const QString& transferId);
@@ -173,6 +176,8 @@ public:
     Q_INVOKABLE void createServerInvitation();
     Q_INVOKABLE void acceptServerInvitation();
     Q_INVOKABLE void declineServerInvitation();
+    Q_INVOKABLE void requestConversationEntry(const QString& peerId);
+    Q_INVOKABLE void respondToEntryRequest(const QString& id, bool accept);
     Q_INVOKABLE void inviteAcquaintance(const QString& peerId);
     Q_INVOKABLE void respondToOnlineInvitation(const QString& invitationId, bool accept);
     Q_INVOKABLE void createMesh();
@@ -203,6 +208,9 @@ public:
     void checkForUpdatesAutomatically();
 
 signals:
+    void notificationSound(QString kind);
+    void chatLayoutAboutToChange();
+    void chatLayoutChanged();
     void streamVolumeChanged();
     void fileTransfersChanged();
     void fileOffered();
@@ -220,6 +228,8 @@ signals:
     void accessImportRequested(QString text);
     void accessInvitationReady(QString link);
     void acquaintancesChanged();
+    void entryRequestReceived(QString id, QString displayName);
+    void entryRequestClosed(QString id);
     void onlineInvitationReceived(QString invitationId, QString displayName, QString server);
     void onlineInvitationClosed(QString invitationId);
     void audioDevicesChanged();
@@ -235,6 +245,7 @@ signals:
     void signalingRequested(QString kind, QString text);
 
 private:
+    QSet<QString> announcedParticipants_;
     QImage lastStreamFrame_;
     int streamVolume_{100};
     QPointer<QVideoSink> screenVideoSink_;

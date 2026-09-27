@@ -507,6 +507,7 @@ void NetworkSession::handleServerPayload(const QString& sender, const QString& p
 }
 
 void NetworkSession::leaveServerRoom() {
+    if (incomingKnock_) { const auto id = incomingKnock_->id; incomingKnock_.reset(); emit entryRequestClosed(id); }
     pendingContactTarget_.clear();
     onlineInvitationTargets_.clear();
     emit acquaintancesChanged();

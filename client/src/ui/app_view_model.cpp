@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QVector>
+#include <QUuid>
 
 #include <cmath>
 #include <utility>
@@ -33,7 +34,10 @@ public:
         CreatedAtRole,
         LocalRole,
         AcknowledgedCountRole,
-        ExpectedCountRole
+        ExpectedCountRole,
+        EntryKindRole,
+        FileCardRole,
+        EntryIdRole
     };
 
     struct Row {
@@ -42,6 +46,8 @@ public:
         int acknowledgedCount{0};
         int expectedCount{0};
         bool local{false};
+        QString fileGroup;
+        QVariantMap fileCard;
     };
 
     explicit MessagesModel(QObject* parent = nullptr) : QAbstractListModel(parent) {
@@ -57,6 +63,9 @@ public:
         }
         const auto& row = rows_[index.row()];
         switch (role) {
+        case EntryIdRole: return entryId(row);
+        case EntryKindRole: return row.fileGroup.isEmpty() ? QStringLiteral("message") : QStringLiteral("file");
+        case FileCardRole: return row.fileCard;
         case AuthorRole:
             return row.author;
         case TextRole:
@@ -80,7 +89,7 @@ public:
                 {CreatedAtRole, "createdAt"},
                 {LocalRole, "local"},
                 {AcknowledgedCountRole, "acknowledgedCount"},
-                {ExpectedCountRole, "expectedCount"}};
+                {ExpectedCountRole, "expectedCount"}, {EntryKindRole, "entryKind"}, {FileCardRole, "fileCard"}, {EntryIdRole, "entryId"}};
     }
 
     void add(const ChatMessage& message, QString author, bool local) {
@@ -90,9 +99,59 @@ public:
         endInsertRows();
         constexpr int MaxVisibleMessages = 2000;
         if (rows_.size() > MaxVisibleMessages) {
-            beginRemoveRows({}, 0, 0);
-            rows_.removeFirst();
-            endRemoveRows();
+            int oldestMessage = 0;
+            while (oldestMessage < rows_.size() && !rows_[oldestMessage].fileGroup.isEmpty()) ++oldestMessage;
+            if (oldestMessage < rows_.size()) {
+                beginRemoveRows({}, oldestMessage, oldestMessage);
+                rows_.removeAt(oldestMessage);
+                endRemoveRows();
+            }
+        }
+    }
+
+    static QString entryId(const Row& row) {
+        return row.fileGroup.isEmpty() ? "message:" + row.message.messageId : "file:" + row.fileGroup;
+    }
+
+    int indexForId(const QString& id) const {
+        for (int i = 0; i < rows_.size(); ++i) if (entryId(rows_[i]) == id) return i;
+        return -1;
+    }
+
+    void syncFiles(const QVariantList& transfers) {
+        QHash<QString, QVariantList> groups;
+        QStringList order;
+        for (const auto& item : transfers) {
+            const auto transfer = item.toMap();
+            if (!transfer.value("id").toString().startsWith("mesh:") || !transfer.value("currentSession").toBool()) continue;
+            const auto group = transfer.value("groupId").toString();
+            if (!groups.contains(group)) order.prepend(group);
+            groups[group].append(transfer);
+        }
+        for (int i = rows_.size() - 1; i >= 0; --i) {
+            if (!rows_[i].fileGroup.isEmpty() && !groups.contains(rows_[i].fileGroup)) {
+                beginRemoveRows({}, i, i); rows_.removeAt(i); endRemoveRows();
+            }
+        }
+        for (const auto& group : order) {
+            const auto parts = groups.value(group);
+            auto card = parts.first().toMap();
+            card.insert("transfers", parts);
+            int position = -1;
+            for (int i = 0; i < rows_.size(); ++i) if (rows_[i].fileGroup == group) { position = i; break; }
+            if (position >= 0) {
+                if (rows_[position].fileCard != card) {
+                    rows_[position].fileCard = card;
+                    emit dataChanged(index(position), index(position), {FileCardRole});
+                }
+            } else {
+                Row row;
+                row.message.createdAt = QDateTime::currentDateTime();
+                row.local = card.value("outgoing").toBool();
+                row.fileGroup = group; row.fileCard = card;
+                const int i = rows_.size();
+                beginInsertRows({}, i, i); rows_.append(std::move(row)); endInsertRows();
+            }
         }
     }
 
@@ -500,6 +559,14 @@ void AppViewModel::inviteAcquaintance(const QString& peerId) {
     if (!result) reportError(result.error());
 }
 
+void AppViewModel::requestConversationEntry(const QString& peerId) {
+    if (!session_) return;
+    const auto result = session_->requestConversationEntry(peerId);
+    if (!result) reportError(result.error());
+}
+void AppViewModel::respondToEntryRequest(const QString& id, bool accept) {
+    if (session_) session_->respondToEntryRequest(id, accept);
+}
 void AppViewModel::respondToOnlineInvitation(const QString& invitationId, bool accept) {
     if (session_) session_->respondToOnlineInvitation(invitationId, accept);
 }
@@ -1025,8 +1092,16 @@ void AppViewModel::initializeSession() {
         lastStreamFrame_ = image;
         if (screenVideoSink_) screenVideoSink_->setVideoFrame(image.isNull() ? QVideoFrame{} : QVideoFrame(image));
     });
-    connect(session_->fileTransfers(), &FileTransferService::changed, this, &AppViewModel::fileTransfersChanged);
-    connect(session_->fileTransfers(), &FileTransferService::incomingOffered, this, &AppViewModel::fileOffered);
+    connect(session_->fileTransfers(), &FileTransferService::changed, this, [this] {
+        emit chatLayoutAboutToChange();
+        messages_->syncFiles(fileTransfers());
+        emit chatLayoutChanged();
+        emit fileTransfersChanged();
+    });
+    connect(session_->fileTransfers(), &FileTransferService::incomingOffered, this, [this] {
+        emit fileOffered();
+        emit notificationSound("message");
+    });
     connect(session_->personalFileTransfers(), &FileTransferService::changed, this, &AppViewModel::fileTransfersChanged);
     connect(session_->personalFileTransfers(), &FileTransferService::incomingOffered, this, &AppViewModel::fileOffered);
     connect(session_.get(), &NetworkSession::statusChanged, this, &AppViewModel::setStatus);
@@ -1040,6 +1115,7 @@ void AppViewModel::initializeSession() {
     connect(session_.get(), &NetworkSession::meshStateChanged, this,
             [this](MeshSessionState state) {
                 if (state == MeshSessionState::Disconnected) {
+                    announcedParticipants_.clear();
                     messages_->clear();
                     peers_->resetSelf(controller_.identity());
                     setMeshPeerCounts(0, 0);
@@ -1051,9 +1127,16 @@ void AppViewModel::initializeSession() {
             });
     connect(session_.get(), &NetworkSession::meshChanged, this, &AppViewModel::setMeshPeerCounts);
     connect(session_.get(), &NetworkSession::peerRemoved, this,
-            [this](const QString& id) { peers_->removePeer(id); });
+            [this](const QString& id) {
+                peers_->removePeer(id);
+                if (announcedParticipants_.remove(id)) emit notificationSound("leave");
+            });
     connect(session_.get(), &NetworkSession::peerChanged, this,
             [this](const QString& id, const QString& name, bool connected) {
+                if (connected && id != controller_.identity().peerId && !announcedParticipants_.contains(id)) {
+                    announcedParticipants_.insert(id);
+                    emit notificationSound("join");
+                }
                 peers_->updatePeer(id, name, connected);
                 peers_->updateVolume(id, controller_.peerVolume(id));
             });
@@ -1081,11 +1164,16 @@ void AppViewModel::initializeSession() {
             [this](const ChatMessage& message, bool local) {
                 const auto author =
                     local ? controller_.identity().displayName : peers_->nameFor(message.senderId);
+                emit chatLayoutAboutToChange();
                 messages_->add(message, author, local);
+                emit chatLayoutChanged();
+                if (!local) emit notificationSound("message");
             });
     connect(session_.get(), &NetworkSession::deliveryChanged, this,
             [this](const QString& id, int acknowledged, int expected) {
+                emit chatLayoutAboutToChange();
                 messages_->updateDelivery(id, acknowledged, expected);
+                emit chatLayoutChanged();
             });
     connect(session_.get(), &NetworkSession::callStateChanged, this,
             [this](bool active, bool muted) {
@@ -1113,6 +1201,12 @@ void AppViewModel::initializeSession() {
             this, &AppViewModel::accessInvitationReady);
     connect(session_.get(), &NetworkSession::acquaintancesChanged,
             this, &AppViewModel::acquaintancesChanged);
+    connect(session_.get(), &NetworkSession::entryRequestReceived, this,
+            [this](const QString& id, const QString& name) {
+                emit entryRequestReceived(id, name);
+                emit notificationSound("knock");
+            });
+    connect(session_.get(), &NetworkSession::entryRequestClosed, this, &AppViewModel::entryRequestClosed);
     connect(session_.get(), &NetworkSession::onlineInvitationReceived,
             this, &AppViewModel::onlineInvitationReceived);
     connect(session_.get(), &NetworkSession::onlineInvitationClosed,
@@ -1207,6 +1301,10 @@ void AppViewModel::setStreamVolume(int percent) {
     emit streamVolumeChanged();
 }
 
+int AppViewModel::chatIndexForId(const QString& id) const {
+    return messages_->indexForId(id);
+}
+
 QVariantList AppViewModel::fileRecipients() const {
     return session_ ? session_->fileRecipients() : QVariantList{};
 }
@@ -1224,6 +1322,18 @@ QVariantList AppViewModel::fileTransfers() const {
     append(session_->fileTransfers()->transfers(), "mesh:");
     append(session_->personalFileTransfers()->transfers(), "personal:");
     return rows;
+}
+
+void AppViewModel::sendFileToRecipients(const QUrl& file, const QStringList& peerIds) {
+    if (!session_ || !file.isLocalFile()) return;
+    const auto group = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSet<QString> sent;
+    for (const auto& peer : peerIds) {
+        if (peer.isEmpty() || sent.contains(peer)) continue;
+        sent.insert(peer);
+        const auto result = session_->sendFile(file.toLocalFile(), peer, group);
+        if (!result) { reportError(result.error()); break; }
+    }
 }
 
 void AppViewModel::sendFile(const QUrl& file, const QString& peerId) {

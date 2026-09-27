@@ -1,5 +1,11 @@
 <RCC>
   <qresource prefix="/">
+    <file alias="qml/ConversationFileCard.qml">../qml/ConversationFileCard.qml</file>
+    <file alias="qml/NotificationSounds.qml">../qml/NotificationSounds.qml</file>
+    <file alias="sounds/knock.wav">sounds/knock.wav</file>
+    <file alias="sounds/join.wav">sounds/join.wav</file>
+    <file alias="sounds/leave.wav">sounds/leave.wav</file>
+    <file alias="sounds/message.wav">sounds/message.wav</file>
     <file alias="default-config.json">../config/default-config.json</file>
     <file alias="icons/tinymesh.png">icons/tinymesh.png</file>
     <file alias="icons/tray.png">icons/tray.png</file>

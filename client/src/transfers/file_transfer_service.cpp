@@ -1,6 +1,12 @@
 #include "tmc/transfers/file_transfer_service.h"
 
 #include <QCryptographicHash>
+#include <QImageReader>
+#include <QImage>
+#include <QBuffer>
+#include <QPointer>
+#include <QThreadPool>
+#include <QUrl>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -19,7 +25,7 @@ constexpr qsizetype HeaderSize = 29;
 constexpr qsizetype ChunkSize = 16 * 1024;
 constexpr qint64 MaxFileSize = qint64{8} * 1024 * 1024 * 1024 * 1024;
 constexpr int MaxTransfers = 64;
-enum class Kind : quint8 { Offer = 1, Accept, Chunk, Ack, Finish, Complete, Cancel };
+enum class Kind : quint8 { Offer = 1, Accept, Chunk, Ack, Finish, Complete, Cancel, Preview };
 enum class Phase { Hashing, Offered, Incoming, Sending, Receiving, Complete, Cancelled, Failed };
 
 bool terminal(Phase phase) {
@@ -62,7 +68,9 @@ QString phaseLabel(Phase phase, bool connected) {
 
 struct FileTransferService::State {
     struct Transfer {
-        QString id, peerId, peerName, name, path, error;
+        QString id, peerId, peerName, name, path, error, groupId;
+        QByteArray preview;
+        bool previewSent{false};
         bool outgoing{false};
         bool currentSession{true};
         Phase phase{Phase::Incoming};
@@ -114,7 +122,7 @@ bool FileTransferService::hasActive(const QString& peerId) const {
     return false;
 }
 
-Result<void> FileTransferService::offer(const QString& peerId, const QString& peerName, const QString& path) {
+Result<void> FileTransferService::offer(const QString& peerId, const QString& peerName, const QString& path, const QString& groupId) {
     if (peerId.isEmpty() || state_->entries.size() >= MaxTransfers)
         return Result<void>::failure("Закройте завершённые передачи перед добавлением новых.");
     const QFileInfo info(path);
@@ -122,6 +130,7 @@ Result<void> FileTransferService::offer(const QString& peerId, const QString& pe
         return Result<void>::failure("Невозможно отправить выбранный файл.");
     auto transfer = std::make_shared<State::Transfer>();
     transfer->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    transfer->groupId = groupId.isEmpty() ? transfer->id : groupId;
     transfer->peerId = peerId;
     transfer->peerName = peerName;
     transfer->name = info.fileName();
@@ -133,6 +142,33 @@ Result<void> FileTransferService::offer(const QString& peerId, const QString& pe
     if (!transfer->source->open(QIODevice::ReadOnly)) return Result<void>::failure("Не удалось открыть файл для отправки.");
     state_->entries.insert(transfer->id, transfer);
     state_->order.prepend(transfer->id);
+    const auto id = transfer->id;
+    QPointer<FileTransferService> self(this);
+    QThreadPool::globalInstance()->start([self, id, path] {
+        QImageReader reader(path);
+        const auto format = reader.format().toLower();
+        const auto size = reader.size();
+        if ((format != "jpeg" && format != "png" && format != "webp" && format != "gif" && format != "bmp") ||
+            size.width() <= 0 || size.height() <= 0 || qint64(size.width()) * size.height() > 40000000) return;
+        reader.setAutoTransform(true);
+        reader.setScaledSize(size.scaled(256, 256, Qt::KeepAspectRatio));
+        const auto image = reader.read().scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        if (image.isNull()) return;
+        QByteArray preview;
+        for (const int quality : {70, 50, 30}) {
+            preview.clear(); QBuffer buffer(&preview); buffer.open(QIODevice::WriteOnly);
+            image.save(&buffer, "JPEG", quality);
+            if (preview.size() <= ChunkSize) break;
+        }
+        if (preview.isEmpty() || preview.size() > ChunkSize || !self) return;
+        QMetaObject::invokeMethod(self, [self, id, preview] {
+            if (!self) return;
+            const auto transfer = self->state_->entries.value(id);
+            if (!transfer) return;
+            transfer->preview = preview;
+            emit self->changed();
+        }, Qt::QueuedConnection);
+    });
     emit changed();
     return Result<void>::success();
 }
@@ -183,6 +219,7 @@ void FileTransferService::setPeerConnected(const QString& peerId, bool connected
         if (transfer->peerId == peerId && transfer->outgoing && transfer->phase == Phase::Sending) {
             transfer->phase = Phase::Offered;
             transfer->lastOffer = -2000;
+            transfer->previewSent = false;
         }
     }
     emit changed();
@@ -236,6 +273,7 @@ void FileTransferService::receive(const QString& peerId, const QString& peerName
             if (state_->entries.size() >= MaxTransfers) { state_->sender(peerId, frame(Kind::Cancel, id)); return; }
             transfer = std::make_shared<State::Transfer>();
             transfer->id = id;
+            transfer->groupId = id;
             transfer->peerId = peerId;
             transfer->peerName = peerName;
             transfer->name = name;
@@ -255,6 +293,19 @@ void FileTransferService::receive(const QString& peerId, const QString& peerName
         return;
     }
     if (!transfer) return;
+    if (kind == Kind::Preview) {
+        if (transfer->outgoing || !transfer->preview.isEmpty() || transfer->phase == Phase::Cancelled || transfer->phase == Phase::Failed) return;
+        QBuffer buffer; buffer.setData(payload); buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer, "JPEG");
+        const auto size = reader.size();
+        if (size.width() <= 0 || size.height() <= 0 || size.width() > 256 || size.height() > 256) return;
+        const auto image = reader.read();
+        if (image.isNull()) return;
+        QBuffer canonical(&transfer->preview); canonical.open(QIODevice::WriteOnly);
+        image.save(&canonical, "JPEG", 75);
+        emit changed();
+        return;
+    }
     if (kind == Kind::Cancel && !terminal(transfer->phase)) {
         transfer->phase = Phase::Cancelled;
         transfer->source.reset();
@@ -356,6 +407,10 @@ void FileTransferService::pump() {
             if (state_->sender(transfer->peerId, frame(Kind::Offer, id, transfer->size, transfer->digest + transfer->name.toUtf8())))
                 transfer->lastOffer = now;
         }
+        if (transfer->outgoing && !transfer->previewSent && !transfer->preview.isEmpty() &&
+            (transfer->phase == Phase::Offered || transfer->phase == Phase::Sending || transfer->phase == Phase::Complete) && transfer->lastOffer >= 0) {
+            transfer->previewSent = state_->sender(transfer->peerId, frame(Kind::Preview, id, 0, transfer->preview));
+        }
         if (transfer->phase != Phase::Sending) continue;
         while (chunkBudget > 0 && transfer->sent < transfer->size && transfer->sent - transfer->position < 256 * 1024) {
             const auto bytes = transfer->source->read(std::min<qint64>(ChunkSize, transfer->size - transfer->sent));
@@ -382,7 +437,10 @@ QVariantList FileTransferService::transfers() const {
     QVariantList rows;
     for (const auto& id : state_->order) {
         const auto& t = *state_->entries.value(id);
-        rows.append(QVariantMap{{"id", id}, {"peerId", t.peerId}, {"peerName", t.peerName}, {"name", t.name},
+        const auto previewUrl = t.preview.isEmpty() ? QString{} : QString("data:image/jpeg;base64,") + QString::fromLatin1(t.preview.toBase64());
+        const auto imageUrl = t.preview.isEmpty() ? QString{} : (t.outgoing || t.phase == Phase::Complete)
+            ? QUrl::fromLocalFile(t.path).toString(QUrl::FullyEncoded) : previewUrl;
+        rows.append(QVariantMap{{"groupId", t.groupId}, {"previewUrl", previewUrl}, {"imageUrl", imageUrl}, {"id", id}, {"peerId", t.peerId}, {"peerName", t.peerName}, {"name", t.name},
             {"currentSession", t.currentSession}, {"outgoing", t.outgoing}, {"size", t.size}, {"transferred", t.position},
             {"progress", t.size == 0 ? (t.phase == Phase::Complete ? 1.0 : 0.0) : double(t.position) / double(t.size)},
             {"status", t.error.isEmpty() ? phaseLabel(t.phase, state_->connected.contains(t.peerId)) : t.error},

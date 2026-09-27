@@ -85,12 +85,21 @@ message PresencePublish {
 message PresencePeer {
   optional string identityId = 1;
   optional bool online = 2;
+  optional bool inConversation = 3;
 }
 
 message PresenceSnapshot {
   repeated PresencePeer peers = 1;
 }
 
+message KnockRequest {
+  optional string toIdentityId = 1;
+}
+message KnockRespond {
+  optional string invitationId = 1;
+  optional string decision = 2;
+  optional string roomId = 3;
+}
 message ContactInvite {
   optional string toIdentityId = 1;
   optional string roomId = 2;
@@ -206,6 +215,14 @@ message Envelope {
   optional uint32 version = 1;
   optional string request_id = 2;
   oneof body {
+    KnockRequest knock_request = 130;
+    ContactInvited knock_requested = 131;
+    KnockRespond knock_respond = 132;
+    Empty knock_responded = 133;
+    ContactInvitation knock_invitation = 134;
+    ContactAccepted knock_accepted = 135;
+    ContactResult knock_result = 136;
+    ContactClosed knock_closed = 137;
     MeshLeave mesh_leave = 120;
     Empty mesh_left = 121;
     MeshDeparture mesh_departed = 122;
