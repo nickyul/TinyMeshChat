@@ -33,7 +33,8 @@ QVariantList NetworkSession::acquaintances() const {
         const auto status = !security::validKey(peer.peerId) ? QStringLiteral("legacy") : !known ? QStringLiteral("unknown") : contactPresence_.value(peer.peerId)
             ? QStringLiteral("online") : QStringLiteral("offline");
         rows.append(QVariantMap{{"peerId", peer.peerId}, {"displayName", peer.displayName},
-            {"presence", status}, {"inviting", onlineInvitationTargets_.contains(peer.peerId)},
+            {"presence", status}, {"inConversation", contactConversations_.contains(peer.peerId)},
+            {"requestingEntry", outgoingKnockPeer_ == peer.peerId}, {"inviting", onlineInvitationTargets_.contains(peer.peerId)},
             {"inMesh", !mesh_.peer(peer.peerId).peerId.isEmpty()}});
     }
     return rows;
@@ -44,7 +45,7 @@ void NetworkSession::publishPresence() {
     QJsonArray known;
     for (const auto& peer : app_.acquaintances()) if (security::validKey(peer.peerId)) known.append(peer.peerId);
     const QJsonObject body{{"identityId", app_.identity().peerId}, {"displayName", app_.identity().displayName},
-        {"knownPeers", known}, {"busy", !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()}};
+        {"knownPeers", known}, {"meshId", mesh_.joined() ? mesh_.meshId() : QString{}}, {"busy", !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()}};
     if (body == lastPresence_) return;
     const auto result = signaling_->request("presence.publish", body);
     if (std::holds_alternative<QString>(result)) lastPresence_ = body;
@@ -54,6 +55,10 @@ void NetworkSession::resetPresence() {
     presencePublishTimer_.stop();
     lastPresence_ = {};
     contactPresence_.clear();
+    contactConversations_.clear();
+    outgoingKnockPeer_.clear(); outgoingKnockId_.clear(); outgoingKnockRequest_.clear();
+    knockAcceptanceRequests_.clear();
+    if (incomingKnock_) { const auto id = incomingKnock_->id; incomingKnock_.reset(); emit entryRequestClosed(id); }
     presenceRegistered_ = false;
     presenceConflictReported_ = false;
     pendingContactTarget_.clear();
@@ -94,10 +99,58 @@ Result<void> NetworkSession::inviteAcquaintance(const QString& peerId) {
     return Result<void>::success();
 }
 
+Result<void> NetworkSession::requestConversationEntry(const QString& peerId) {
+    if (!mesh_.meshId().isEmpty() || !connections_->connections().isEmpty() || signalingBusy())
+        return Result<void>::failure("Сначала выйдите из текущей беседы.");
+    if (!signalingConnected() || !presenceRegistered_ || !contactPresence_.value(peerId) ||
+        !contactConversations_.contains(peerId)) return Result<void>::failure("Беседа знакомого сейчас недоступна.");
+    if (!outgoingKnockPeer_.isEmpty()) return Result<void>::failure("Дождитесь ответа на предыдущий запрос.");
+    const auto request = signaling_->request("knock.request", {{"toIdentityId", peerId}});
+    if (const auto* id = std::get_if<QString>(&request)) {
+        outgoingKnockPeer_ = peerId; outgoingKnockRequest_ = *id;
+        emit acquaintancesChanged();
+        emit statusChanged("Запрос на вход отправлен. Ожидаем ответ знакомого.");
+        return Result<void>::success();
+    }
+    return Result<void>::failure("Не удалось отправить запрос на вход.");
+}
+
+void NetworkSession::respondToEntryRequest(const QString& id, bool accept) {
+    if (!incomingKnock_ || incomingKnock_->id != id || incomingKnock_->accepting || !signalingConnected()) return;
+    if (!accept || !mesh_.joined() || incomingKnock_->meshId != mesh_.meshId() ||
+        mesh_.peerCount() >= policy_.maxPeers || signalingBusy() || invitationPending()) {
+        (void)signaling_->request("knock.respond", {{"invitationId", id},
+            {"decision", accept ? "busy" : "decline"}, {"roomId", ""}});
+        incomingKnock_.reset(); emit entryRequestClosed(id);
+        return;
+    }
+    incomingKnock_->accepting = true;
+    pendingContactTarget_ = incomingKnock_->senderId;
+    if (!serverMesh_) recoveryAfter_ = recoveryClock_.elapsed();
+    serverMesh_ = true;
+    serverInvitationRequested_ = true;
+    broadcastSignalingState();
+    requestServerInvitationWhenReady();
+    recoverServerRoom();
+    emit signalingServerChanged();
+}
+
 void NetworkSession::submitOnlineInvitation() {
     const auto target = pendingContactTarget_;
     pendingContactTarget_.clear();
     serverInvitationRequested_ = false;
+    if (incomingKnock_ && incomingKnock_->accepting && incomingKnock_->senderId == target) {
+        const auto id = incomingKnock_->id;
+        const auto result = signaling_->request("knock.respond", {{"invitationId", id},
+            {"decision", "accept"}, {"roomId", serverRoomId_}});
+        if (const auto* requestId = std::get_if<QString>(&result)) {
+            knockAcceptanceRequests_.insert(*requestId, id);
+        } else {
+            incomingKnock_.reset(); emit entryRequestClosed(id);
+            emit errorOccurred("Не удалось принять запрос на вход.");
+        }
+        return;
+    }
     const auto request = signaling_->request("contact.invite", {{"toIdentityId", target},
         {"roomId", serverRoomId_}, {"meshId", mesh_.meshId()}});
     if (const auto* requestId = std::get_if<QString>(&request)) {
@@ -128,6 +181,15 @@ void NetworkSession::respondToOnlineInvitation(const QString& invitationId, bool
 }
 
 bool NetworkSession::handlePresenceResponse(const QString& type, const signaling_protocol::Envelope& response) {
+    if (type == "knock.request") {
+        if (response.requestId && *response.requestId == outgoingKnockRequest_)
+            outgoingKnockId_ = response.body.value("invitationId").toString();
+        return true;
+    }
+    if (type == "knock.respond") {
+        if (response.requestId) knockAcceptanceRequests_.remove(*response.requestId);
+        return true;
+    }
     if (type == "presence.publish") {
         presenceRegistered_ = true;
         presenceConflictReported_ = false;
@@ -150,11 +212,49 @@ bool NetworkSession::handlePresenceEvent(const signaling_protocol::Envelope& eve
     const auto& body = event.body;
     if (event.type == "presence.snapshot") {
         contactPresence_.clear();
+        contactConversations_.clear();
         for (const auto& item : body.value("peers").toArray()) {
             const auto peer = item.toObject();
             contactPresence_.insert(peer.value("identityId").toString(), peer.value("online").toBool());
+            if (peer.value("inConversation").toBool()) contactConversations_.insert(peer.value("identityId").toString());
         }
         emit acquaintancesChanged();
+        return true;
+    }
+    if (event.type.startsWith("knock.")) {
+        const auto id = body.value("invitationId").toString();
+        if (event.type == "knock.invitation") {
+            const auto sender = body.value("fromIdentityId").toString();
+            const bool known = std::any_of(app_.acquaintances().cbegin(), app_.acquaintances().cend(),
+                [&](const auto& peer) { return peer.peerId == sender; });
+            if (!known || incomingKnock_ || incomingOnlineInvitation_ || !mesh_.joined() ||
+                mesh_.meshId() != body.value("meshId").toString() || signalingBusy()) {
+                (void)signaling_->request("knock.respond", {{"invitationId", id}, {"decision", "busy"}, {"roomId", ""}});
+                return true;
+            }
+            incomingKnock_ = OnlineInvitation{id, sender, mesh_.meshId(), false};
+            emit entryRequestReceived(id, body.value("displayName").toString());
+        } else if (event.type == "knock.accepted") {
+            if (id != outgoingKnockId_ || !mesh_.meshId().isEmpty() || !connections_->connections().isEmpty()) return true;
+            outgoingKnockId_.clear(); outgoingKnockPeer_.clear(); outgoingKnockRequest_.clear();
+            emit acquaintancesChanged();
+            const auto result = joinServerInvitation({signaling_->url(), body.value("roomId").toString(),
+                body.value("meshId").toString(), body.value("token").toString()});
+            if (!result) emit errorOccurred(result.error());
+        } else if (event.type == "knock.closed") {
+            if (incomingKnock_ && incomingKnock_->id == id) {
+                if (incomingKnock_->accepting && pendingContactTarget_ == incomingKnock_->senderId) {
+                    pendingContactTarget_.clear(); serverInvitationRequested_ = false;
+                }
+                incomingKnock_.reset(); emit entryRequestClosed(id);
+            }
+        } else if (event.type == "knock.result" && id == outgoingKnockId_) {
+            outgoingKnockId_.clear(); outgoingKnockPeer_.clear(); outgoingKnockRequest_.clear();
+            emit acquaintancesChanged();
+            const auto status = body.value("status").toString();
+            emit statusChanged(status == "declined" ? "Знакомый отклонил запрос на вход."
+                : status == "expired" ? "Время ожидания ответа истекло." : "Запрос на вход больше не действует.");
+        }
         return true;
     }
     if (!event.type.startsWith("contact.")) return false;
@@ -199,6 +299,21 @@ bool NetworkSession::handlePresenceEvent(const signaling_protocol::Envelope& eve
 }
 
 bool NetworkSession::handlePresenceFailure(const QString& requestId, const QString& type, const QString& code) {
+    if (type == "knock.request" || type == "knock.respond") {
+        if (type == "knock.request" && requestId != outgoingKnockRequest_) return true;
+        if (type == "knock.request" && requestId == outgoingKnockRequest_) {
+            outgoingKnockId_.clear(); outgoingKnockPeer_.clear(); outgoingKnockRequest_.clear();
+            emit acquaintancesChanged();
+        }
+        if (type == "knock.respond") {
+            const auto id = knockAcceptanceRequests_.take(requestId);
+            if (id.isEmpty() || !incomingKnock_ || incomingKnock_->id != id) return true;
+            incomingKnock_.reset(); emit entryRequestClosed(id);
+        }
+        emit statusChanged(code == "rate_limited" ? "Подождите перед повторным запросом."
+            : code == "busy" ? "Знакомый пока не может принять запрос." : "Запрос на вход недоступен или истёк.");
+        return true;
+    }
     if (type == "presence.publish") {
         presenceRegistered_ = false;
         contactPresence_.clear();

@@ -20,6 +20,7 @@ private:
     struct Profile {
         QString identityId;
         QString displayName;
+        QString meshId;
         QSet<QString> known;
         bool busy{false};
         QJsonArray snapshot;
@@ -36,6 +37,8 @@ private:
     QHash<QString, Profile> profiles_;
     QHash<QString, QString> sessionsByIdentity_;
     QHash<QString, Invitation> invitations_;
+    QHash<QString, Invitation> knocks_;
+    QVector<Delivery> finishKnock(const Invitation& invitation, const QString& status) const;
 };
 
 } // namespace tmc::server

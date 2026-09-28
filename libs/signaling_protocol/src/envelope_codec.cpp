@@ -1,71 +1,119 @@
 #include "tmc/signaling_protocol/envelope_codec.h"
+#include "proto/signaling.pb.h"
 
 #include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonParseError>
-#include <QSet>
-#include <QVector>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/message.h>
+#include <google/protobuf/unknown_field_set.h>
+
+#include <limits>
+#include <cmath>
 
 namespace tmc::signaling_protocol {
 namespace {
+using google::protobuf::FieldDescriptor;
+using google::protobuf::Message;
 
 CodecError error(CodecErrorCode code, const char* message) {
     return {code, QString::fromLatin1(message)};
 }
 
-bool isLowerOrDigit(QChar character) {
-    const auto c = character.unicode();
+bool isLowerOrDigit(QChar c) {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
 }
 
-bool isWhitespace(char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-// Run only after Qt has validated the complete JSON syntax. Scan the original
-// bytes because QJsonObject no longer preserves duplicate keys. Objects inside
-// arrays get their own key sets; escaped key names are decoded by Qt as well.
-bool hasDuplicateKeys(const QByteArray& bytes) {
-    QVector<QSet<QString>> objects;
-    for (qsizetype pos = 0; pos < bytes.size();) {
-        const auto c = bytes[pos];
-        if (c == '{') {
-            objects.append(QSet<QString>{});
-            ++pos;
-        } else if (c == '}') {
-            objects.removeLast();
-            ++pos;
-        } else if (c == '"') {
-            const auto start = pos++;
-            while (pos < bytes.size()) {
-                if (bytes[pos] == '\\') {
-                    pos += 2;
-                } else if (bytes[pos++] == '"') {
-                    break;
-                }
+// The application owns Qt values; the wire schema owns field names and types.
+// No JSON text is serialized into the protobuf envelope.
+bool writeObject(const QJsonObject& object, Message& message) {
+    const auto* descriptor = message.GetDescriptor();
+    const auto* reflection = message.GetReflection();
+    for (auto it = object.begin(); it != object.end(); ++it) {
+        const auto* field = descriptor->FindFieldByName(it.key().toStdString());
+        if (!field) return false;
+        const auto value = it.value();
+        if (field->is_repeated()) {
+            if (!value.isArray()) return false;
+            for (const auto& item : value.toArray()) {
+                if (field->cpp_type() == FieldDescriptor::CPPTYPE_STRING) {
+                    if (!item.isString()) return false;
+                    reflection->AddString(&message, field, item.toString().toStdString());
+                } else if (field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+                    if (!item.isObject() || !writeObject(item.toObject(), *reflection->AddMessage(&message, field))) return false;
+                } else return false;
             }
-            const auto end = pos;
-            while (pos < bytes.size() && isWhitespace(bytes[pos])) {
-                ++pos;
-            }
-            if (pos < bytes.size() && bytes[pos] == ':') {
-                QByteArray wrapped("[");
-                wrapped.append(bytes.mid(start, end - start));
-                wrapped.append(']');
-                const auto key = QJsonDocument::fromJson(wrapped).array().at(0).toString();
-                auto& keys = objects.last();
-                if (keys.contains(key)) {
-                    return true;
-                }
-                keys.insert(key);
-            }
-        } else {
-            ++pos;
+            continue;
+        }
+        switch (field->cpp_type()) {
+        case FieldDescriptor::CPPTYPE_STRING:
+            if (!value.isString()) return false;
+            reflection->SetString(&message, field, value.toString().toStdString());
+            break;
+        case FieldDescriptor::CPPTYPE_BOOL:
+            if (!value.isBool()) return false;
+            reflection->SetBool(&message, field, value.toBool());
+            break;
+        case FieldDescriptor::CPPTYPE_UINT32: {
+            const auto number = value.toDouble(-1);
+            if (!value.isDouble() || !std::isfinite(number) || number < 0 || number > std::numeric_limits<uint32_t>::max() ||
+                number != static_cast<uint32_t>(number)) return false;
+            reflection->SetUInt32(&message, field, static_cast<uint32_t>(number));
+            break;
+        }
+        case FieldDescriptor::CPPTYPE_MESSAGE:
+            if (!value.isObject() || !writeObject(value.toObject(), *reflection->MutableMessage(&message, field))) return false;
+            break;
+        default: return false;
         }
     }
-    return false;
+    return true;
 }
 
+std::optional<QJsonObject> readObject(const Message& message) {
+    const auto* descriptor = message.GetDescriptor();
+    const auto* reflection = message.GetReflection();
+    if (reflection->GetUnknownFields(message).field_count() != 0) return std::nullopt;
+    QJsonObject object;
+    for (int i = 0; i < descriptor->field_count(); ++i) {
+        const auto* field = descriptor->field(i);
+        const auto fieldName = field->name();
+        const auto name = QString::fromUtf8(fieldName.data(), static_cast<qsizetype>(fieldName.size()));
+        if (field->is_repeated()) {
+            QJsonArray array;
+            for (int j = 0; j < reflection->FieldSize(message, field); ++j) {
+                if (field->cpp_type() == FieldDescriptor::CPPTYPE_STRING)
+                    array.append(QString::fromStdString(reflection->GetRepeatedString(message, field, j)));
+                else if (field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+                    const auto child = readObject(reflection->GetRepeatedMessage(message, field, j));
+                    if (!child) return std::nullopt;
+                    array.append(*child);
+                } else return std::nullopt;
+            }
+            // Empty TURN credentials are represented by an empty object.
+            if (!array.isEmpty() || descriptor->name() != "Turn") object.insert(name, array);
+            continue;
+        }
+        if (!reflection->HasField(message, field)) continue;
+        switch (field->cpp_type()) {
+        case FieldDescriptor::CPPTYPE_STRING:
+            object.insert(name, QString::fromStdString(reflection->GetString(message, field)));
+            break;
+        case FieldDescriptor::CPPTYPE_BOOL:
+            object.insert(name, reflection->GetBool(message, field));
+            break;
+        case FieldDescriptor::CPPTYPE_UINT32:
+            object.insert(name, static_cast<double>(reflection->GetUInt32(message, field)));
+            break;
+        case FieldDescriptor::CPPTYPE_MESSAGE: {
+            const auto child = readObject(reflection->GetMessage(message, field));
+            if (!child) return std::nullopt;
+            object.insert(name, *child);
+            break;
+        }
+        default: return std::nullopt;
+        }
+    }
+    return object;
+}
 } // namespace
 
 std::optional<CodecError> EnvelopeCodec::validateHeader(const Envelope& envelope) {
@@ -95,69 +143,43 @@ std::optional<CodecError> EnvelopeCodec::validateHeader(const Envelope& envelope
 }
 
 EnvelopeCodec::EncodeResult EnvelopeCodec::encode(const Envelope& envelope) {
-    if (const auto failure = validateHeader(envelope)) {
-        return *failure;
-    }
-    QJsonObject object{{QStringLiteral("v"), envelope.version},
-                       {QStringLiteral("type"), envelope.type},
-                       {QStringLiteral("body"), envelope.body}};
-    if (envelope.requestId) {
-        object.insert(QStringLiteral("requestId"), *envelope.requestId);
-    }
-    auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
-    if (bytes.size() > MaxMessageBytes) {
-        return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
-    }
+    if (const auto failure = validateHeader(envelope)) return *failure;
+    wire::Envelope message;
+    message.set_version(envelope.version);
+    if (envelope.requestId) message.set_request_id(envelope.requestId->toStdString());
+    const auto name = QString(envelope.type).replace('.', '_').toStdString();
+    const auto* field = message.GetDescriptor()->FindFieldByName(name);
+    if (!field || !field->containing_oneof()) return error(CodecErrorCode::UnknownType, "Unknown message type");
+    if (!writeObject(envelope.body, *message.GetReflection()->MutableMessage(&message, field)))
+        return error(CodecErrorCode::InvalidBody, "Invalid protobuf message body");
+    const auto size = message.ByteSizeLong();
+    if (size > MaxMessageBytes) return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
+    QByteArray bytes(static_cast<qsizetype>(size), Qt::Uninitialized);
+    if (!message.SerializeToArray(bytes.data(), static_cast<int>(bytes.size())))
+        return error(CodecErrorCode::InvalidEnvelope, "Cannot serialize protobuf message");
     return bytes;
 }
 
 EnvelopeCodec::DecodeResult EnvelopeCodec::decode(const QByteArray& bytes) {
-    if (bytes.size() > MaxMessageBytes) {
-        return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
-    }
-    if (QString::fromUtf8(bytes).toUtf8() != bytes) {
-        return error(CodecErrorCode::InvalidJson, "Invalid UTF-8 JSON document");
-    }
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(bytes, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        return error(CodecErrorCode::InvalidJson, "Invalid JSON document");
-    }
-    if (!document.isObject()) {
-        return error(CodecErrorCode::InvalidEnvelope, "Envelope must be an object");
-    }
-    if (hasDuplicateKeys(bytes)) {
-        return error(CodecErrorCode::DuplicateKey, "Duplicate JSON object key");
-    }
-    const auto object = document.object();
-    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
-        if (it.key() != "v" && it.key() != "type" && it.key() != "requestId" &&
-            it.key() != "body") {
-            return error(CodecErrorCode::UnknownField, "Unknown envelope field");
-        }
-    }
-    const auto version = object.value(QStringLiteral("v"));
-    if (!version.isDouble() || !object.value(QStringLiteral("type")).isString() ||
-        !object.value(QStringLiteral("body")).isObject()) {
-        return error(CodecErrorCode::InvalidEnvelope, "Missing or invalid envelope field");
-    }
-    if (version.toDouble() != ProtocolVersion) {
+    if (bytes.size() > MaxMessageBytes) return error(CodecErrorCode::MessageTooLarge, "Message exceeds size limit");
+    wire::Envelope message;
+    if (!message.ParseFromArray(bytes.constData(), static_cast<int>(bytes.size())))
+        return error(CodecErrorCode::InvalidEnvelope, "Invalid protobuf message");
+    if (!message.has_version() || message.version() != ProtocolVersion)
         return error(CodecErrorCode::UnsupportedVersion, "Unsupported protocol version");
-    }
+    const auto* reflection = message.GetReflection();
+    if (reflection->GetUnknownFields(message).field_count() != 0)
+        return error(CodecErrorCode::UnknownField, "Unknown envelope field");
+    const auto* field = reflection->GetOneofFieldDescriptor(message, message.GetDescriptor()->FindOneofByName("body"));
+    if (!field) return error(CodecErrorCode::InvalidEnvelope, "Missing message body");
     Envelope envelope;
-    envelope.type = object.value(QStringLiteral("type")).toString();
-    envelope.body = object.value(QStringLiteral("body")).toObject();
-    if (object.contains(QStringLiteral("requestId"))) {
-        const auto id = object.value(QStringLiteral("requestId"));
-        if (!id.isString()) {
-            return error(CodecErrorCode::InvalidRequestId, "Invalid request identifier");
-        }
-        envelope.requestId = id.toString();
-    }
-    if (const auto failure = validateHeader(envelope)) {
-        return *failure;
-    }
+    const auto fieldName = field->name();
+    envelope.type = QString::fromUtf8(fieldName.data(), static_cast<qsizetype>(fieldName.size())).replace('_', '.');
+    if (message.has_request_id()) envelope.requestId = QString::fromStdString(message.request_id());
+    const auto body = readObject(reflection->GetMessage(message, field));
+    if (!body) return error(CodecErrorCode::InvalidBody, "Invalid message body");
+    envelope.body = *body;
+    if (const auto failure = validateHeader(envelope)) return *failure;
     return envelope;
 }
-
 } // namespace tmc::signaling_protocol

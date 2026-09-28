@@ -42,6 +42,8 @@ void NetworkSession::handleIncoming(const QString& connectionId, const QString& 
         return;
     }
 
+    if (connection->open && decoded.value().senderId == connection->remote.peerId)
+        notePeerReachable(connection->remote.peerId);
     handlePacket(connectionId, decoded.value());
 }
 
@@ -159,7 +161,7 @@ void NetworkSession::handlePeerProof(const QString& connectionId, const Packet& 
     mesh_.rememberPeer(remote);
     if (recovery) recoveryCapableConnections_.insert(connectionId);
     const auto connection = connections_->info(connectionId);
-    if (signaling_ && connection && connection->open) {
+    if (connection && connection->open) {
         const auto saved = app_.rememberAcquaintance(remote);
         if (!saved) emit errorOccurred(saved.error());
     }
@@ -216,17 +218,7 @@ void NetworkSession::handlePeerLeave(const QString& connectionId, const Packet& 
         --forwarded.ttl;
         broadcastService(forwarded, connectionId);
     }
-    const auto leaving = mesh_.peer(packet.senderId);
-    const auto direct = connections_->infoForPeer(packet.senderId);
-    if (direct) {
-        connections_->discard(direct->connectionId);
-    }
-    if (mesh_.forgetPeer(packet.senderId)) {
-        router_.forgetPeer(packet.senderId);
-        voice_->removePeer(packet.senderId);
-        emit peerChanged(packet.senderId, leaving.displayName, false);
-        updateMesh();
-    }
+    removeMeshPeer(packet.senderId);
 }
 
 void NetworkSession::handleChatMessage(const QString& connectionId, const Packet& packet) {
@@ -294,6 +286,8 @@ void NetworkSession::handleRouteReply(const QString& connectionId, const Packet&
     router_.observeRoute(packet.senderId, connectionId, payload.hops + 1);
 
     if (packet.targetId == app_.identity().peerId) {
+        if (routeRequests_.value(packet.senderId) == payload.requestId)
+            notePeerReachable(packet.senderId);
         flushRouted(packet.senderId);
         return;
     }

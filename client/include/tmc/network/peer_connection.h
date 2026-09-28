@@ -54,6 +54,8 @@ public:
 
     bool sendControl(const QString&);
     bool sendChat(const QString&);
+    bool sendTransfer(const QByteArray&);
+    bool sendStream(const QByteArray&);
     std::shared_ptr<AudioTransportEndpoint> audioEndpoint() const;
     PeerConnectionSnapshot snapshot() const;
     QPair<QString, QString> fingerprints() const;
@@ -72,6 +74,9 @@ signals:
     void chatChannelClosed();
     void controlTextReceived(QString);
     void chatTextReceived(QString);
+    void transferReceived(QByteArray);
+    void streamReceived(QByteArray);
+    void transferChannelClosed();
     void errorOccurred(QString);
 
 private:
@@ -84,6 +89,8 @@ private:
 
     void configureControlChannel(const std::shared_ptr<rtc::DataChannel>&);
     void configureChatChannel(const std::shared_ptr<rtc::DataChannel>&);
+    void configureTransferChannel(const std::shared_ptr<rtc::DataChannel>&);
+    void configureStreamChannel(const std::shared_ptr<rtc::DataChannel>&);
     void configureTextChannel(const std::shared_ptr<rtc::DataChannel>&, TextChannel);
     void configureAudioTrack(const std::shared_ptr<rtc::Track>&);
     bool sendText(const std::shared_ptr<rtc::DataChannel>& channel, const QString& text,

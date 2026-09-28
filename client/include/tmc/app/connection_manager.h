@@ -116,6 +116,8 @@ public:
 
     bool sendControl(const QString& connectionId, const QString& text);
     bool sendChat(const QString& connectionId, const QString& text);
+    bool sendTransfer(const QString& connectionId, const QByteArray& bytes);
+    bool sendStream(const QString& connectionId, const QByteArray& bytes);
 
 signals:
     void localDescriptionReady(QString connectionId, QString sdp);
@@ -125,6 +127,8 @@ signals:
     void linkRemoved(QString connectionId, tmc::PeerIdentity remote, bool wasOpen);
     void controlTextReceived(QString connectionId, QString text);
     void chatTextReceived(QString connectionId, QString text);
+    void transferReceived(QString connectionId, QByteArray bytes);
+    void streamReceived(QString connectionId, QByteArray bytes);
     void attemptChanged(QString connectionId, tmc::ConnectionAttemptState state);
     void attemptFailed(tmc::PeerIdentity remote, tmc::ConnectionKind kind, QString message);
     void statusChanged(QString status);

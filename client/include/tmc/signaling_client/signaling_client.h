@@ -73,7 +73,7 @@ private:
         qint64 sentAt;
     };
 
-    void receive(const QString& text);
+    void receive(const QByteArray& bytes);
     void handleChallenge(const signaling_protocol::Envelope& message);
     void handleResponse(const signaling_protocol::Envelope& message);
     void handleAuthenticationResponse(const QString& requestType,
@@ -93,6 +93,7 @@ private:
 
     // Connection and lifecycle timers.
     std::unique_ptr<QWebSocket> socket_;
+    quint64 connectionGeneration_{0};
     QTimer maintenanceTimer_;
     QElapsedTimer clock_;
     QUrl url_;

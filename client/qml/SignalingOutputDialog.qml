@@ -7,14 +7,12 @@ Dialog {
 
     required property var viewModel
     property string signalingText: ""
-    property string signalingLink: ""
     property bool serverInvitation: false
 
     signal saveRequested
 
-    function showSignaling(kind, text, link) {
+    function showSignaling(kind, text) {
         signalingText = text;
-        signalingLink = link;
         serverInvitation = kind === "server";
         title = kind === "offer" || serverInvitation ? qsTr("Приглашение готово") : qsTr("Ответ готов");
         open();
@@ -34,7 +32,7 @@ Dialog {
         Label {
             Layout.fillWidth: true
             text: control.serverInvitation
-                ? qsTr("Ссылка скопирована. Передайте её одному участнику: она действует 10 минут, пока вы остаётесь подключены к серверу. Ответ вернётся автоматически.")
+                ? qsTr("Код скопирован. Передайте его одному участнику: он действует 10 минут, пока вы остаётесь подключены к серверу. Ответ вернётся автоматически.")
                 : qsTr("Код уже скопирован. Передайте его другому участнику:")
             wrapMode: Text.WordWrap
         }
@@ -59,11 +57,6 @@ Dialog {
                 onClicked: control.viewModel.copyText(control.signalingText)
             }
 
-            Button {
-                text: qsTr("Копировать ссылку")
-                enabled: control.signalingLink.length > 0
-                onClicked: control.viewModel.copyText(control.signalingLink)
-            }
 
             Button {
                 text: qsTr("Сохранить файл…")

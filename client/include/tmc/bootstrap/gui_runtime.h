@@ -10,7 +10,7 @@ class QQmlApplicationEngine;
 namespace tmc {
 
 class ApplicationController;
-class AppLinkController;
+class ApplicationInstance;
 class AppViewModel;
 class TrayController;
 class UpdateService;
@@ -24,13 +24,13 @@ public:
 
 private:
     void bringMainWindowToFront();
-    void wireAppLinks();
+    void wireActivation();
 
     int& argc_;
     char** argv_;
     ApplicationOptions options_;
     std::unique_ptr<QApplication> application_;
-    std::unique_ptr<AppLinkController> appLinks_;
+    std::unique_ptr<ApplicationInstance> instance_;
     std::unique_ptr<ApplicationController> controller_;
     std::unique_ptr<UpdateService> updates_;
     std::unique_ptr<AppViewModel> viewModel_;

@@ -124,11 +124,30 @@ std::optional<CodecError> MessageCodec::validateRequest(const Envelope& envelope
     } else if (type == "access.invite" || type == "turn.refresh") {
         valid = body.isEmpty();
     } else if (type == "presence.publish") {
-        valid = fields(body, {"identityId", "displayName", "knownPeers", "busy"}) &&
+        valid = fields(body, {"identityId", "displayName", "knownPeers", "busy", "meshId"}) &&
                 identity(body.value("identityId")) && displayName(body.value("displayName")) &&
-                identifiers(body.value("knownPeers")) && body.value("busy").isBool();
+                identifiers(body.value("knownPeers")) && body.value("busy").isBool() &&
+                body.value("meshId").isString() && (body.value("meshId").toString().isEmpty() || uuid(body.value("meshId")));
         for (const auto& peer : body.value("knownPeers").toArray())
             if (peer == body.value("identityId")) valid = false;
+    } else if (type == "mesh.leave") {
+        valid = fields(body, {"meshId"}) && uuid(body.value("meshId"));
+    } else if (type == "direct.send") {
+        valid = fields(body, {"identityId", "connectionId", "kind", "sdp"}) &&
+                identity(body.value("identityId")) && uuid(body.value("connectionId")) &&
+                (body.value("kind").toString() == "offer" || body.value("kind").toString() == "answer") &&
+                body.value("sdp").isString() && !body.value("sdp").toString().isEmpty() &&
+                body.value("sdp").toString().toUtf8().size() <= MaxSignalBytes;
+    } else if (type == "mesh.relay") {
+        valid = fields(body, {"meshId", "identityId", "payload"}) && uuid(body.value("meshId")) &&
+                identity(body.value("identityId")) && base64(body.value("payload"), MaxSignalBytes);
+    } else if (type == "knock.request") {
+        valid = fields(body, {"toIdentityId"}) && identity(body.value("toIdentityId"));
+    } else if (type == "knock.respond") {
+        const auto decision = body.value("decision").toString();
+        valid = fields(body, {"invitationId", "decision", "roomId"}) && uuid(body.value("invitationId")) &&
+            (decision == "accept" || decision == "decline" || decision == "busy") &&
+            body.value("roomId").isString() && (decision == "accept" ? uuid(body.value("roomId")) : body.value("roomId").toString().isEmpty());
     } else if (type == "contact.invite") {
         valid = fields(body, {"toIdentityId", "roomId", "meshId"}) &&
                 identity(body.value("toIdentityId")) && uuid(body.value("roomId")) && uuid(body.value("meshId"));
@@ -166,7 +185,7 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
     if (type == "error") {
         return errorBody(body) ? std::nullopt : std::optional<CodecError>{invalidBody()};
     }
-    const bool event = type == "auth.challenge" || type == "peer.joined" ||
+    const bool event = type == "knock.invitation" || type == "knock.accepted" || type == "knock.result" || type == "knock.closed" || type == "mesh.departed" || type == "direct.received" || type == "mesh.received" || type == "auth.challenge" || type == "peer.joined" ||
                        type == "peer.left" || type == "signal.received" ||
                        type == "presence.snapshot" || type == "contact.invitation" ||
                        type == "contact.accepted" || type == "contact.result" || type == "contact.closed";
@@ -190,7 +209,7 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
     } else if (type == "auth.authenticated" || type == "turn.credentials") {
         valid = fields(body, {"turn"}) && body.value("turn").isObject() &&
                 decodeTurnCredentials(body.value("turn").toObject()).has_value();
-    } else if (type == "presence.published" || type == "contact.responded") {
+    } else if (type == "presence.published" || (type == "contact.responded" || type == "knock.responded")) {
         valid = body.isEmpty();
     } else if (type == "presence.snapshot") {
         valid = fields(body, {"peers"}) && body.value("peers").isArray() &&
@@ -199,25 +218,25 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
         for (const auto& item : body.value("peers").toArray()) {
             const auto peer = item.toObject();
             const auto id = peer.value("identityId").toString();
-            if (!fields(peer, {"identityId", "online"}) || !identity(peer.value("identityId")) ||
-                !peer.value("online").isBool() || seen.contains(id)) valid = false;
+            if (!fields(peer, {"identityId", "online", "inConversation"}) || !identity(peer.value("identityId")) ||
+                !peer.value("online").isBool() || !peer.value("inConversation").isBool() || seen.contains(id)) valid = false;
             seen.insert(id);
         }
-    } else if (type == "contact.invited") {
+    } else if ((type == "contact.invited" || type == "knock.requested")) {
         valid = fields(body, {"invitationId"}) && uuid(body.value("invitationId"));
-    } else if (type == "contact.invitation") {
+    } else if ((type == "contact.invitation" || type == "knock.invitation")) {
         valid = fields(body, {"invitationId", "fromIdentityId", "displayName", "meshId", "expiresInSeconds"}) &&
                 uuid(body.value("invitationId")) && identity(body.value("fromIdentityId")) &&
                 displayName(body.value("displayName")) && uuid(body.value("meshId")) &&
                 body.value("expiresInSeconds").toInt(-1) == OnlineInvitationLifetimeSeconds;
-    } else if (type == "contact.accepted") {
+    } else if ((type == "contact.accepted" || type == "knock.accepted")) {
         valid = fields(body, {"invitationId", "roomId", "meshId", "token"}) &&
                 uuid(body.value("invitationId")) && uuid(body.value("roomId")) &&
                 uuid(body.value("meshId")) && base64(body.value("token"), 32, 32);
-    } else if (type == "contact.result") {
+    } else if ((type == "contact.result" || type == "knock.result")) {
         valid = fields(body, {"invitationId", "toIdentityId", "status"}) &&
                 uuid(body.value("invitationId")) && identity(body.value("toIdentityId")) && outcome(body.value("status"));
-    } else if (type == "contact.closed") {
+    } else if ((type == "contact.closed" || type == "knock.closed")) {
         valid = fields(body, {"invitationId", "status"}) && uuid(body.value("invitationId")) && outcome(body.value("status"));
     } else if (type == "room.created") {
         for (auto it = body.constBegin(); it != body.constEnd(); ++it) {
@@ -252,7 +271,14 @@ std::optional<CodecError> MessageCodec::validateServerMessage(const Envelope& en
         valid = valid && peers.size() <= MaxRoomPeers;
     } else if (type == "room.left") {
         valid = fields(body, {"roomId"}) && uuid(body.value("roomId"));
-    } else if (type == "signal.accepted") {
+    } else if (type == "mesh.departed") {
+        valid = fields(body, {"meshId", "identityId"}) && uuid(body.value("meshId")) && identity(body.value("identityId"));
+    } else if (type == "direct.received") {
+        return validateRequest({envelope.version, "direct.send", "validate", body});
+    } else if (type == "mesh.received") {
+        valid = fields(body, {"meshId", "identityId", "payload"}) && uuid(body.value("meshId")) &&
+                identity(body.value("identityId")) && base64(body.value("payload"), MaxSignalBytes);
+    } else if (type == "signal.accepted" || type == "mesh.relayed" || type == "direct.accepted" || type == "mesh.left") {
         valid = body.isEmpty();
     } else if (type == "peer.joined") {
         valid = fields(body, {"roomId", "peerId"}) &&
@@ -282,6 +308,8 @@ bool MessageCodec::isResponseFor(const QString& requestType, const QString& resp
         {"access.invite", "access.invited"},
         {"turn.refresh", "turn.credentials"},
         {"presence.publish", "presence.published"},
+        {"knock.request", "knock.requested"},
+        {"knock.respond", "knock.responded"},
         {"contact.invite", "contact.invited"},
         {"contact.respond", "contact.responded"},
         {"room.create", "room.created"},
@@ -289,6 +317,9 @@ bool MessageCodec::isResponseFor(const QString& requestType, const QString& resp
         {"room.join", "room.joined"},
         {"room.leave", "room.left"},
         {"signal.send", "signal.accepted"},
+        {"mesh.relay", "mesh.relayed"},
+        {"direct.send", "direct.accepted"},
+        {"mesh.leave", "mesh.left"},
     };
 
     for (const auto& pair : pairs) {

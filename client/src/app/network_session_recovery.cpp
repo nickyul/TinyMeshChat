@@ -29,7 +29,7 @@ bool NetworkSession::sendRecoveryPacket(const QString& peerId, PacketType type, 
 void NetworkSession::broadcastSignalingState() {
     if (!signaling_ || !mesh_.joined()) return;
     SignalingStatePayload state;
-    if (serverMesh_) {
+    if (!signaling_->url().isEmpty()) {
         state.server = signaling_->url().toString(QUrl::FullyEncoded);
         state.sessionId = signaling_->sessionId();
         state.roomId = serverRoomId_;
@@ -133,6 +133,8 @@ void NetworkSession::handleRecoveryPacket(const QString& connectionId, const Pac
     const auto now = recoveryClock_.elapsed();
     if (packet.type == PacketType::SignalingState) {
         const auto& state = std::get<SignalingStatePayload>(packet.payload);
+        if (state.server.isEmpty()) peerSignalingServers_.remove(packet.senderId);
+        else peerSignalingServers_.insert(packet.senderId, state.server);
         const auto cached = recoveryTokens_.constFind(packet.senderId);
         if (cached != recoveryTokens_.cend() &&
             (cached->payload.sessionId != state.sessionId || !state.roomId.isEmpty())) {

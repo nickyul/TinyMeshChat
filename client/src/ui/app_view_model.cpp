@@ -2,19 +2,28 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
+#include "tmc/transfers/file_transfer_service.h"
+#include "tmc/sharing/screen_share_service.h"
+#include "tmc/sharing/system_audio_capture.h"
+#include <QVideoSink>
+#include <QVideoFrame>
 #include "tmc/signaling_client/access_invitation.h"
 #include "tmc/signaling_client/signaling_client.h"
 #include "tmc/app/update_service.h"
 #include "tmc/messaging/chat_message.h"
-#include "tmc/ui/app_link_controller.h"
 #include "tmc/ui/global_ptt_monitor.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QStandardPaths>
+#include <QProcess>
 #include <QGuiApplication>
 #include <QVector>
+#include <QUuid>
 
 #include <cmath>
 #include <utility>
@@ -29,7 +38,10 @@ public:
         CreatedAtRole,
         LocalRole,
         AcknowledgedCountRole,
-        ExpectedCountRole
+        ExpectedCountRole,
+        EntryKindRole,
+        FileCardRole,
+        EntryIdRole
     };
 
     struct Row {
@@ -38,6 +50,8 @@ public:
         int acknowledgedCount{0};
         int expectedCount{0};
         bool local{false};
+        QString fileGroup;
+        QVariantMap fileCard;
     };
 
     explicit MessagesModel(QObject* parent = nullptr) : QAbstractListModel(parent) {
@@ -53,6 +67,9 @@ public:
         }
         const auto& row = rows_[index.row()];
         switch (role) {
+        case EntryIdRole: return entryId(row);
+        case EntryKindRole: return row.fileGroup.isEmpty() ? QStringLiteral("message") : QStringLiteral("file");
+        case FileCardRole: return row.fileCard;
         case AuthorRole:
             return row.author;
         case TextRole:
@@ -76,7 +93,7 @@ public:
                 {CreatedAtRole, "createdAt"},
                 {LocalRole, "local"},
                 {AcknowledgedCountRole, "acknowledgedCount"},
-                {ExpectedCountRole, "expectedCount"}};
+                {ExpectedCountRole, "expectedCount"}, {EntryKindRole, "entryKind"}, {FileCardRole, "fileCard"}, {EntryIdRole, "entryId"}};
     }
 
     void add(const ChatMessage& message, QString author, bool local) {
@@ -86,9 +103,59 @@ public:
         endInsertRows();
         constexpr int MaxVisibleMessages = 2000;
         if (rows_.size() > MaxVisibleMessages) {
-            beginRemoveRows({}, 0, 0);
-            rows_.removeFirst();
-            endRemoveRows();
+            int oldestMessage = 0;
+            while (oldestMessage < rows_.size() && !rows_[oldestMessage].fileGroup.isEmpty()) ++oldestMessage;
+            if (oldestMessage < rows_.size()) {
+                beginRemoveRows({}, oldestMessage, oldestMessage);
+                rows_.removeAt(oldestMessage);
+                endRemoveRows();
+            }
+        }
+    }
+
+    static QString entryId(const Row& row) {
+        return row.fileGroup.isEmpty() ? "message:" + row.message.messageId : "file:" + row.fileGroup;
+    }
+
+    int indexForId(const QString& id) const {
+        for (int i = 0; i < rows_.size(); ++i) if (entryId(rows_[i]) == id) return i;
+        return -1;
+    }
+
+    void syncFiles(const QVariantList& transfers) {
+        QHash<QString, QVariantList> groups;
+        QStringList order;
+        for (const auto& item : transfers) {
+            const auto transfer = item.toMap();
+            if (!transfer.value("id").toString().startsWith("mesh:") || !transfer.value("currentSession").toBool()) continue;
+            const auto group = transfer.value("groupId").toString();
+            if (!groups.contains(group)) order.prepend(group);
+            groups[group].append(transfer);
+        }
+        for (int i = rows_.size() - 1; i >= 0; --i) {
+            if (!rows_[i].fileGroup.isEmpty() && !groups.contains(rows_[i].fileGroup)) {
+                beginRemoveRows({}, i, i); rows_.removeAt(i); endRemoveRows();
+            }
+        }
+        for (const auto& group : order) {
+            const auto parts = groups.value(group);
+            auto card = parts.first().toMap();
+            card.insert("transfers", parts);
+            int position = -1;
+            for (int i = 0; i < rows_.size(); ++i) if (rows_[i].fileGroup == group) { position = i; break; }
+            if (position >= 0) {
+                if (rows_[position].fileCard != card) {
+                    rows_[position].fileCard = card;
+                    emit dataChanged(index(position), index(position), {FileCardRole});
+                }
+            } else {
+                Row row;
+                row.message.createdAt = QDateTime::currentDateTime();
+                row.local = card.value("outgoing").toBool();
+                row.fileGroup = group; row.fileCard = card;
+                const int i = rows_.size();
+                beginInsertRows({}, i, i); rows_.append(std::move(row)); endInsertRows();
+            }
         }
     }
 
@@ -219,6 +286,14 @@ public:
         endResetModel();
     }
 
+    void removePeer(const QString& peerId) {
+        const int row = find(peerId);
+        if (row < 0 || rows_[row].self) return;
+        beginRemoveRows({}, row, row);
+        rows_.removeAt(row);
+        endRemoveRows();
+    }
+
     void updatePeer(const QString& peerId, const QString& name, bool connected) {
         const int row = find(peerId);
         if (row >= 0) {
@@ -323,9 +398,9 @@ private:
     QVector<Row> rows_;
 };
 
-AppViewModel::AppViewModel(ApplicationController& controller, AppLinkController& appLinks,
+AppViewModel::AppViewModel(ApplicationController& controller,
                            UpdateService& updates, bool identityRequired, QObject* parent)
-    : QObject(parent), controller_(controller), appLinks_(appLinks), updates_(updates),
+    : QObject(parent), controller_(controller), updates_(updates),
       messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
       pttMonitor_(std::make_unique<GlobalPttMonitor>()), identityRequired_(identityRequired) {
 
@@ -480,10 +555,22 @@ QVariantList AppViewModel::acquaintances() const { return session_ ? session_->a
 
 void AppViewModel::inviteAcquaintance(const QString& peerId) {
     if (!session_) return;
+    if (!meshVisible()) {
+        const auto created = session_->createMesh();
+        if (!created) { reportError(created.error()); return; }
+    }
     const auto result = session_->inviteAcquaintance(peerId);
     if (!result) reportError(result.error());
 }
 
+void AppViewModel::requestConversationEntry(const QString& peerId) {
+    if (!session_) return;
+    const auto result = session_->requestConversationEntry(peerId);
+    if (!result) reportError(result.error());
+}
+void AppViewModel::respondToEntryRequest(const QString& id, bool accept) {
+    if (session_) session_->respondToEntryRequest(id, accept);
+}
 void AppViewModel::respondToOnlineInvitation(const QString& invitationId, bool accept) {
     if (session_) session_->respondToOnlineInvitation(invitationId, accept);
 }
@@ -595,9 +682,7 @@ double AppViewModel::microphoneLevel() const {
     return microphoneLevel_;
 }
 
-bool AppViewModel::appLinksRegistered() const {
-    return appLinks_.protocolRegistered();
-}
+
 
 QString AppViewModel::updateState() const {
     return updates_.state();
@@ -965,28 +1050,13 @@ void AppViewModel::setPeerVolume(const QString& peerId, int percent) {
         return;
     }
     const auto volume = qBound(0, percent, 200);
+    const auto saved = controller_.savePeerVolume(peerId, volume);
+    if (!saved) {
+        reportError(saved.error());
+        return;
+    }
     session_->setPeerVolume(peerId, volume);
     peers_->updateVolume(peerId, volume);
-}
-
-void AppViewModel::registerAppLinks() {
-    const auto result = appLinks_.registerProtocol();
-    if (!result) {
-        reportError(result.error());
-        return;
-    }
-    emit appLinksRegisteredChanged();
-    setStatus("Ссылки tinymesh:// зарегистрированы для текущего пользователя.");
-}
-
-void AppViewModel::unregisterAppLinks() {
-    const auto result = appLinks_.unregisterProtocol();
-    if (!result) {
-        reportError(result.error());
-        return;
-    }
-    emit appLinksRegisteredChanged();
-    setStatus("Регистрация ссылок tinymesh:// удалена.");
 }
 
 void AppViewModel::checkForUpdates() {
@@ -1021,6 +1091,23 @@ void AppViewModel::initializeSession() {
         return;
     }
     session_ = std::make_unique<NetworkSession>(controller_, controller_.connectionPolicy());
+    connect(session_->screenShare(), &ScreenShareService::changed, this, &AppViewModel::screenShareChanged);
+    connect(session_->screenShare(), &ScreenShareService::frameReady, this, [this](const QImage& image) {
+        lastStreamFrame_ = image;
+        if (screenVideoSink_) screenVideoSink_->setVideoFrame(image.isNull() ? QVideoFrame{} : QVideoFrame(image));
+    });
+    connect(session_->fileTransfers(), &FileTransferService::changed, this, [this] {
+        emit chatLayoutAboutToChange();
+        messages_->syncFiles(fileTransfers());
+        emit chatLayoutChanged();
+        emit fileTransfersChanged();
+    });
+    connect(session_->fileTransfers(), &FileTransferService::incomingOffered, this, [this] {
+        emit fileOffered();
+        emit notificationSound("message");
+    });
+    connect(session_->personalFileTransfers(), &FileTransferService::changed, this, &AppViewModel::fileTransfersChanged);
+    connect(session_->personalFileTransfers(), &FileTransferService::incomingOffered, this, &AppViewModel::fileOffered);
     connect(session_.get(), &NetworkSession::statusChanged, this, &AppViewModel::setStatus);
     connect(session_.get(), &NetworkSession::errorOccurred, this, [this](const QString& error) {
         if (pttMonitor_) {
@@ -1032,6 +1119,7 @@ void AppViewModel::initializeSession() {
     connect(session_.get(), &NetworkSession::meshStateChanged, this,
             [this](MeshSessionState state) {
                 if (state == MeshSessionState::Disconnected) {
+                    announcedParticipants_.clear();
                     messages_->clear();
                     peers_->resetSelf(controller_.identity());
                     setMeshPeerCounts(0, 0);
@@ -1042,9 +1130,19 @@ void AppViewModel::initializeSession() {
                 emit meshStateChanged();
             });
     connect(session_.get(), &NetworkSession::meshChanged, this, &AppViewModel::setMeshPeerCounts);
+    connect(session_.get(), &NetworkSession::peerRemoved, this,
+            [this](const QString& id) {
+                peers_->removePeer(id);
+                if (announcedParticipants_.remove(id)) emit notificationSound("leave");
+            });
     connect(session_.get(), &NetworkSession::peerChanged, this,
             [this](const QString& id, const QString& name, bool connected) {
+                if (connected && id != controller_.identity().peerId && !announcedParticipants_.contains(id)) {
+                    announcedParticipants_.insert(id);
+                    emit notificationSound("join");
+                }
                 peers_->updatePeer(id, name, connected);
+                peers_->updateVolume(id, controller_.peerVolume(id));
             });
     connect(session_.get(), &NetworkSession::peerRttChanged, this,
             [this](const QString& id, int milliseconds) { peers_->updateRtt(id, milliseconds); });
@@ -1070,11 +1168,16 @@ void AppViewModel::initializeSession() {
             [this](const ChatMessage& message, bool local) {
                 const auto author =
                     local ? controller_.identity().displayName : peers_->nameFor(message.senderId);
+                emit chatLayoutAboutToChange();
                 messages_->add(message, author, local);
+                emit chatLayoutChanged();
+                if (!local) emit notificationSound("message");
             });
     connect(session_.get(), &NetworkSession::deliveryChanged, this,
             [this](const QString& id, int acknowledged, int expected) {
+                emit chatLayoutAboutToChange();
                 messages_->updateDelivery(id, acknowledged, expected);
+                emit chatLayoutChanged();
             });
     connect(session_.get(), &NetworkSession::callStateChanged, this,
             [this](bool active, bool muted) {
@@ -1094,9 +1197,7 @@ void AppViewModel::initializeSession() {
             [this](const QString& kind, const QString& text, const QByteArray& document) {
                 signalingDocument_ = document;
                 QGuiApplication::clipboard()->setText(text);
-                const auto link =
-                    text.startsWith("tmc0:") ? "tinymesh://signal/0/" + text.sliced(5) : QString{};
-                emit signalingRequested(kind, text, link);
+                emit signalingRequested(kind, text);
             });
     connect(session_.get(), &NetworkSession::signalingServerChanged,
             this, &AppViewModel::signalingServerChanged);
@@ -1104,6 +1205,12 @@ void AppViewModel::initializeSession() {
             this, &AppViewModel::accessInvitationReady);
     connect(session_.get(), &NetworkSession::acquaintancesChanged,
             this, &AppViewModel::acquaintancesChanged);
+    connect(session_.get(), &NetworkSession::entryRequestReceived, this,
+            [this](const QString& id, const QString& name) {
+                emit entryRequestReceived(id, name);
+                emit notificationSound("knock");
+            });
+    connect(session_.get(), &NetworkSession::entryRequestClosed, this, &AppViewModel::entryRequestClosed);
     connect(session_.get(), &NetworkSession::onlineInvitationReceived,
             this, &AppViewModel::onlineInvitationReceived);
     connect(session_.get(), &NetworkSession::onlineInvitationClosed,
@@ -1111,7 +1218,7 @@ void AppViewModel::initializeSession() {
     connect(session_.get(), &NetworkSession::serverInvitationReady, this, [this](const QString& link) {
         signalingDocument_.clear();
         QGuiApplication::clipboard()->setText(link);
-        emit signalingRequested(QStringLiteral("server"), link, link);
+        emit signalingRequested(QStringLiteral("server"), link);
     });
     session_->configureSignalingServer(controller_.config().signalingServerUrl);
     refreshAudioDevices();
@@ -1188,6 +1295,134 @@ void AppViewModel::setPttPressed(bool pressed) {
         session_->setPttPressed(pressed);
     }
     emit pttPressedChanged();
+}
+
+void AppViewModel::setStreamVolume(int percent) {
+    percent = qBound(0, percent, 100);
+    if (streamVolume_ == percent) return;
+    streamVolume_ = percent;
+    if (session_) session_->screenShare()->setAudioVolume(percent);
+    emit streamVolumeChanged();
+}
+
+int AppViewModel::chatIndexForId(const QString& id) const {
+    return messages_->indexForId(id);
+}
+
+QVariantList AppViewModel::fileRecipients() const {
+    return session_ ? session_->fileRecipients() : QVariantList{};
+}
+
+QVariantList AppViewModel::fileTransfers() const {
+    if (!session_) return {};
+    QVariantList rows;
+    const auto append = [&rows](const QVariantList& transfers, const QString& prefix) {
+        for (const auto& transfer : transfers) {
+            auto row = transfer.toMap();
+            row.insert("id", prefix + row.value("id").toString());
+            rows.append(row);
+        }
+    };
+    append(session_->fileTransfers()->transfers(), "mesh:");
+    append(session_->personalFileTransfers()->transfers(), "personal:");
+    return rows;
+}
+
+void AppViewModel::sendFileToRecipients(const QUrl& file, const QStringList& peerIds) {
+    if (!session_ || !file.isLocalFile()) return;
+    const auto group = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSet<QString> sent;
+    for (const auto& peer : peerIds) {
+        if (peer.isEmpty() || sent.contains(peer)) continue;
+        sent.insert(peer);
+        const auto result = session_->sendFile(file.toLocalFile(), peer, group);
+        if (!result) { reportError(result.error()); break; }
+    }
+}
+
+void AppViewModel::sendFile(const QUrl& file, const QString& peerId) {
+    if (!session_) return;
+    if (!file.isLocalFile()) { reportError("Выберите локальный файл."); return; }
+    const auto result = session_->sendFile(file.toLocalFile(), peerId);
+    if (!result) reportError(result.error());
+}
+
+QVariantMap AppViewModel::fileSaveSuggestion(const QString& id, const QUrl& folder) const {
+    for (const auto& value : fileTransfers()) {
+        const auto row = value.toMap();
+        if (row.value("id").toString() != id || !row.value("canAccept").toBool()) continue;
+        auto directory = folder.isLocalFile() ? folder.toLocalFile() : QString{};
+        if (directory.isEmpty() || !QFileInfo(directory).isDir())
+            directory = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (directory.isEmpty() || !QFileInfo(directory).isDir()) directory = QDir::homePath();
+        const auto name = row.value("name").toString();
+        return {{"url", QUrl::fromLocalFile(QDir(directory).filePath(name))},
+                {"suffix", QFileInfo(name).suffix()}};
+    }
+    return {};
+}
+
+void AppViewModel::openReceivedFile(const QString& id, bool showFolder) {
+    if (!session_ || (!id.startsWith("mesh:") && !id.startsWith("personal:"))) return;
+    const auto* service = id.startsWith("mesh:") ? session_->fileTransfers() : session_->personalFileTransfers();
+    const auto path = service->receivedFilePath(id.section(':', 1));
+    if (path.isEmpty()) return;
+    const QFileInfo info(path);
+    if (!info.isFile()) { reportError("Файл перемещён или удалён."); return; }
+    bool opened = false;
+    if (!showFolder) opened = QDesktopServices::openUrl(QUrl::fromLocalFile(info.absoluteFilePath()));
+    else {
+#ifdef Q_OS_WIN
+        opened = QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(info.absoluteFilePath())});
+#elif defined(Q_OS_MACOS)
+        opened = QProcess::startDetached("/usr/bin/open", {"-R", info.absoluteFilePath()});
+#else
+        opened = QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+#endif
+    }
+    if (!opened) reportError(showFolder ? "Не удалось открыть папку с файлом." : "Не удалось открыть файл.");
+}
+
+void AppViewModel::acceptFile(const QString& id, const QUrl& destination) {
+    if (!session_ || !destination.isLocalFile()) return;
+    if (!id.startsWith("mesh:") && !id.startsWith("personal:")) return;
+    auto* service = id.startsWith("mesh:") ? session_->fileTransfers() : session_->personalFileTransfers();
+    const auto result = service->accept(id.section(':', 1), destination.toLocalFile());
+    if (!result) reportError(result.error());
+}
+
+void AppViewModel::cancelFile(const QString& id) {
+    if (session_) {
+        if (id.startsWith("mesh:")) session_->fileTransfers()->cancel(id.mid(5));
+        else if (id.startsWith("personal:")) session_->personalFileTransfers()->cancel(id.mid(9));
+    }
+}
+
+void AppViewModel::dismissFile(const QString& id) {
+    if (session_) {
+        if (id.startsWith("mesh:")) session_->fileTransfers()->dismiss(id.mid(5));
+        else if (id.startsWith("personal:")) session_->personalFileTransfers()->dismiss(id.mid(9));
+    }
+}
+
+bool AppViewModel::sharingScreen() const { return session_ && session_->screenShare()->sharing(); }
+bool AppViewModel::viewingScreen() const { return session_ && session_->screenShare()->viewing(); }
+QString AppViewModel::screenShareTitle() const {
+    if (!session_) return {};
+    const auto* share = session_->screenShare();
+    return (share->sharing() ? QString("Вы показываете: ") : session_->peerDisplayName(share->owner()) + " показывает: ") + share->title();
+}
+bool AppViewModel::systemAudioSupported() const { return SystemAudioCapture::supported(); }
+QVariantList AppViewModel::screenSources() { return session_ ? session_->screenShare()->sources() : QVariantList{}; }
+void AppViewModel::startScreenShare(int sourceIndex, bool systemAudio) {
+    if (!session_) return;
+    const auto result = session_->screenShare()->start(sourceIndex, systemAudio);
+    if (!result) reportError(result.error());
+}
+void AppViewModel::stopScreenShare() { if (session_) session_->screenShare()->stop(); }
+void AppViewModel::setScreenVideoSink(QObject* sink) {
+    screenVideoSink_ = qobject_cast<QVideoSink*>(sink);
+    if (screenVideoSink_) screenVideoSink_->setVideoFrame(lastStreamFrame_.isNull() ? QVideoFrame{} : QVideoFrame(lastStreamFrame_));
 }
 
 } // namespace tmc

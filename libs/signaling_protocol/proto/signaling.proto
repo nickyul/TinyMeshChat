@@ -1,0 +1,274 @@
+syntax = "proto2";
+package tmc.signaling_protocol.wire;
+
+message Empty {
+}
+
+message Grant {
+  optional uint32 v = 1;
+  optional string authority = 2;
+  optional string subject = 3;
+  optional string role = 4;
+  optional string signature = 5;
+}
+
+message Turn {
+  repeated string urls = 1;
+  optional string username = 2;
+  optional string password = 3;
+  optional uint32 expiresInSeconds = 4;
+}
+
+message Challenge {
+  optional string sessionId = 1;
+  optional string nonce = 2;
+  optional string authority = 3;
+}
+
+message Authenticate {
+  optional string publicKey = 1;
+  optional Grant grant = 2;
+  optional string signature = 3;
+}
+
+message Redeem {
+  optional string publicKey = 1;
+  optional string token = 2;
+  optional string signature = 3;
+}
+
+message Granted {
+  optional Grant grant = 1;
+  optional Turn turn = 2;
+}
+
+message Authenticated {
+  optional Turn turn = 1;
+}
+
+message AccessInvited {
+  optional string token = 1;
+  optional string authority = 2;
+  optional uint32 expiresInSeconds = 3;
+}
+
+message MeshDeparture {
+  optional string meshId = 1;
+  optional string identityId = 2;
+}
+
+message MeshLeave {
+  optional string meshId = 1;
+}
+
+message DirectSignal {
+  optional string identityId = 1;
+  optional string connectionId = 2;
+  optional string kind = 3;
+  optional string sdp = 4;
+}
+
+message MeshRelay {
+  optional string meshId = 1;
+  optional string identityId = 2;
+  optional string payload = 3;
+}
+
+message PresencePublish {
+  optional string identityId = 1;
+  optional string displayName = 2;
+  repeated string knownPeers = 3;
+  optional bool busy = 4;
+  optional string meshId = 5;
+}
+
+message PresencePeer {
+  optional string identityId = 1;
+  optional bool online = 2;
+  optional bool inConversation = 3;
+}
+
+message PresenceSnapshot {
+  repeated PresencePeer peers = 1;
+}
+
+message KnockRequest {
+  optional string toIdentityId = 1;
+}
+message KnockRespond {
+  optional string invitationId = 1;
+  optional string decision = 2;
+  optional string roomId = 3;
+}
+message ContactInvite {
+  optional string toIdentityId = 1;
+  optional string roomId = 2;
+  optional string meshId = 3;
+}
+
+message ContactRespond {
+  optional string invitationId = 1;
+  optional string decision = 2;
+}
+
+message ContactInvited {
+  optional string invitationId = 1;
+}
+
+message ContactInvitation {
+  optional string invitationId = 1;
+  optional string fromIdentityId = 2;
+  optional string displayName = 3;
+  optional string meshId = 4;
+  optional uint32 expiresInSeconds = 5;
+}
+
+message ContactAccepted {
+  optional string invitationId = 1;
+  optional string roomId = 2;
+  optional string meshId = 3;
+  optional string token = 4;
+}
+
+message ContactResult {
+  optional string invitationId = 1;
+  optional string toIdentityId = 2;
+  optional string status = 3;
+}
+
+message ContactClosed {
+  optional string invitationId = 1;
+  optional string status = 2;
+}
+
+message Room {
+  optional string roomId = 1;
+}
+
+message RoomPeer {
+  optional string roomId = 1;
+  optional string peerId = 2;
+}
+
+message RoomJoin {
+  optional string roomId = 1;
+  optional string token = 2;
+}
+
+message RoomJoined {
+  optional string roomId = 1;
+  optional string peerId = 2;
+  repeated string peers = 3;
+}
+
+message InviteCreated {
+  optional string roomId = 1;
+  optional string token = 2;
+  optional uint32 expiresInSeconds = 3;
+}
+
+message PeerLeft {
+  optional string roomId = 1;
+  optional string peerId = 2;
+  optional string reason = 3;
+}
+
+message SignalSend {
+  optional string roomId = 1;
+  optional string toPeerId = 2;
+  optional string payload = 3;
+}
+
+message SignalReceived {
+  optional string roomId = 1;
+  optional string fromPeerId = 2;
+  optional string payload = 3;
+}
+
+message Error {
+  optional string code = 1;
+  optional string message = 2;
+}
+
+message AccessInvitation {
+  optional string server = 1;
+  optional string authority = 2;
+  optional string token = 3;
+}
+
+message MeshInvitation {
+  optional string server = 1;
+  optional string roomId = 2;
+  optional string meshId = 3;
+  optional string token = 4;
+}
+
+message WebrtcDescription {
+  optional string meshId = 1;
+  optional string connectionId = 2;
+  optional string identityId = 3;
+  optional string displayName = 4;
+  optional string sdp = 5;
+}
+
+message Envelope {
+  optional uint32 version = 1;
+  optional string request_id = 2;
+  oneof body {
+    KnockRequest knock_request = 130;
+    ContactInvited knock_requested = 131;
+    KnockRespond knock_respond = 132;
+    Empty knock_responded = 133;
+    ContactInvitation knock_invitation = 134;
+    ContactAccepted knock_accepted = 135;
+    ContactResult knock_result = 136;
+    ContactClosed knock_closed = 137;
+    MeshLeave mesh_leave = 120;
+    Empty mesh_left = 121;
+    MeshDeparture mesh_departed = 122;
+    DirectSignal direct_send = 110;
+    DirectSignal direct_received = 111;
+    Empty direct_accepted = 112;
+    MeshRelay mesh_relay = 100;
+    MeshRelay mesh_received = 101;
+    Empty mesh_relayed = 102;
+    Challenge auth_challenge = 10;
+    Authenticate auth_authenticate = 11;
+    Authenticated auth_authenticated = 12;
+    Redeem access_redeem = 13;
+    Granted access_granted = 14;
+    Empty access_invite = 15;
+    AccessInvited access_invited = 16;
+    Empty turn_refresh = 17;
+    Authenticated turn_credentials = 18;
+    PresencePublish presence_publish = 19;
+    Empty presence_published = 20;
+    PresenceSnapshot presence_snapshot = 21;
+    ContactInvite contact_invite = 22;
+    ContactInvited contact_invited = 23;
+    ContactRespond contact_respond = 24;
+    Empty contact_responded = 25;
+    ContactInvitation contact_invitation = 26;
+    ContactAccepted contact_accepted = 27;
+    ContactResult contact_result = 28;
+    ContactClosed contact_closed = 29;
+    Empty room_create = 30;
+    RoomPeer room_created = 31;
+    RoomJoin room_join = 32;
+    RoomJoined room_joined = 33;
+    Room room_leave = 34;
+    Room room_left = 35;
+    Room invite_create = 36;
+    InviteCreated invite_created = 37;
+    RoomPeer peer_joined = 38;
+    PeerLeft peer_left = 39;
+    SignalSend signal_send = 40;
+    Empty signal_accepted = 41;
+    SignalReceived signal_received = 42;
+    Error error = 43;
+    AccessInvitation access_invitation = 44;
+    MeshInvitation mesh_invitation = 45;
+    WebrtcDescription webrtc_offer = 46;
+    WebrtcDescription webrtc_answer = 47;
+  }
+}

@@ -32,7 +32,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
-          modules: qtwebsockets
+          modules: qtwebsockets qtmultimedia
           arch: win64_msvc2022_64
           cache: true
 
@@ -90,7 +90,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: mac
           target: desktop
-          modules: qtwebsockets
+          modules: qtwebsockets qtmultimedia
           cache: true
 
       - name: Install build tools

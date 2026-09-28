@@ -353,6 +353,16 @@ bool ConnectionManager::sendChat(const QString& connectionId, const QString& tex
     return link && link->open && link->chatChannelOpen && link->transport->sendChat(text);
 }
 
+bool ConnectionManager::sendTransfer(const QString& connectionId, const QByteArray& bytes) {
+    const auto link = current(connectionId);
+    return link && link->open && link->transport->sendTransfer(bytes);
+}
+
+bool ConnectionManager::sendStream(const QString& connectionId, const QByteArray& bytes) {
+    const auto link = current(connectionId);
+    return link && link->open && link->transport->sendStream(bytes);
+}
+
 std::shared_ptr<ConnectionManager::Link>
 ConnectionManager::current(const QString& connectionId) const {
     return links_.value(connectionId);
@@ -527,6 +537,19 @@ void ConnectionManager::connectChannelSignals(const std::shared_ptr<Link>& link)
 }
 
 void ConnectionManager::connectDataSignals(const std::shared_ptr<Link>& link) {
+    connect(link->transport.get(), &PeerConnection::streamReceived, this,
+            [this, link](const QByteArray& bytes) {
+                if (isCurrent(link) && link->open) emit streamReceived(link->connectionId, bytes);
+            });
+    connect(link->transport.get(), &PeerConnection::transferChannelClosed, this, [this, link] {
+        if (isCurrent(link)) suspect(link, "Канал передачи файлов закрылся.");
+    });
+    connect(link->transport.get(), &PeerConnection::transferReceived, this,
+            [this, link](const QByteArray& bytes) {
+                if (!isCurrent(link) || !link->open) return;
+                link->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+                emit transferReceived(link->connectionId, bytes);
+            });
     connect(link->transport.get(), &PeerConnection::controlTextReceived, this,
             [this, link](const QString& text) {
                 if (!isCurrent(link)) {

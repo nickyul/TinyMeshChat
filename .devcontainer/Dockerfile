@@ -24,6 +24,7 @@ RUN apt-get update \
         libfontconfig1 \
         libfreetype6 \
         libgl1-mesa-dev \
+        libpulse0 \
         libtool \
         libxcb-cursor0 \
         libxcb-icccm4 \
@@ -32,6 +33,7 @@ RUN apt-get update \
         libxcb-xkb1 \
         libxkbcommon0 \
         libxkbcommon-x11-0 \
+        libxrandr2 \
         nasm \
         ninja-build \
         openssl \
@@ -46,7 +48,7 @@ RUN python3 -m venv /opt/aqt \
     && /opt/aqt/bin/pip install --no-cache-dir "aqtinstall==${AQT_VERSION}" \
     && /opt/aqt/bin/aqt install-qt linux desktop "${QT_VERSION}" linux_gcc_64 \
         --outputdir /opt/Qt \
-        --modules qtwebsockets
+        --modules qtwebsockets qtmultimedia
 
 RUN git clone --branch "${VCPKG_REF}" --depth 1 https://github.com/microsoft/vcpkg /opt/vcpkg \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics

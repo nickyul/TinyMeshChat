@@ -1,5 +1,5 @@
-find_package(Qt6 6.5 REQUIRED COMPONENTS
-    Gui Qml Quick QuickControls2 Widgets
+find_package(Qt6 6.9 REQUIRED COMPONENTS
+    Gui Qml Quick QuickControls2 Widgets Multimedia
 )
 
 find_package(LibDataChannel CONFIG REQUIRED)
@@ -133,6 +133,34 @@ if(APPLE)
     )
 endif()
 
+add_library(tmc_sharing STATIC)
+target_sources(tmc_sharing PRIVATE
+    src/sharing/screen_share_service.cpp
+    src/sharing/system_audio_capture.cpp
+    PUBLIC FILE_SET HEADERS BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include" FILES
+        include/tmc/sharing/screen_share_service.h
+        include/tmc/sharing/system_audio_capture.h
+)
+target_include_directories(tmc_sharing PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
+target_link_libraries(tmc_sharing PUBLIC tmc_core Qt6::Gui PRIVATE Qt6::Multimedia tmc_audio Opus::opus)
+if(WIN32)
+    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_win.cpp)
+    target_sources(tmc_sharing PRIVATE src/sharing/window_source_filter_win.cpp)
+    target_link_libraries(tmc_sharing PRIVATE user32 dwmapi)
+elseif(APPLE)
+    enable_language(OBJCXX)
+    set_target_properties(tmc_sharing PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
+    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_mac.mm)
+    target_sources(tmc_sharing PRIVATE src/sharing/window_source_filter_mac.mm)
+    set_source_files_properties(src/sharing/window_source_filter_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(tmc_sharing PRIVATE "-framework AppKit" "-framework CoreGraphics")
+    set_source_files_properties(src/sharing/system_audio_capture_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_options(tmc_sharing INTERFACE "LINKER:-weak_framework,ScreenCaptureKit")
+    target_link_libraries(tmc_sharing PRIVATE "-framework CoreMedia" "-framework AudioToolbox")
+else()
+    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_stub.cpp)
+endif()
+
 add_library(tmc_signaling_client STATIC)
 target_sources(tmc_signaling_client
     PRIVATE
@@ -157,16 +185,20 @@ target_sources(tmc_application
     PRIVATE
         src/app/application_controller.cpp
         src/app/connection_manager.cpp
+        src/app/personal_connections.cpp
         src/app/mesh_coordinator.cpp
         src/app/messaging_service.cpp
         src/app/network_session.cpp
+        src/app/network_session_services.cpp
         src/app/network_session_signaling.cpp
         src/app/network_session_recovery.cpp
+        src/app/network_session_reachability.cpp
         src/app/network_session_presence.cpp
         src/app/network_session_packets.cpp
         src/app/signaling_router.cpp
         src/app/negotiation_policy.cpp
         src/app/voice_session.cpp
+        src/transfers/file_transfer_service.cpp
         src/app/update_service.cpp
         src/signaling/invitation_codec.cpp
     PUBLIC
@@ -175,6 +207,7 @@ target_sources(tmc_application
         FILES
             include/tmc/app/application_controller.h
             include/tmc/app/connection_manager.h
+            include/tmc/app/personal_connections.h
             include/tmc/app/mesh_session_state.h
             include/tmc/app/mesh_coordinator.h
             include/tmc/app/messaging_service.h
@@ -182,6 +215,7 @@ target_sources(tmc_application
             include/tmc/app/signaling_router.h
             include/tmc/app/negotiation_policy.h
             include/tmc/app/voice_session.h
+            include/tmc/transfers/file_transfer_service.h
             include/tmc/app/update_service.h
             include/tmc/signaling/invitation.h
             include/tmc/signaling/invitation_codec.h
@@ -193,6 +227,7 @@ target_link_libraries(tmc_application
         tmc_signaling_client
         tmc_security
         tmc_signaling_protocol
+        tmc_sharing
         Qt6::Core
     PRIVATE
         tmc_audio
@@ -222,7 +257,7 @@ target_sources(TinyMeshChat
         src/bootstrap/console_runtime.cpp
         src/bootstrap/gui_runtime.cpp
         src/cli/console_controller.cpp
-        src/ui/app_link_controller.cpp
+        src/ui/application_instance.cpp
         src/ui/app_view_model.cpp
         src/ui/global_ptt_monitor.cpp
         src/ui/tray_controller.cpp
@@ -235,7 +270,7 @@ target_sources(TinyMeshChat
             include/tmc/bootstrap/console_runtime.h
             include/tmc/bootstrap/gui_runtime.h
             include/tmc/cli/console_controller.h
-            include/tmc/ui/app_link_controller.h
+            include/tmc/ui/application_instance.h
             include/tmc/ui/app_view_model.h
             include/tmc/ui/global_ptt_monitor.h
             include/tmc/ui/tray_controller.h
@@ -278,6 +313,7 @@ target_link_libraries(TinyMeshChat PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Widgets
+    Qt6::Multimedia
 )
 
 target_compile_definitions(TinyMeshChat PRIVATE TMC_APP_VERSION="${TMC_APP_VERSION}")

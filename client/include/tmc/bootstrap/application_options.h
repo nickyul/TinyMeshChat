@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QString>
-#include <QUrl>
 
 namespace tmc {
 
@@ -9,7 +8,6 @@ struct ApplicationOptions {
     bool console{false};
     bool qmlSmoke{false};
     QString displayName;
-    QUrl appLink;
     QString error;
 };
 

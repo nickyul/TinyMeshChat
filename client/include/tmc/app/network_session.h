@@ -30,6 +30,9 @@ namespace tmc {
 class ApplicationController;
 class VoiceSession;
 class SignalingClient;
+class FileTransferService;
+class PersonalConnections;
+class ScreenShareService;
 
 class NetworkSession final : public QObject {
     Q_OBJECT
@@ -59,9 +62,16 @@ public:
     Result<void> createAccessInvitation();
     QVariantList acquaintances() const;
     Result<void> inviteAcquaintance(const QString& peerId);
+    Result<void> requestConversationEntry(const QString& peerId);
+    void respondToEntryRequest(const QString& id, bool accept);
     void respondToOnlineInvitation(const QString& invitationId, bool accept);
 
     Result<void> sendMessage(const QString& text);
+    QVariantList fileRecipients() const;
+    FileTransferService* fileTransfers() const;
+    FileTransferService* personalFileTransfers() const;
+    ScreenShareService* screenShare() const;
+    Result<void> sendFile(const QString& path, const QString& peerId = {}, const QString& groupId = {});
 
     Result<void> startCall();
     void leaveCall();
@@ -95,6 +105,7 @@ signals:
     void statusChanged(QString status);
     void meshChanged(int connected, int expected);
     void peerChanged(QString peerId, QString displayName, bool connected);
+    void peerRemoved(QString peerId);
     void peerRttChanged(QString peerId, int milliseconds);
     void messageReceived(tmc::ChatMessage message, bool local);
     void deliveryChanged(QString messageId, int acknowledged, int expected);
@@ -112,6 +123,8 @@ signals:
     void serverInvitationReady(QString link);
     void accessInvitationReady(QString link);
     void acquaintancesChanged();
+    void entryRequestReceived(QString id, QString displayName);
+    void entryRequestClosed(QString id);
     void onlineInvitationReceived(QString invitationId, QString displayName, QString server);
     void onlineInvitationClosed(QString invitationId);
 
@@ -122,6 +135,7 @@ private:
     };
 
     void connectConnectionSignals();
+    void configurePeerServices();
     void connectMeshSignals();
     void connectVoiceSignals();
     void configureKeepalive();
@@ -130,6 +144,9 @@ private:
     void handleLinkOpened(const QString& connectionId, const PeerIdentity& remote);
     void handleLinkRemoved(const QString& connectionId, const PeerIdentity& remote, bool wasOpen);
     void handleKeepaliveTimeout();
+    void maintainPeerReachability();
+    void notePeerReachable(const QString& peerId);
+    void removeMeshPeer(const QString& peerId);
     void emitSignaling(const QString& connectionId, const QString& sdp);
 
     void handleIncoming(const QString& connectionId, const QString& text, PacketChannel channel);
@@ -182,6 +199,8 @@ private:
     void handleServerEvent(const signaling_protocol::Envelope& event);
     void handleServerPayload(const QString& peerId, const QString& payload);
     void emitServerSignaling(const QString& connectionId, const QString& sdp);
+    bool relayMeshSignaling(const Packet& packet);
+    void receiveMeshSignaling(const signaling_protocol::Envelope& event);
     void startServerOffer(const QString& peerId);
     void continueServerBootstrap();
     void leaveServerRoom();
@@ -209,8 +228,15 @@ private:
     SignalingRouter router_;
     MessagingService messaging_;
     std::unique_ptr<VoiceSession> voice_;
+    std::unique_ptr<FileTransferService> files_;
+    std::unique_ptr<PersonalConnections> personal_;
+    std::unique_ptr<ScreenShareService> sharing_;
 
     QTimer* keepalive_{};
+    QTimer reachabilityTimer_;
+    QElapsedTimer reachabilityClock_;
+    QHash<QString, qint64> lastReachable_;
+    QHash<QString, QString> peerSignalingServers_;
     QString manualInvitationConnectionId_;
     QHash<QString, QList<Packet>> pendingRouted_;
     QHash<QString, QString> routeRequests_;
@@ -225,6 +251,7 @@ private:
     QSet<QString> serverBootstrapAttempts_;
     QHash<QString, QString> serverLinks_; // WebRTC connectionId -> room membership peerId
     QHash<QString, QString> serverSignalRequests_; // requestId -> WebRTC connectionId
+    QHash<QString, QString> meshRelayRequests_; // requestId -> persistent peer identity
     std::optional<ServerInvitation> pendingServerJoin_;
     bool serverMesh_{false};
     QTimer serverJoinDeadline_;
@@ -252,6 +279,9 @@ private:
     QTimer presencePublishTimer_;
     QJsonObject lastPresence_;
     QHash<QString, bool> contactPresence_;
+    QSet<QString> contactConversations_;
+    QString outgoingKnockPeer_, outgoingKnockId_, outgoingKnockRequest_;
+    QHash<QString, QString> knockAcceptanceRequests_;
     bool presenceRegistered_{false};
     bool presenceConflictReported_{false};
     QString pendingContactTarget_;
@@ -263,6 +293,7 @@ private:
         bool accepting{false};
     };
     std::optional<OnlineInvitation> incomingOnlineInvitation_;
+    std::optional<OnlineInvitation> incomingKnock_;
 
     struct PendingPing {
         QString nonce;

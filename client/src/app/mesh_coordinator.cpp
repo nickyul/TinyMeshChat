@@ -58,7 +58,7 @@ void MeshCoordinator::leave() {
 }
 
 bool MeshCoordinator::rememberPeer(const PeerIdentity& peer) {
-    if (meshId_.isEmpty() || !peer.isValid()) {
+    if (meshId_.isEmpty() || !peer.isValid() || departedPeers_.contains(peer.peerId)) {
         return false;
     }
     const auto existing = peers_.find(peer.peerId);
@@ -81,6 +81,7 @@ bool MeshCoordinator::forgetPeer(const QString& peerId) {
         return false;
     }
     retryStates_.remove(peerId);
+    departedPeers_.insert(peerId);
     linkGenerations_.remove(peerId);
     updateState();
     return true;
@@ -112,6 +113,8 @@ void MeshCoordinator::connectionOpened(const PeerIdentity& peer) {
         return;
     }
     joined_ = true;
+    departedPeers_.remove(peer.peerId);
+    rememberPeer(peer);
     retryStates_.remove(peer.peerId);
     updateState();
 }
@@ -180,6 +183,7 @@ void MeshCoordinator::routeAvailable(const QString& peerId) {
 
 void MeshCoordinator::resetRuntime() {
     peers_.clear();
+    departedPeers_.clear();
     retryStates_.clear();
     linkGenerations_.clear();
 }
