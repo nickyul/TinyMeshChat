@@ -949,38 +949,13 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
 
-                    TextField {
+                    ChatMessageInput {
                         id: messageInput
-
                         Layout.fillWidth: true
+                        Layout.preferredHeight: implicitHeight
                         placeholderText: qsTr("Введите сообщение…")
-                        maximumLength: 4096
-                        onAccepted: meshPage.sendMessage()
-                        Keys.onPressed: function(event) {
-                            if (event.matches(StandardKey.Paste)) {
-                                root.pasteIntoChat();
-                                event.accepted = true;
-                            }
-                        }
-                        persistentSelection: true
-                        TapHandler {
-                            acceptedButtons: Qt.RightButton
-                            onTapped: function(eventPoint) {
-                                messageEditMenu.popup(eventPoint.position.x, eventPoint.position.y);
-                            }
-                        }
-                        Menu {
-                            id: messageEditMenu
-                            MenuItem {
-                                text: qsTr("Копировать выделенное")
-                                enabled: messageInput.selectedText.length > 0
-                                onTriggered: messageInput.copy()
-                            }
-                            MenuItem {
-                                text: qsTr("Вставить")
-                                onTriggered: { root.pasteIntoChat(); messageInput.forceActiveFocus(); }
-                            }
-                        }
+                        onSubmitted: meshPage.sendMessage()
+                        onPasteRequested: root.pasteIntoChat()
                     }
 
                     ToolButton {

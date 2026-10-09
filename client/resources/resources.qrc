@@ -14,6 +14,7 @@
     <file alias="qml/AppPalette.qml">../qml/AppPalette.qml</file>
     <file alias="qml/AudioSettingsDialog.qml">../qml/AudioSettingsDialog.qml</file>
     <file alias="qml/DiagnosticsDialog.qml">../qml/DiagnosticsDialog.qml</file>
+    <file alias="qml/ChatMessageInput.qml">../qml/ChatMessageInput.qml</file>
     <file alias="qml/Main.qml">../qml/Main.qml</file>
     <file alias="qml/PrimaryButton.qml">../qml/PrimaryButton.qml</file>
     <file alias="qml/SignalingOutputDialog.qml">../qml/SignalingOutputDialog.qml</file>
