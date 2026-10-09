@@ -3,6 +3,7 @@
     "stun:stun.l.google.com:19302",
     "stun:stun.cloudflare.com:3478"
   ],
+  "screen_quality": { "height": 1080, "fps": 30 },
   "audio": {
     "capture_device": "",
     "playback_device": "",

@@ -329,10 +329,28 @@ Result<AppConfig> AppConfig::load(const QString& path) {
         return Result<AppConfig>::failure(audio.error());
     }
     c.audio = std::move(audio.value());
+    if (root.contains("screen_quality")) {
+        if (!root.value("screen_quality").isObject()) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+        const auto quality = root.value("screen_quality").toObject();
+        const auto height = quality.value("height").toDouble(-1);
+        const auto fps = quality.value("fps").toDouble(-1);
+        if (!isIntegerInRange(height, 720, 1440) || !isIntegerInRange(fps, 30, 60)) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+        c.screenQuality = {static_cast<int>(height), static_cast<int>(fps)};
+        if (!c.screenQuality.isValid()) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+    }
     return Result<AppConfig>::success(std::move(c));
 }
 
 Result<void> AppConfig::save(const QString& path) const {
+    if (!screenQuality.isValid()) {
+        return Result<void>::failure("Invalid screen quality");
+    }
     if (!validSignalingUrl(signalingServerUrl)) {
         return Result<void>::failure("Укажите адрес ws:// или wss:// без пароля, query и fragment.");
     }
@@ -370,8 +388,11 @@ Result<void> AppConfig::save(const QString& path) const {
         {"vad_threshold", audio.vadThreshold},
         {"vad_hangover_ms", audio.vadHangoverMs},
         {"ptt_binding", pttBinding}};
-    const QJsonObject root{{"stun_servers", servers}, {"audio", audioObject},
-                           {"signaling_server_url", signalingServerUrl}};
+    const QJsonObject root{{"stun_servers", servers},
+                           {"audio", audioObject},
+                           {"signaling_server_url", signalingServerUrl},
+                           {"screen_quality", QJsonObject{{"height", screenQuality.height},
+                                                          {"fps", screenQuality.fps}}}};
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         return Result<void>::failure("Cannot write configuration: " + file.errorString());

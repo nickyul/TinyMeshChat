@@ -32,7 +32,8 @@ class VoiceSession;
 class SignalingClient;
 class FileTransferService;
 class PersonalConnections;
-class ScreenShareService;
+class ScreenShareController;
+using ScreenShareService = ScreenShareController;
 
 class NetworkSession final : public QObject {
     Q_OBJECT

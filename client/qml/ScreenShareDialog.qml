@@ -14,13 +14,15 @@ Dialog {
         sources = viewModel.screenSources();
         sourcePicker.currentIndex = sources.length > 0 ? 0 : -1;
         systemSound.checked = false;
+        qualityPicker.currentIndex = [720, 1080, 1440].indexOf(viewModel.screenQualityHeight);
+        fpsPicker.currentIndex = viewModel.screenQualityFps === 60 ? 1 : 0;
     }
     ColumnLayout {
         width: parent.width
         spacing: 16
         Label {
             Layout.fillWidth: true
-            text: qsTr("Участники беседы увидят выбранный источник. Одновременно доступна одна трансляция.")
+            text: qsTr("Участники смогут выбрать вашу трансляцию для просмотра. Вы можете смотреть их экраны во время показа.")
             wrapMode: Text.WordWrap
         }
         ComboBox {
@@ -43,6 +45,25 @@ Dialog {
             text: qsTr("Не видите нужное окно? Разверните его и обновите список.")
             wrapMode: Text.WordWrap
         }
+        RowLayout {
+            Label {
+                text: qsTr("Качество")
+            }
+            ComboBox {
+                id: qualityPicker
+                model: ["720p", "1080p", "1440p"]
+                Layout.fillWidth: true
+            }
+            ComboBox {
+                id: fpsPicker
+                model: ["30 FPS", "60 FPS"]
+            }
+        }
+        Label {
+            Layout.fillWidth: true
+            text: qsTr("Это верхний предел. Качество автоматически снижается при слабом соединении у каждого зрителя.")
+            wrapMode: Text.WordWrap
+        }
         Switch {
             id: systemSound
             text: qsTr("Передавать звук компьютера")
@@ -59,10 +80,14 @@ Dialog {
             Button { text: qsTr("Отмена"); onClicked: control.close() }
             PrimaryButton {
                 text: qsTr("Начать показ")
-                enabled: sourcePicker.currentIndex >= 0 && !control.viewModel.viewingScreen
+                enabled: sourcePicker.currentIndex >= 0
                 onClicked: {
-                    control.viewModel.startScreenShare(sourcePicker.currentValue, systemSound.checked);
-                    if (control.viewModel.sharingScreen) control.close();
+                    control.viewModel.startScreenShare(sourcePicker.currentValue,
+                        systemSound.checked, [720, 1080, 1440][qualityPicker.currentIndex],
+                        fpsPicker.currentIndex === 1 ? 60 : 30);
+                    if (control.viewModel.sharingScreen) {
+                        control.close();
+                    }
                 }
             }
         }

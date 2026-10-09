@@ -11,6 +11,8 @@
 
 namespace tmc {
 
+class SharedAudioOutput;
+
 struct AudioDeviceLists {
     QStringList capture;
     QStringList playback;
@@ -42,6 +44,7 @@ public:
     AudioPreferences preferences() const;
     std::shared_ptr<IncomingRtpAudioSink> incomingSink() const;
     void setOutgoingSink(std::weak_ptr<OutgoingOpusAudioSink> sink);
+    std::shared_ptr<SharedAudioOutput> audioOutput() const;
 
     void removePeer(const QString& peerId);
 

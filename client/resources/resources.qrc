@@ -23,6 +23,8 @@
     <file alias="qml/AcquaintancesPanel.qml">../qml/AcquaintancesPanel.qml</file>
     <file alias="qml/TransferCard.qml">../qml/TransferCard.qml</file>
     <file alias="qml/FileTransfersDialog.qml">../qml/FileTransfersDialog.qml</file>
+    <file alias="qml/ScreenStreamTile.qml">../qml/ScreenStreamTile.qml</file>
+    <file alias="qml/ScreenStreamsPane.qml">../qml/ScreenStreamsPane.qml</file>
     <file alias="qml/ScreenShareDialog.qml">../qml/ScreenShareDialog.qml</file>
   </qresource>
 </RCC>

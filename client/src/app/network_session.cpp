@@ -267,6 +267,8 @@ void NetworkSession::connectApplicationSignals() {
     });
     connect(&app_, &ApplicationController::stunServersChanged, connections_.get(),
             &ConnectionManager::setStunServers);
+    connect(&app_, &ApplicationController::stunServersChanged, sharing_.get(),
+            &ScreenShareService::setStunServers);
 
     if (QNetworkInformation::loadDefaultBackend()) {
         connect(QNetworkInformation::instance(), &QNetworkInformation::reachabilityChanged, this,

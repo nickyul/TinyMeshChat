@@ -2,28 +2,30 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
-#include "tmc/transfers/file_transfer_service.h"
-#include "tmc/sharing/screen_share_service.h"
-#include "tmc/sharing/system_audio_capture.h"
-#include <QVideoSink>
-#include <QVideoFrame>
-#include "tmc/signaling_client/access_invitation.h"
-#include "tmc/signaling_client/signaling_client.h"
 #include "tmc/app/update_service.h"
 #include "tmc/messaging/chat_message.h"
+#include "tmc/sharing/screen_share_service.h"
+#include "tmc/sharing/screen_streams_model.h"
+#include "tmc/sharing/system_audio_capture.h"
+#include "tmc/signaling_client/access_invitation.h"
+#include "tmc/signaling_client/signaling_client.h"
+#include "tmc/transfers/file_transfer_service.h"
 #include "tmc/ui/global_ptt_monitor.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QDir>
-#include <QStandardPaths>
-#include <QProcess>
 #include <QGuiApplication>
-#include <QVector>
+#include <QJsonDocument>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QUuid>
+#include <QVector>
+#include <QVideoFrame>
+#include <QVideoSink>
 
 #include <cmath>
 #include <utility>
@@ -398,10 +400,11 @@ private:
     QVector<Row> rows_;
 };
 
-AppViewModel::AppViewModel(ApplicationController& controller,
-                           UpdateService& updates, bool identityRequired, QObject* parent)
+AppViewModel::AppViewModel(ApplicationController& controller, UpdateService& updates,
+                           bool identityRequired, QObject* parent)
     : QObject(parent), controller_(controller), updates_(updates),
       messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
+      screenStreams_(std::make_unique<ScreenStreamsModel>()),
       pttMonitor_(std::make_unique<GlobalPttMonitor>()), identityRequired_(identityRequired) {
 
     connect(&updates_, &UpdateService::stateChanged, this, &AppViewModel::updateStateChanged);
@@ -458,7 +461,16 @@ AppViewModel::AppViewModel(ApplicationController& controller,
     }
 }
 
-AppViewModel::~AppViewModel() = default;
+AppViewModel::~AppViewModel() {
+    if (session_) {
+        // Stop media while the models still exist, without publishing teardown changes to QML.
+        session_->screenShare()->disconnect(this);
+        session_->fileTransfers()->disconnect(this);
+        session_->personalFileTransfers()->disconnect(this);
+        session_->disconnect(this);
+        session_.reset();
+    }
+}
 
 bool AppViewModel::identityRequired() const {
     return identityRequired_;
@@ -1144,7 +1156,11 @@ void AppViewModel::installUpdate() {
 
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
-    return "Сигналинг: " + signalingStatus() + "\n" + network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
+    return "Сигналинг: " + signalingStatus() + "\n" + network + "\n\nЭкран WebRTC:\n" +
+           (session_ ? QString::fromUtf8(QJsonDocument(session_->screenShare()->diagnostics())
+                                             .toJson(QJsonDocument::Indented))
+                     : QString{}) +
+           "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
            controller_.config().stunServers.join("\n  ") + "\n\nКаталог данных:\n" +
            controller_.dataDirectory() + "\nЛог:\n" + controller_.dataDirectory() + "/debug.log";
 }
@@ -1154,11 +1170,11 @@ void AppViewModel::initializeSession() {
         return;
     }
     session_ = std::make_unique<NetworkSession>(controller_, controller_.connectionPolicy());
-    connect(session_->screenShare(), &ScreenShareService::changed, this, &AppViewModel::screenShareChanged);
-    connect(session_->screenShare(), &ScreenShareService::frameReady, this, [this](const QImage& image) {
-        lastStreamFrame_ = image;
-        if (screenVideoSink_) screenVideoSink_->setVideoFrame(image.isNull() ? QVideoFrame{} : QVideoFrame(image));
+    connect(session_->screenShare(), &ScreenShareService::changed, this, [this] {
+        screenStreams_->sync(session_->screenShare()->streams());
+        emit screenShareChanged();
     });
+    session_->screenShare()->setAudioVolume(streamVolume_);
     connect(session_->fileTransfers(), &FileTransferService::changed, this, [this] {
         emit chatLayoutAboutToChange();
         messages_->syncFiles(fileTransfers());
@@ -1511,17 +1527,98 @@ QString AppViewModel::screenShareTitle() const {
     const auto* share = session_->screenShare();
     return (share->sharing() ? QString("Вы показываете: ") : session_->peerDisplayName(share->owner()) + " показывает: ") + share->title();
 }
-bool AppViewModel::systemAudioSupported() const { return SystemAudioCapture::supported(); }
-QVariantList AppViewModel::screenSources() { return session_ ? session_->screenShare()->sources() : QVariantList{}; }
-void AppViewModel::startScreenShare(int sourceIndex, bool systemAudio) {
+bool AppViewModel::systemAudioSupported() const { return SystemAudioCapture::supported();
+}
+
+QVariantList AppViewModel::screenSources() {
+    return session_ ? session_->screenShare()->sources() : QVariantList{};
+}
+
+QAbstractItemModel* AppViewModel::screenStreams() const {
+    return screenStreams_.get();
+}
+
+int AppViewModel::screenQualityHeight() const {
+    return controller_.config().screenQuality.height;
+}
+
+int AppViewModel::screenQualityFps() const {
+    return controller_.config().screenQuality.fps;
+}
+
+QVariantMap AppViewModel::screenStream(const QString& id) const {
+    if (session_) {
+        for (const auto& value : session_->screenShare()->streams()) {
+            if (value.toMap().value("streamId") == id) {
+                return value.toMap();
+            }
+        }
+    }
+    return {};
+}
+
+QString AppViewModel::screenOwnerName(const QString& peer) const {
+    if (peer == controller_.identity().peerId) {
+        return QStringLiteral("Вы");
+    }
+    return session_ ? session_->peerDisplayName(peer) : peer;
+}
+
+void AppViewModel::startScreenShare(int index, bool systemAudio, int height, int fps) {
     if (!session_) return;
-    const auto result = session_->screenShare()->start(sourceIndex, systemAudio);
+    const ScreenQuality quality{height, fps};
+    const auto saved = controller_.updateScreenQuality(quality);
+    if (!saved) {
+        reportError(saved.error());
+        return;
+    }
+    const auto result = session_->screenShare()->start(index, systemAudio, quality);
     if (!result) reportError(result.error());
 }
-void AppViewModel::stopScreenShare() { if (session_) session_->screenShare()->stop(); }
-void AppViewModel::setScreenVideoSink(QObject* sink) {
-    screenVideoSink_ = qobject_cast<QVideoSink*>(sink);
-    if (screenVideoSink_) screenVideoSink_->setVideoFrame(lastStreamFrame_.isNull() ? QVideoFrame{} : QVideoFrame(lastStreamFrame_));
+
+void AppViewModel::stopScreenShare() {
+    if (session_) {
+        session_->screenShare()->stop();
+    }
+}
+
+void AppViewModel::subscribeScreen(const QString& id, bool selected) {
+    if (session_) {
+        session_->screenShare()->subscribe(id, selected);
+    }
+}
+
+void AppViewModel::selectScreenAudio(const QString& id) {
+    if (session_) {
+        session_->screenShare()->selectAudio(id);
+    }
+}
+
+void AppViewModel::retryScreen(const QString& id) {
+    if (session_) {
+        session_->screenShare()->retry(id);
+    }
+}
+
+void AppViewModel::setScreenQuality(const QString& id, int height, int fps) {
+    if (!session_) {
+        return;
+    }
+    const ScreenQuality quality{height, fps};
+    if (id == session_->screenShare()->localStream()) {
+        const auto saved = controller_.updateScreenQuality(quality);
+        if (!saved) {
+            reportError(saved.error());
+            return;
+        }
+    }
+    session_->screenShare()->setQuality(id, quality);
+}
+
+void AppViewModel::setScreenVideoSink(const QString& id, QObject* sink, bool attach) {
+    if (session_) {
+        session_->screenShare()->setVideoSink(id, qobject_cast<QVideoSink*>(sink), attach);
+    }
 }
 
 } // namespace tmc

@@ -1,9 +1,9 @@
-#include "tmc/app/network_session.h"
-
 #include "tmc/app/application_controller.h"
+#include "tmc/app/network_session.h"
 #include "tmc/app/voice_session.h"
 #include "tmc/core/logger.h"
 #include "tmc/protocol/packet_codec.h"
+#include "tmc/sharing/screen_share_service.h"
 
 namespace tmc {
 
@@ -87,6 +87,12 @@ void NetworkSession::handlePacket(const QString& connectionId, const Packet& pac
         return;
     case PacketType::LinkAnswer:
         handleLinkAnswer(connectionId, packet);
+        return;
+    case PacketType::ScreenControl:
+        if (sharing_ && packet.targetId == app_.identity().peerId && packet.ttl == 0) {
+            sharing_->receive(packet.senderId,
+                              std::get<ScreenControlPayload>(packet.payload).message);
+        }
         return;
     case PacketType::SessionOffer:
         handleSessionOffer(connectionId, packet);

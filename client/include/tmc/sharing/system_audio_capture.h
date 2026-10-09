@@ -1,4 +1,5 @@
 #pragma once
+
 #include "tmc/core/result.h"
 #include <QByteArray>
 #include <QObject>
@@ -11,6 +12,8 @@ class SystemAudioCapture final : public QObject {
 public:
     explicit SystemAudioCapture(QObject* parent = nullptr);
     ~SystemAudioCapture() override;
+    using SampleSink = std::function<void(const float*, int)>;
+    void setSampleSink(SampleSink sink);
     Result<void> start();
     void stop();
     static bool supported();
@@ -24,6 +27,7 @@ private:
     Sink makeSink();
     std::function<void(QString)> makeErrorSink();
     void invalidateSink();
+    SampleSink sampleSink_;
     std::shared_ptr<Delivery> delivery_;
     std::unique_ptr<Native> native_;
 };

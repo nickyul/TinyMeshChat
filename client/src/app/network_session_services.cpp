@@ -1,6 +1,7 @@
-#include "tmc/app/network_session.h"
 #include "tmc/app/application_controller.h"
+#include "tmc/app/network_session.h"
 #include "tmc/app/personal_connections.h"
+#include "tmc/app/voice_session.h"
 #include "tmc/sharing/screen_share_service.h"
 #include "tmc/signaling_client/signaling_client.h"
 #include "tmc/transfers/file_transfer_service.h"
@@ -8,19 +9,16 @@
 namespace tmc {
 
 void NetworkSession::configurePeerServices() {
-    sharing_ = std::make_unique<ScreenShareService>(app_.identity().peerId,
-        [this](const QString& peerId, const QByteArray& bytes) {
+    sharing_ = std::make_unique<ScreenShareService>(
+        app_.identity().peerId, app_.config().stunServers, voice_->audioOutput(),
+        [this](const QString& peerId, const QJsonObject& message) {
             const auto link = connections_->infoForPeer(peerId);
-            return link && link->open && connections_->sendStream(link->connectionId, bytes);
+            auto packet = basePacket(PacketType::ScreenControl, ScreenControlPayload{message});
+            packet.targetId = peerId;
+            packet.ttl = 0;
+            return link && link->open && sendPacket(link->connectionId, packet);
         });
     connect(sharing_.get(), &ScreenShareService::errorOccurred, this, &NetworkSession::errorOccurred);
-    connect(connections_.get(), &ConnectionManager::streamReceived, this,
-            [this](const QString& id, const QByteArray& bytes) {
-                const auto link = connections_->info(id);
-                if (!link || !link->open) return;
-                notePeerReachable(link->remote.peerId);
-                sharing_->receive(link->remote.peerId, bytes);
-            });
     personal_ = std::make_unique<PersonalConnections>(app_,
         [this](const QString& peer, const QString& id, const QString& kind, const QString& sdp) {
             if (!signalingConnected()) return false;

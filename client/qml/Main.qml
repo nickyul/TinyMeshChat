@@ -502,54 +502,16 @@ ApplicationWindow {
                         }
                         Button {
                             text: appViewModel.sharingScreen ? qsTr("Остановить показ") : qsTr("Показать экран…")
-                            enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0 && !appViewModel.viewingScreen)
+                            enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0)
                             onClicked: appViewModel.sharingScreen ? appViewModel.stopScreenShare() : screenShareDialog.open()
                         }
                     }
                 }
 
-                Label {
+                ScreenStreamsPane {
                     Layout.fillWidth: true
-                    visible: appViewModel.sharingScreen || appViewModel.viewingScreen
-                    text: visible ? appViewModel.screenShareTitle : ""
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    color: appPalette.textSecondary
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: visible ? Math.min(300, root.height * 0.35) : 0
-                    visible: appViewModel.sharingScreen || appViewModel.viewingScreen
-                    color: "#17232f"
-                    radius: 10
-                    VideoOutput {
-                        id: previewVideo
-                        anchors.fill: parent
-                        fillMode: VideoOutput.PreserveAspectFit
-                        Component.onCompleted: appViewModel.setScreenVideoSink(videoSink)
-                        Component.onDestruction: appViewModel.setScreenVideoSink(null)
-                    }
-                    Button {
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: 8
-                        text: qsTr("Развернуть")
-                        onClicked: expandedStream.open()
-                    }
-                }
-
-                RowLayout {
-                    visible: appViewModel.viewingScreen
-                    Layout.fillWidth: true
-                    Label { text: qsTr("Звук трансляции") }
-                    Slider {
-                        from: 0; to: 100; stepSize: 1
-                        value: appViewModel.streamVolume
-                        onMoved: appViewModel.streamVolume = Math.round(value)
-                        Accessible.name: qsTr("Громкость трансляции")
-                    }
-                    Label { text: appViewModel.streamVolume + "%" }
+                    Layout.preferredHeight: implicitHeight
+                    viewModel: appViewModel
                 }
 
                 SplitView {
@@ -1162,48 +1124,6 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
-        id: expandedStream
-        parent: Overlay.overlay
-        x: 8; y: 8
-        width: parent.width - 16
-        height: parent.height - 16
-        modal: true
-        title: appViewModel.screenShareTitle
-        onOpened: appViewModel.setScreenVideoSink(expandedVideo.videoSink)
-        onClosed: appViewModel.setScreenVideoSink(previewVideo.videoSink)
-        contentItem: ColumnLayout {
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: "#17232f"
-                VideoOutput {
-                    id: expandedVideo
-                    anchors.fill: parent
-                    fillMode: VideoOutput.PreserveAspectFit
-                }
-            }
-            RowLayout {
-                Label { visible: appViewModel.viewingScreen; text: qsTr("Звук трансляции") }
-                Slider {
-                    visible: appViewModel.viewingScreen
-                    from: 0; to: 100; stepSize: 1
-                    value: appViewModel.streamVolume
-                    onMoved: appViewModel.streamVolume = Math.round(value)
-                    Accessible.name: qsTr("Громкость трансляции")
-                }
-                Label { visible: appViewModel.viewingScreen; text: appViewModel.streamVolume + "%" }
-                Item { Layout.fillWidth: true }
-                Button {
-                    visible: appViewModel.sharingScreen
-                    text: qsTr("Остановить показ")
-                    onClicked: appViewModel.stopScreenShare()
-                }
-                Button { text: qsTr("Свернуть"); onClicked: expandedStream.close() }
-            }
-        }
-    }
-
     FileDialog {
         id: outgoingFileDialog
         property string peerId: ""
@@ -1570,9 +1490,6 @@ ApplicationWindow {
             if (appViewModel.fileTransfers.some(item => item.id.startsWith("personal:") && item.canAccept))
                 fileTransfersDialog.open();
             else messageList.keepTailVisible();
-        }
-        function onScreenShareChanged() {
-            if (!appViewModel.sharingScreen && !appViewModel.viewingScreen) expandedStream.close();
         }
         function onErrorRequested(message) {
             if (errorDialog.visible && errorDialog.text === message)

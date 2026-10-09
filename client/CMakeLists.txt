@@ -43,6 +43,8 @@ endif()
 add_library(tmc_core STATIC)
 target_sources(tmc_core
     PRIVATE
+        src/sharing/screen_quality.cpp
+        src/sharing/screen_control.cpp
         src/core/app_config.cpp
         src/core/logger.cpp
         src/core/uuid.cpp
@@ -56,6 +58,8 @@ target_sources(tmc_core
         FILE_SET HEADERS
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
         FILES
+            include/tmc/sharing/screen_quality.h
+            include/tmc/sharing/screen_control.h
             include/tmc/core/app_config.h
             include/tmc/core/limits.h
             include/tmc/core/logger.h
@@ -104,6 +108,8 @@ target_sources(tmc_audio
     PRIVATE
         src/audio/remote_audio_stream.cpp
         src/audio/rtp_audio_engine.cpp
+        src/audio/shared_audio_output.cpp
+        src/audio/shared_audio_mixer.cpp
         include/tmc/audio/audio_network_stats.h
         include/tmc/audio/remote_audio_stream.h
     PUBLIC
@@ -111,6 +117,8 @@ target_sources(tmc_audio
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
         FILES
             include/tmc/audio/rtp_audio_engine.h
+            include/tmc/audio/shared_audio_output.h
+            include/tmc/audio/shared_audio_mixer.h
 )
 target_include_directories(tmc_audio PRIVATE
     "${MINIAUDIO_INCLUDE_DIR}"
@@ -135,31 +143,67 @@ endif()
 
 add_library(tmc_sharing STATIC)
 target_sources(tmc_sharing PRIVATE
-    src/sharing/screen_share_service.cpp
+    src/sharing/screen_share_controller.cpp
+    src/sharing/screen_streams_model.cpp
+    src/sharing/screen_capture_source.cpp
+    src/sharing/peer_screen_source.cpp
+    src/sharing/screen_video_bridge.cpp
+    src/sharing/screen_media_engine.cpp
+    src/sharing/screen_media_peer.cpp
+    src/sharing/system_audio_device.cpp
+    src/sharing/screen_audio_factory.cpp
+    src/sharing/screen_codec_factory.cpp
     src/sharing/system_audio_capture.cpp
     PUBLIC FILE_SET HEADERS BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include" FILES
         include/tmc/sharing/screen_share_service.h
+        include/tmc/sharing/screen_share_controller.h
+        include/tmc/sharing/screen_streams_model.h
+        include/tmc/sharing/screen_capture_source.h
         include/tmc/sharing/system_audio_capture.h
 )
 target_include_directories(tmc_sharing PRIVATE "${MINIAUDIO_INCLUDE_DIR}")
-target_link_libraries(tmc_sharing PUBLIC tmc_core Qt6::Gui PRIVATE Qt6::Multimedia tmc_audio Opus::opus)
+target_link_libraries(tmc_sharing
+    PUBLIC tmc_core Qt6::Gui Qt6::Multimedia
+    PRIVATE tmc_audio unofficial::webrtc::webrtc
+)
 if(WIN32)
-    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_win.cpp)
+    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_win.cpp src/sharing/screen_codec_win.cpp)
     target_sources(tmc_sharing PRIVATE src/sharing/window_source_filter_win.cpp)
-    target_link_libraries(tmc_sharing PRIVATE user32 dwmapi)
+    target_link_libraries(tmc_sharing PRIVATE user32 dwmapi mfplat mf mfuuid wmcodecdspuuid ole32 oleaut32)
 elseif(APPLE)
     enable_language(OBJCXX)
     set_target_properties(tmc_sharing PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_mac.mm)
+    target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_mac.mm src/sharing/screen_codec_mac.mm)
+    set_source_files_properties(src/sharing/screen_codec_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_sources(tmc_sharing PRIVATE src/sharing/window_source_filter_mac.mm)
     set_source_files_properties(src/sharing/window_source_filter_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(tmc_sharing PRIVATE "-framework AppKit" "-framework CoreGraphics")
     set_source_files_properties(src/sharing/system_audio_capture_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_options(tmc_sharing INTERFACE "LINKER:-weak_framework,ScreenCaptureKit")
-    target_link_libraries(tmc_sharing PRIVATE "-framework CoreMedia" "-framework AudioToolbox")
+    target_link_libraries(tmc_sharing PRIVATE "-framework CoreMedia" "-framework AudioToolbox" "-framework VideoToolbox" "-framework CoreVideo")
 else()
     target_sources(tmc_sharing PRIVATE src/sharing/system_audio_capture_stub.cpp)
 endif()
+
+# WebRTC is built without RTTI. Its subclasses and ref-counted wrappers must use
+# the same setting, while the public Qt controllers keep the project's defaults.
+if(MSVC)
+    set(TMC_SCREEN_WEBRTC_NO_RTTI /GR-)
+else()
+    set(TMC_SCREEN_WEBRTC_NO_RTTI -fno-rtti)
+endif()
+set_property(SOURCE
+    src/sharing/peer_screen_source.cpp
+    src/sharing/screen_video_bridge.cpp
+    src/sharing/screen_media_engine.cpp
+    src/sharing/screen_media_peer.cpp
+    src/sharing/system_audio_device.cpp
+    src/sharing/screen_audio_factory.cpp
+    src/sharing/screen_codec_factory.cpp
+    src/sharing/screen_codec_win.cpp
+    src/sharing/screen_codec_mac.mm
+    APPEND PROPERTY COMPILE_OPTIONS ${TMC_SCREEN_WEBRTC_NO_RTTI}
+)
 
 add_library(tmc_signaling_client STATIC)
 target_sources(tmc_signaling_client

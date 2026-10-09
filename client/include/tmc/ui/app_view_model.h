@@ -28,6 +28,7 @@ class UpdateService;
 class MessagesModel;
 class PeersModel;
 class GlobalPttMonitor;
+class ScreenStreamsModel;
 
 class AppViewModel final : public QObject {
     Q_OBJECT
@@ -57,6 +58,9 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(QVariantList acquaintances READ acquaintances NOTIFY acquaintancesChanged)
     Q_PROPERTY(int streamVolume READ streamVolume WRITE setStreamVolume NOTIFY streamVolumeChanged)
     Q_PROPERTY(QVariantList fileTransfers READ fileTransfers NOTIFY fileTransfersChanged)
+    Q_PROPERTY(QAbstractItemModel* screenStreams READ screenStreams CONSTANT)
+    Q_PROPERTY(int screenQualityHeight READ screenQualityHeight NOTIFY screenShareChanged)
+    Q_PROPERTY(int screenQualityFps READ screenQualityFps NOTIFY screenShareChanged)
     Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY screenShareChanged)
     Q_PROPERTY(bool viewingScreen READ viewingScreen NOTIFY screenShareChanged)
     Q_PROPERTY(QString screenShareTitle READ screenShareTitle NOTIFY screenShareChanged)
@@ -120,9 +124,18 @@ public:
     QString screenShareTitle() const;
     bool systemAudioSupported() const;
     Q_INVOKABLE QVariantList screenSources();
-    Q_INVOKABLE void startScreenShare(int sourceIndex, bool systemAudio);
+    QAbstractItemModel* screenStreams() const;
+    int screenQualityHeight() const;
+    int screenQualityFps() const;
+    Q_INVOKABLE QVariantMap screenStream(const QString& streamId) const;
+    Q_INVOKABLE QString screenOwnerName(const QString& peerId) const;
+    Q_INVOKABLE void startScreenShare(int sourceIndex, bool systemAudio, int height, int fps);
+    Q_INVOKABLE void subscribeScreen(const QString& streamId, bool selected);
+    Q_INVOKABLE void selectScreenAudio(const QString& streamId);
+    Q_INVOKABLE void setScreenQuality(const QString& streamId, int height, int fps);
+    Q_INVOKABLE void retryScreen(const QString& streamId);
     Q_INVOKABLE void stopScreenShare();
-    Q_INVOKABLE void setScreenVideoSink(QObject* sink);
+    Q_INVOKABLE void setScreenVideoSink(const QString& streamId, QObject* sink, bool attach);
     AppViewModel(ApplicationController& controller,
                  UpdateService& updates,
                  bool identityRequired, QObject* parent = nullptr);
@@ -271,9 +284,7 @@ private:
     QTemporaryDir clipboardImages_;
     QSet<QString> pendingClipboardImages_;
     QSet<QString> announcedParticipants_;
-    QImage lastStreamFrame_;
     int streamVolume_{100};
-    QPointer<QVideoSink> screenVideoSink_;
     void initializeSession();
     void setMeshPeerCounts(int connected, int expected);
     void setStatus(const QString& status);
@@ -289,6 +300,7 @@ private:
     std::unique_ptr<NetworkSession> session_;
     std::unique_ptr<MessagesModel> messages_;
     std::unique_ptr<PeersModel> peers_;
+    std::unique_ptr<ScreenStreamsModel> screenStreams_;
     std::unique_ptr<GlobalPttMonitor> pttMonitor_;
     QByteArray signalingDocument_;
     std::optional<ServerInvitation> pendingServerInvitation_;

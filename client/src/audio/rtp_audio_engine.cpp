@@ -1,6 +1,7 @@
 #include "tmc/audio/rtp_audio_engine.h"
 
 #include "tmc/audio/remote_audio_stream.h"
+#include "tmc/audio/shared_audio_output.h"
 #include "tmc/core/logger.h"
 
 #include <QHash>
@@ -30,7 +31,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
 namespace tmc {
@@ -160,10 +160,9 @@ struct RtpAudioEngine::State {
     // miniaudio context and devices
     ma_context context{};
     ma_device captureDevice{};
-    ma_device playbackDevice{};
+    std::shared_ptr<SharedAudioOutput> output{std::make_shared<SharedAudioOutput>()};
     bool contextInitialized{false};
     bool captureDeviceInitialized{false};
-    bool playbackDeviceInitialized{false};
 
     // flags and state variables
     std::atomic_bool running{false};
@@ -171,13 +170,10 @@ struct RtpAudioEngine::State {
     std::atomic_bool deafened{false};
     std::atomic_bool micTest{false};
     std::atomic_bool resetMonitor{false};
-    std::atomic<int> outputVolume{100};
     std::atomic<float> micLevel{0.0f};
 
     // ring buffers for audio data
     SpscRing<opus_int16, RingCapacity> captureRing;
-    SpscRing<opus_int16, RingCapacity> playbackRing;
-    SpscRing<opus_int16, RingCapacity> renderRing;
 
     // cache device lists
     std::vector<DeviceChoice> captureDevices;
@@ -216,8 +212,6 @@ struct RtpAudioEngine::State {
 
     static void captureCallback(ma_device* device, void* output, const void* input,
                                 ma_uint32 frameCount);
-    static void playbackCallback(ma_device* device, void* output, const void* input,
-                                 ma_uint32 frameCount);
     void run(std::stop_token stopToken);
     void processIncoming();
     void mixPlayback();
@@ -229,21 +223,6 @@ struct RtpAudioEngine::State {
     void sendEncoded(quint32 rtpTimestamp, QByteArray payload);
     void stopWorker();
 };
-
-void RtpAudioEngine::State::playbackCallback(ma_device* device, void* output, const void*,
-                                             ma_uint32 frameCount) {
-    auto* state = static_cast<State*>(device->pUserData);
-    auto* outputSamples = static_cast<opus_int16*>(output);
-    const auto popped = state->playbackRing.pop(outputSamples, frameCount);
-    std::fill(outputSamples + popped, outputSamples + frameCount, opus_int16{0});
-
-    if (state->deafened.load(std::memory_order_relaxed)) {
-        std::fill(outputSamples, outputSamples + frameCount, opus_int16{0});
-    }
-    state->renderRing.push(
-        outputSamples, std::min(static_cast<size_t>(frameCount), state->renderRing.freeSpace()));
-    state->queueCondition.notify_one();
-}
 
 void RtpAudioEngine::State::captureCallback(ma_device* device, void*, const void* input,
                                             ma_uint32 frameCount) {
@@ -277,7 +256,7 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
             didWork = true;
             captureRing.pop(capture.data(), capture.size());
 
-            const auto renderCount = renderRing.pop(render.data(), render.size());
+            const auto renderCount = output->takeRenderReference(render.data(), render.size());
             std::fill(render.begin() + static_cast<ptrdiff_t>(renderCount), render.end(), 0);
 
             int apmResult =
@@ -381,9 +360,9 @@ void RtpAudioEngine::State::run(std::stop_token stopToken) {
             }
         }
 
-        const auto playbackBefore = playbackRing.available();
+        const auto playbackBefore = output->queuedVoiceFrames();
         mixPlayback();
-        didWork = didWork || playbackRing.available() != playbackBefore;
+        didWork = didWork || output->queuedVoiceFrames() != playbackBefore;
 
         const auto statsAtNs = monotonicNs();
         updateRemoteTalking(statsAtNs);
@@ -485,8 +464,7 @@ void RtpAudioEngine::State::processIncoming() {
 }
 
 void RtpAudioEngine::State::mixPlayback() {
-    if (playbackRing.freeSpace() < OpusFrameSamples ||
-        playbackRing.available() > OpusFrameSamples * (MaxQueuedPlaybackFrames - 1)) {
+    if (output->queuedVoiceFrames() > OpusFrameSamples * (MaxQueuedPlaybackFrames - 1)) {
         return;
     }
     const bool suppressOutput = deafened.load(std::memory_order_relaxed);
@@ -514,7 +492,8 @@ void RtpAudioEngine::State::mixPlayback() {
         mixed[index] = static_cast<opus_int16>(std::clamp(sum, -32768.0F, 32767.0F));
     }
 
-    const auto master = static_cast<float>(outputVolume.load(std::memory_order_relaxed)) / 100.0F;
+    const auto master =
+        1.0F; // Shared output applies master gain to voice and selected screen once.
     for (int index = 0; index < OpusFrameSamples; ++index) {
         float sample = static_cast<float>(mixed[index]) * master;
         const auto magnitude = std::abs(sample);
@@ -527,7 +506,7 @@ void RtpAudioEngine::State::mixPlayback() {
         mixed[index] = static_cast<opus_int16>(std::clamp(sample, -32768.0F, 32767.0F));
     }
 
-    playbackRing.push(mixed.data(), mixed.size());
+    output->pushVoice(mixed.data(), mixed.size());
 }
 
 void RtpAudioEngine::State::updateRemoteTalking(qint64 nowNs) {
@@ -649,7 +628,11 @@ void RtpAudioEngine::State::stopWorker() {
 
 RtpAudioEngine::RtpAudioEngine(AudioPreferences preferences, QObject* parent)
     : QObject(parent), state_(std::make_unique<State>(this, std::move(preferences))) {
-    state_->outputVolume.store(state_->preferences.outputVolume, std::memory_order_relaxed);
+    const auto configured = state_->output->configure(state_->preferences.playbackDevice,
+                                                      state_->preferences.outputVolume);
+    if (!configured) {
+        Logger::instance().log(QtWarningMsg, "audio", configured.error());
+    }
 }
 
 RtpAudioEngine::~RtpAudioEngine() {
@@ -766,15 +749,6 @@ Result<void> RtpAudioEngine::start() {
     captureConfig.performanceProfile = ma_performance_profile_low_latency;
     captureConfig.dataCallback = State::captureCallback;
     captureConfig.pUserData = state_.get();
-    auto playbackConfig = ma_device_config_init(ma_device_type_playback);
-    playbackConfig.playback.format = ma_format_s16;
-    playbackConfig.playback.channels = Channels;
-    playbackConfig.sampleRate = SampleRate;
-    playbackConfig.periodSizeInFrames = ApmFrameSamples / 2;
-    playbackConfig.periods = 2;
-    playbackConfig.performanceProfile = ma_performance_profile_low_latency;
-    playbackConfig.dataCallback = State::playbackCallback;
-    playbackConfig.pUserData = state_.get();
     const auto capture = std::find_if(
         state_->captureDevices.cbegin(), state_->captureDevices.cend(),
         [this](const auto& device) { return device.name == state_->preferences.captureDevice; });
@@ -795,9 +769,6 @@ Result<void> RtpAudioEngine::start() {
     if (capture != state_->captureDevices.cend()) {
         captureConfig.capture.pDeviceID = &capture->id;
     }
-    if (playback != state_->playbackDevices.cend()) {
-        playbackConfig.playback.pDeviceID = &playback->id;
-    }
     const auto captureInit =
         ma_device_init(&state_->context, &captureConfig, &state_->captureDevice);
     if (captureInit != MA_SUCCESS) {
@@ -807,58 +778,32 @@ Result<void> RtpAudioEngine::start() {
                 .arg(QString::fromUtf8(ma_result_description(captureInit))));
     }
     state_->captureDeviceInitialized = true;
-    const auto playbackInit =
-        ma_device_init(&state_->context, &playbackConfig, &state_->playbackDevice);
-    if (playbackInit != MA_SUCCESS) {
-        ma_device_uninit(&state_->captureDevice);
-        state_->captureDeviceInitialized = false;
-        state_->stopWorker();
-        return Result<void>::failure(
-            QString("Не удалось открыть устройство воспроизведения: %1")
-                .arg(QString::fromUtf8(ma_result_description(playbackInit))));
+    auto configuredOutput = state_->output->configure(state_->preferences.playbackDevice,
+                                                      state_->preferences.outputVolume);
+    if (!configuredOutput) {
+        stop();
+        return configuredOutput;
     }
-    state_->playbackDeviceInitialized = true;
-    state_->streamDelayMs = static_cast<int>(
-        (static_cast<quint64>(captureConfig.periodSizeInFrames) * captureConfig.periods +
-         static_cast<quint64>(playbackConfig.periodSizeInFrames) * playbackConfig.periods) *
-        1000 / SampleRate);
-    std::array<char, MA_MAX_DEVICE_NAME_LENGTH + 1> captureName{};
-    std::array<char, MA_MAX_DEVICE_NAME_LENGTH + 1> playbackName{};
-    ma_device_get_name(&state_->captureDevice, ma_device_type_capture, captureName.data(),
-                       captureName.size(), nullptr);
-    ma_device_get_name(&state_->playbackDevice, ma_device_type_playback, playbackName.data(),
-                       playbackName.size(), nullptr);
-    Logger::instance().log(QtInfoMsg, "audio",
-                           QString("backend=%1 capture='%2' playback='%3' rate=%4 period=%5x%6")
-                               .arg(QString::fromUtf8(ma_get_backend_name(state_->context.backend)),
-                                    QString::fromUtf8(captureName.data()),
-                                    QString::fromUtf8(playbackName.data()))
-                               .arg(state_->captureDevice.sampleRate)
-                               .arg(captureConfig.periodSizeInFrames)
-                               .arg(captureConfig.periods));
+    const auto outputStarted = state_->output->setVoiceEnabled(true);
+    if (!outputStarted) {
+        stop();
+        return outputStarted;
+    }
+    state_->streamDelayMs = static_cast<int>(captureConfig.periodSizeInFrames *
+                                             captureConfig.periods * 1000 / SampleRate) +
+                            state_->output->delayMs();
 
     // clear ring buffers and start worker thread
     state_->captureRing.clear();
-    state_->playbackRing.clear();
-    state_->renderRing.clear();
     state_->monitorSamples.clear();
     state_->apmErrorReported = false;
     state_->hangoverFramesCounter = 0;
     state_->isTalking.store(false, std::memory_order_relaxed);
     state_->micLevel.store(0.0f, std::memory_order_relaxed);
-    std::array<opus_int16, ApmFrameSamples> initialRenderDelay{};
-    state_->renderRing.push(initialRenderDelay.data(), initialRenderDelay.size());
     state_->configuredPacketLoss = ExpectedPacketLossPercent;
     state_->running.store(true, std::memory_order_release);
     state_->worker =
         std::jthread([state = state_.get()](std::stop_token token) { state->run(token); });
-    const auto playbackStart = ma_device_start(&state_->playbackDevice);
-    if (playbackStart != MA_SUCCESS) {
-        stop();
-        return Result<void>::failure(
-            QString("Не удалось запустить устройство воспроизведения: %1")
-                .arg(QString::fromUtf8(ma_result_description(playbackStart))));
-    }
     const auto captureStart = ma_device_start(&state_->captureDevice);
     if (captureStart != MA_SUCCESS) {
         stop();
@@ -874,16 +819,14 @@ void RtpAudioEngine::stop() {
         ma_device_uninit(&state_->captureDevice);
         state_->captureDeviceInitialized = false;
     }
-    if (state_->playbackDeviceInitialized) {
-        ma_device_uninit(&state_->playbackDevice);
-        state_->playbackDeviceInitialized = false;
-    }
+    const auto outputStopped = state_->output->setVoiceEnabled(false);
     state_->running.store(false, std::memory_order_release);
     state_->stopWorker();
     state_->captureRing.clear();
-    state_->playbackRing.clear();
-    state_->renderRing.clear();
     state_->monitorSamples.clear();
+    if (!outputStopped) {
+        emit errorOccurred(outputStopped.error());
+    }
 }
 
 Result<void> RtpAudioEngine::applyPreferences(const AudioPreferences& preferences) {
@@ -916,8 +859,32 @@ Result<void> RtpAudioEngine::applyPreferences(const AudioPreferences& preference
     if (wasRunning) {
         stop();
     }
+    const auto restorePrevious = [this, &previous, wasRunning](const QString& applyError) {
+        state_->preferences = previous;
+        const auto outputRestored =
+            state_->output->configure(previous.playbackDevice, previous.outputVolume);
+        if (!outputRestored) {
+            return Result<void>::failure(
+                applyError + QStringLiteral("\nНе удалось восстановить предыдущий аудиовыход: ") +
+                outputRestored.error());
+        }
+        if (wasRunning) {
+            const auto restored = start();
+            if (!restored) {
+                return Result<void>::failure(
+                    applyError +
+                    QStringLiteral("\nНе удалось восстановить предыдущую конфигурацию аудио: ") +
+                    restored.error());
+            }
+        }
+        return Result<void>::failure(applyError);
+    };
+    const auto configured =
+        state_->output->configure(preferences.playbackDevice, preferences.outputVolume);
+    if (!configured) {
+        return restorePrevious(configured.error());
+    }
     state_->preferences = preferences;
-    state_->outputVolume.store(preferences.outputVolume, std::memory_order_relaxed);
     if (!wasRunning) {
         return Result<void>::success();
     }
@@ -929,16 +896,7 @@ Result<void> RtpAudioEngine::applyPreferences(const AudioPreferences& preference
 
     const auto applyError = applied.error();
     stop();
-    state_->preferences = previous;
-    state_->outputVolume.store(previous.outputVolume, std::memory_order_relaxed);
-    const auto restored = start();
-    if (!restored) {
-        return Result<void>::failure(
-            applyError +
-            QStringLiteral("\nНе удалось восстановить предыдущую конфигурацию аудио: ") +
-            restored.error());
-    }
-    return Result<void>::failure(applyError);
+    return restorePrevious(applyError);
 }
 
 void RtpAudioEngine::setMuted(bool muted) {
@@ -954,6 +912,7 @@ void RtpAudioEngine::setMuted(bool muted) {
 }
 
 void RtpAudioEngine::setDeafened(bool deafened) {
+    state_->output->setDeafened(deafened);
     state_->deafened.store(deafened, std::memory_order_relaxed);
     state_->queueCondition.notify_one();
 }
@@ -1028,6 +987,10 @@ void RtpAudioEngine::removePeer(const QString& peerId) {
     std::lock_guard lock(state_->queueMutex);
     state_->removals.append(peerId);
     state_->queueCondition.notify_one();
+}
+
+std::shared_ptr<SharedAudioOutput> RtpAudioEngine::audioOutput() const {
+    return state_->output;
 }
 
 } // namespace tmc

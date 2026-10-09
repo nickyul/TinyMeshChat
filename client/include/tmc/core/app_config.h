@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tmc/core/result.h"
+#include "tmc/sharing/screen_quality.h"
 
 #include <QString>
 #include <QStringList>
@@ -48,6 +49,7 @@ struct AppConfig {
     QStringList stunServers;
     QString signalingServerUrl; // Empty disables the optional server.
     AudioPreferences audio;
+    ScreenQuality screenQuality;
 
     static Result<AppConfig> load(const QString& path);
     Result<void> save(const QString& path) const;

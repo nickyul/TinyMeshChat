@@ -39,6 +39,7 @@ public:
     Result<void> updateSignalingServer(const QString& url);
     Result<void> updateStunServers(const QStringList& servers);
     Result<void> updateAudioPreferences(const AudioPreferences& preferences);
+    Result<void> updateScreenQuality(ScreenQuality quality);
 
 signals:
     void fatalError(QString);
