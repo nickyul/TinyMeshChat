@@ -127,6 +127,7 @@ signals:
     void entryRequestClosed(QString id);
     void onlineInvitationReceived(QString invitationId, QString displayName, QString server);
     void onlineInvitationClosed(QString invitationId);
+    void onlineInvitationMissed(QString peerId);
 
 private:
     enum class PacketChannel {

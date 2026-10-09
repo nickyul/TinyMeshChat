@@ -33,6 +33,7 @@ struct AudioPreferences {
     int agcCompressionGainDb{9};
     bool agcLimiter{true};
     int outputVolume{100};
+    int notificationVolume{50};
     int qualityKbps{48};
 
     AudioInputMode inputMode{AudioInputMode::VoiceActivity};

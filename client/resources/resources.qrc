@@ -2,6 +2,7 @@
   <qresource prefix="/">
     <file alias="qml/ConversationFileCard.qml">../qml/ConversationFileCard.qml</file>
     <file alias="qml/NotificationSounds.qml">../qml/NotificationSounds.qml</file>
+    <file alias="sounds/invitation.wav">sounds/invitation.wav</file>
     <file alias="sounds/knock.wav">sounds/knock.wav</file>
     <file alias="sounds/join.wav">sounds/join.wav</file>
     <file alias="sounds/leave.wav">sounds/leave.wav</file>

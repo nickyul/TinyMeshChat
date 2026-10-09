@@ -25,8 +25,10 @@ Pane {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         width: 36
-        text: "⋯"
-        Accessible.name: qsTr("Показать знакомых")
+        text: control.viewModel.missedCallCount > 0 ? "☎ " + control.viewModel.missedCallCount : "⋯"
+        Accessible.name: control.viewModel.missedCallCount > 0
+            ? qsTr("Показать знакомых. Пропущенных звонков: %1").arg(control.viewModel.missedCallCount)
+            : qsTr("Показать знакомых")
         ToolTip.visible: hovered
         ToolTip.text: Accessible.name
         onClicked: control.collapsed = false
@@ -157,6 +159,12 @@ Pane {
                             elide: Text.ElideRight
                         }
                     }
+                    Label {
+                        visible: contact.modelData.missedCalls > 0
+                        text: "☎ " + contact.modelData.missedCalls
+                        color: colors.danger
+                        Accessible.name: qsTr("Пропущенных звонков: %1").arg(contact.modelData.missedCalls)
+                    }
                     ToolButton {
                         text: "⋯"
                         implicitWidth: 32
@@ -169,6 +177,10 @@ Pane {
                 }
                 Menu {
                     id: actions
+                    onClosed: {
+                        const peerId = contact.modelData.peerId;
+                        Qt.callLater(() => control.viewModel.markMissedCallsViewed(peerId));
+                    }
                     x: Math.max(0, contact.width - width)
                     y: contact.height
                     MenuItem {

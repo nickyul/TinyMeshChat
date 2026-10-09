@@ -551,7 +551,68 @@ void AppViewModel::createAccessInvitation() {
 bool AppViewModel::serverReady() const { return session_ && session_->signalingConnected(); }
 bool AppViewModel::serverBusy() const { return session_ && session_->signalingBusy(); }
 bool AppViewModel::serverMesh() const { return session_ && session_->serverMesh(); }
-QVariantList AppViewModel::acquaintances() const { return session_ ? session_->acquaintances() : QVariantList{}; }
+QVariantList AppViewModel::acquaintances() const {
+    auto rows = session_ ? session_->acquaintances() : QVariantList{};
+    for (auto& item : rows) {
+        auto peer = item.toMap();
+        peer.insert("missedCalls", missedCalls_.value(peer.value("peerId").toString()));
+        item = peer;
+    }
+    return rows;
+}
+
+int AppViewModel::missedCallCount() const {
+    int count = 0;
+    for (const auto value : missedCalls_) count += value;
+    return count;
+}
+
+int AppViewModel::unreadCount() const {
+    return unreadMessages_ + unseenRequests_.size() + missedCallCount();
+}
+
+int AppViewModel::notificationVolume() const {
+    return controller_.config().audio.notificationVolume;
+}
+
+void AppViewModel::setViewingState(bool active, bool chatAtEnd) {
+    windowActive_ = active;
+    chatAtEnd_ = chatAtEnd;
+    if (!active) return;
+    const auto previous = unreadCount();
+    unseenRequests_.clear();
+    if (chatAtEnd && meshVisible()) unreadMessages_ = 0;
+    if (previous != unreadCount()) emit attentionChanged();
+}
+
+void AppViewModel::markMissedCallsViewed(const QString& peerId) {
+    if (!missedCalls_.remove(peerId)) return;
+    emit attentionChanged();
+    emit acquaintancesChanged();
+}
+
+QUrl AppViewModel::clipboardImage() {
+    const auto image = QGuiApplication::clipboard()->image();
+    if (image.isNull()) return {};
+    if (!clipboardImages_.isValid()) {
+        reportError(tr("Не удалось создать папку для изображения из буфера обмена."));
+        return {};
+    }
+    const auto path = clipboardImages_.filePath("screenshot-" +
+        QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png");
+    if (!image.save(path, "PNG")) {
+        QFile::remove(path);
+        reportError(tr("Не удалось сохранить изображение из буфера обмена."));
+        return {};
+    }
+    pendingClipboardImages_.insert(path);
+    return QUrl::fromLocalFile(path);
+}
+
+void AppViewModel::discardClipboardImage(const QUrl& url) {
+    if (url.isLocalFile() && pendingClipboardImages_.remove(url.toLocalFile()))
+        QFile::remove(url.toLocalFile());
+}
 
 void AppViewModel::inviteAcquaintance(const QString& peerId) {
     if (!session_) return;
@@ -572,6 +633,7 @@ void AppViewModel::respondToEntryRequest(const QString& id, bool accept) {
     if (session_) session_->respondToEntryRequest(id, accept);
 }
 void AppViewModel::respondToOnlineInvitation(const QString& invitationId, bool accept) {
+    emit stopInvitationSound();
     if (session_) session_->respondToOnlineInvitation(invitationId, accept);
 }
 
@@ -998,6 +1060,7 @@ void AppViewModel::updateAudioPreferences(const QVariantMap& settings) {
         settings.value("agcCompressionGainDb", current.agcCompressionGainDb).toInt();
     preferences.agcLimiter = settings.value("agcLimiter", current.agcLimiter).toBool();
     preferences.outputVolume = settings.value("outputVolume", current.outputVolume).toInt();
+    preferences.notificationVolume = settings.value("notificationVolume", current.notificationVolume).toInt();
     preferences.qualityKbps = settings.value("qualityKbps", current.qualityKbps).toInt();
     preferences.inputMode = static_cast<AudioInputMode>(
         settings.value("inputMode", static_cast<int>(current.inputMode)).toInt());
@@ -1121,6 +1184,8 @@ void AppViewModel::initializeSession() {
                 if (state == MeshSessionState::Disconnected) {
                     announcedParticipants_.clear();
                     messages_->clear();
+                    unreadMessages_ = 0;
+                    emit attentionChanged();
                     peers_->resetSelf(controller_.identity());
                     setMeshPeerCounts(0, 0);
                     if (updates_.state() == "ready") {
@@ -1171,7 +1236,16 @@ void AppViewModel::initializeSession() {
                 emit chatLayoutAboutToChange();
                 messages_->add(message, author, local);
                 emit chatLayoutChanged();
-                if (!local) emit notificationSound("message");
+                if (!local) {
+                    if (!windowActive_ || !chatAtEnd_) {
+                        ++unreadMessages_;
+                        emit attentionChanged();
+                    }
+                    if (!windowActive_) {
+                        emit notificationSound("message");
+                        emit desktopNotification(author, message.text.left(240));
+                    }
+                }
             });
     connect(session_.get(), &NetworkSession::deliveryChanged, this,
             [this](const QString& id, int acknowledged, int expected) {
@@ -1207,14 +1281,38 @@ void AppViewModel::initializeSession() {
             this, &AppViewModel::acquaintancesChanged);
     connect(session_.get(), &NetworkSession::entryRequestReceived, this,
             [this](const QString& id, const QString& name) {
+                if (!windowActive_) {
+                    unseenRequests_.insert("entry:" + id);
+                    emit attentionChanged();
+                    emit desktopNotification(tr("Запрос на вход"), tr("%1 просится в беседу").arg(name));
+                }
                 emit entryRequestReceived(id, name);
                 emit notificationSound("knock");
             });
-    connect(session_.get(), &NetworkSession::entryRequestClosed, this, &AppViewModel::entryRequestClosed);
-    connect(session_.get(), &NetworkSession::onlineInvitationReceived,
-            this, &AppViewModel::onlineInvitationReceived);
-    connect(session_.get(), &NetworkSession::onlineInvitationClosed,
-            this, &AppViewModel::onlineInvitationClosed);
+    connect(session_.get(), &NetworkSession::entryRequestClosed, this, [this](const QString& id) {
+        if (unseenRequests_.remove("entry:" + id)) emit attentionChanged();
+        emit entryRequestClosed(id);
+    });
+    connect(session_.get(), &NetworkSession::onlineInvitationReceived, this,
+            [this](const QString& id, const QString& name, const QString& server) {
+                if (!windowActive_) {
+                    unseenRequests_.insert("invitation:" + id);
+                    emit attentionChanged();
+                    emit desktopNotification(tr("Приглашение в беседу"), tr("%1 хочет пообщаться с вами").arg(name));
+                }
+                emit onlineInvitationReceived(id, name, server);
+                emit notificationSound("invitation");
+            });
+    connect(session_.get(), &NetworkSession::onlineInvitationClosed, this, [this](const QString& id) {
+        if (unseenRequests_.remove("invitation:" + id)) emit attentionChanged();
+        emit stopInvitationSound();
+        emit onlineInvitationClosed(id);
+    });
+    connect(session_.get(), &NetworkSession::onlineInvitationMissed, this, [this](const QString& peerId) {
+        ++missedCalls_[peerId];
+        emit attentionChanged();
+        emit acquaintancesChanged();
+    });
     connect(session_.get(), &NetworkSession::serverInvitationReady, this, [this](const QString& link) {
         signalingDocument_.clear();
         QGuiApplication::clipboard()->setText(link);
@@ -1330,6 +1428,7 @@ QVariantList AppViewModel::fileTransfers() const {
 
 void AppViewModel::sendFileToRecipients(const QUrl& file, const QStringList& peerIds) {
     if (!session_ || !file.isLocalFile()) return;
+    pendingClipboardImages_.remove(file.toLocalFile());
     const auto group = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QSet<QString> sent;
     for (const auto& peer : peerIds) {

@@ -13,6 +13,8 @@
 #include <QPointer>
 #include <QImage>
 #include <QSet>
+#include <QHash>
+#include <QTemporaryDir>
 
 #include <memory>
 
@@ -29,6 +31,9 @@ class GlobalPttMonitor;
 
 class AppViewModel final : public QObject {
     Q_OBJECT
+    Q_PROPERTY(int unreadCount READ unreadCount NOTIFY attentionChanged)
+    Q_PROPERTY(int missedCallCount READ missedCallCount NOTIFY attentionChanged)
+    Q_PROPERTY(int notificationVolume READ notificationVolume NOTIFY audioSettingsChanged)
     Q_PROPERTY(bool identityRequired READ identityRequired NOTIFY identityRequiredChanged)
     Q_PROPERTY(QString displayName READ displayName NOTIFY displayNameChanged)
     Q_PROPERTY(QString identityPublicKey READ identityPublicKey NOTIFY identityRequiredChanged)
@@ -91,6 +96,13 @@ class AppViewModel final : public QObject {
     Q_PROPERTY(QAbstractItemModel* peers READ peers CONSTANT)
 
 public:
+    int unreadCount() const;
+    int missedCallCount() const;
+    int notificationVolume() const;
+    Q_INVOKABLE void setViewingState(bool active, bool chatAtEnd);
+    Q_INVOKABLE void markMissedCallsViewed(const QString& peerId);
+    Q_INVOKABLE QUrl clipboardImage();
+    Q_INVOKABLE void discardClipboardImage(const QUrl& url);
     int streamVolume() const { return streamVolume_; }
     void setStreamVolume(int percent);
     Q_INVOKABLE QVariantList fileRecipients() const;
@@ -210,6 +222,9 @@ public:
     void checkForUpdatesAutomatically();
 
 signals:
+    void attentionChanged();
+    void desktopNotification(QString title, QString text);
+    void stopInvitationSound();
     void notificationSound(QString kind);
     void chatLayoutAboutToChange();
     void chatLayoutChanged();
@@ -247,6 +262,14 @@ signals:
     void signalingRequested(QString kind, QString text);
 
 private:
+    bool windowActive_{false};
+    bool chatAtEnd_{false};
+    int unreadMessages_{0};
+    QSet<QString> unseenRequests_;
+    QHash<QString, int> missedCalls_;
+    // Keep sent images available for hashing, retries and previews until shutdown.
+    QTemporaryDir clipboardImages_;
+    QSet<QString> pendingClipboardImages_;
     QSet<QString> announcedParticipants_;
     QImage lastStreamFrame_;
     int streamVolume_{100};

@@ -6,7 +6,34 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
-    NotificationSounds { id: notificationSounds }
+    NotificationSounds {
+        id: notificationSounds
+        volumePercent: appViewModel.notificationVolume
+    }
+    function updateViewingState() {
+        appViewModel.setViewingState(root.active && root.visible,
+            appViewModel.meshVisible && messageList.atYEnd);
+    }
+    onActiveChanged: Qt.callLater(updateViewingState)
+    onVisibleChanged: Qt.callLater(updateViewingState)
+    Component.onCompleted: Qt.callLater(updateViewingState)
+
+    function pasteIntoChat() {
+        if (clipboardPreview.visible) return;
+        const image = appViewModel.clipboardImage();
+        if (!image.toString().length) { messageInput.paste(); return; }
+        const recipients = appViewModel.fileRecipients();
+        if (!recipients.length) {
+            appViewModel.discardClipboardImage(image);
+            errorDialog.text = qsTr("Для отправки изображения нужен подключённый участник беседы.");
+            errorDialog.open();
+            return;
+        }
+        clipboardPreview.imageSource = image;
+        clipboardPreview.recipients = recipients;
+        clipboardPreview.sent = false;
+        clipboardPreview.open();
+    }
 
     function confirmFiles(urls, peerId) {
         const files = Array.from(urls).filter(url => url.toString().startsWith("file:"));
@@ -634,7 +661,9 @@ ApplicationWindow {
                                     if (messageList.followTail) messageList.scrollToLatest();
                                 });
                             }
+                            onAtYEndChanged: Qt.callLater(root.updateViewingState)
                             onCountChanged: {
+                                Qt.callLater(root.updateViewingState);
                                 if (count === 0) { followTail = true; readingAnchor = ""; }
                                 keepTailVisible();
                             }
@@ -722,14 +751,34 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        Label {
+                                        TextEdit {
                                             id: messageText
-
                                             Layout.fillWidth: true
                                             text: messageDelegate.text
-                                            textFormat: Text.PlainText
-                                            wrapMode: Text.Wrap
+                                            textFormat: TextEdit.PlainText
+                                            wrapMode: TextEdit.Wrap
                                             color: appPalette.textPrimary
+                                            readOnly: true
+                                            selectByMouse: true
+                                            persistentSelection: true
+                                            selectionColor: appPalette.accent
+                                            selectedTextColor: appPalette.accentText
+                                            TapHandler {
+                                                acceptedButtons: Qt.RightButton
+                                                onTapped: function(point) { messageCopyMenu.popup(point.position.x, point.position.y); }
+                                            }
+                                            Menu {
+                                                id: messageCopyMenu
+                                                MenuItem {
+                                                    text: qsTr("Копировать выделенное")
+                                                    enabled: messageText.selectedText.length > 0
+                                                    onTriggered: messageText.copy()
+                                                }
+                                                MenuItem {
+                                                    text: qsTr("Копировать сообщение")
+                                                    onTriggered: appViewModel.copyText(messageDelegate.text)
+                                                }
+                                            }
                                         }
 
                                         Label {
@@ -907,6 +956,12 @@ ApplicationWindow {
                         placeholderText: qsTr("Введите сообщение…")
                         maximumLength: 4096
                         onAccepted: meshPage.sendMessage()
+                        Keys.onPressed: function(event) {
+                            if (event.matches(StandardKey.Paste)) {
+                                root.pasteIntoChat();
+                                event.accepted = true;
+                            }
+                        }
                         persistentSelection: true
                         TapHandler {
                             acceptedButtons: Qt.RightButton
@@ -923,8 +978,7 @@ ApplicationWindow {
                             }
                             MenuItem {
                                 text: qsTr("Вставить")
-                                enabled: messageInput.canPaste
-                                onTriggered: { messageInput.paste(); messageInput.forceActiveFocus(); }
+                                onTriggered: { root.pasteIntoChat(); messageInput.forceActiveFocus(); }
                             }
                         }
                     }
@@ -1055,6 +1109,44 @@ ApplicationWindow {
                 appViewModel.sendFileToRecipients(file, recipients.map(peer => peer.peerId));
             if (showTransfers) fileTransfersDialog.open();
             else messageList.keepTailVisible();
+        }
+    }
+
+    Dialog {
+        id: clipboardPreview
+        property url imageSource: ""
+        property var recipients: []
+        property bool sent: false
+        title: qsTr("Отправить изображение?")
+        anchors.centerIn: parent
+        width: Math.min(600, root.width - 60)
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: ColumnLayout {
+            Image {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(360, root.height * 0.5)
+                source: clipboardPreview.imageSource
+                fillMode: Image.PreserveAspectFit
+                cache: false
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Получатели: %1").arg(clipboardPreview.recipients.map(peer => peer.displayName).join(", "))
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+            }
+        }
+        onAccepted: {
+            sent = true;
+            appViewModel.sendFileToRecipients(imageSource, recipients.map(peer => peer.peerId));
+            messageList.keepTailVisible();
+        }
+        onClosed: {
+            if (!sent) appViewModel.discardClipboardImage(imageSource);
+            imageSource = "";
+            recipients = [];
+            Qt.callLater(() => messageInput.forceActiveFocus());
         }
     }
 
@@ -1311,6 +1403,8 @@ ApplicationWindow {
         id: audioSettings
 
         viewModel: appViewModel
+        onPreviewNotification: function(kind, volume) { notificationSounds.preview(kind, volume); }
+        onClosed: notificationSounds.stopPreview()
     }
 
     DiagnosticsDialog {
@@ -1480,7 +1574,12 @@ ApplicationWindow {
     Connections {
         target: appViewModel
         function onChatLayoutAboutToChange() { messageList.rememberReadingPosition(); }
-        function onChatLayoutChanged() { messageList.restoreReadingPosition(); }
+        function onChatLayoutChanged() {
+            messageList.restoreReadingPosition();
+            Qt.callLater(root.updateViewingState);
+        }
+        function onMeshStateChanged() { Qt.callLater(root.updateViewingState); }
+        function onStopInvitationSound() { notificationSounds.stopInvitation(); }
         function onEntryRequestReceived(id, displayName) {
             entryRequestCard.senderName = displayName;
             entryRequestCard.accepting = false;

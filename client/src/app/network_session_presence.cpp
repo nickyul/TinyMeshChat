@@ -67,6 +67,8 @@ void NetworkSession::resetPresence() {
     onlineResponseRequests_.clear();
     if (incomingOnlineInvitation_) {
         const auto id = incomingOnlineInvitation_->id;
+        if (!incomingOnlineInvitation_->accepting)
+            emit onlineInvitationMissed(incomingOnlineInvitation_->senderId);
         incomingOnlineInvitation_.reset();
         emit onlineInvitationClosed(id);
     }
@@ -281,6 +283,8 @@ bool NetworkSession::handlePresenceEvent(const signaling_protocol::Envelope& eve
         if (!joined) emit errorOccurred(joined.error());
     } else if (event.type == "contact.closed") {
         if (incomingOnlineInvitation_ && incomingOnlineInvitation_->id == id) {
+            if (!incomingOnlineInvitation_->accepting)
+                emit onlineInvitationMissed(incomingOnlineInvitation_->senderId);
             incomingOnlineInvitation_.reset();
             emit onlineInvitationClosed(id);
             emit statusChanged("Онлайн-приглашение больше не действует.");

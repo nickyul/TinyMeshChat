@@ -15,6 +15,7 @@
     "agc_compression_gain_db": 9,
     "agc_limiter": true,
     "output_volume": 100,
+    "notification_volume": 50,
     "quality_kbps": 48,
     "input_mode": "voice_activity",
     "vad_threshold": 0.15,
