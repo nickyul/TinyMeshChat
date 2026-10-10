@@ -130,6 +130,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
     QList<QJsonObject> candidates, localCandidates;
     bool localReady{false};
     bool sentFirst{false};
+    quint64 sourceFrames{}, sourceDropped{};
 
     State(ScreenMediaEngine& engine) : engine(engine) {
     }
@@ -637,10 +638,17 @@ void ScreenMediaPeer::pushFrame(const webrtc::VideoFrame& frame) {
         if (!source) {
             return;
         }
-        if (!s->sentFirst) {
+        if (++s->sourceFrames == 1) {
             s->log("deliver_first_source_frame");
         }
-        source->push(*frame);
+        if (!source->push(*frame)) {
+            if (++s->sourceDropped == 1 || s->sourceDropped % 300 == 0) {
+                s->log(QString("source_frames=%1 dropped=%2")
+                           .arg(s->sourceFrames)
+                           .arg(s->sourceDropped));
+            }
+            return;
+        }
         if (!s->sentFirst) {
             s->sentFirst = true;
             Logger::instance().log(QtInfoMsg, "screen_media",

@@ -29,7 +29,7 @@ public:
     }
 
     void setQuality(ScreenQuality quality);
-    void push(const webrtc::VideoFrame& frame);
+    bool push(const webrtc::VideoFrame& frame);
 
 private:
     std::mutex mutex_;

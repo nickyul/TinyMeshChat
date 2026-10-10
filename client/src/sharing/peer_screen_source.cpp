@@ -16,7 +16,7 @@ void PeerScreenSource::setQuality(ScreenQuality quality) {
     quality_ = quality;
 }
 
-void PeerScreenSource::push(const webrtc::VideoFrame& frame) {
+bool PeerScreenSource::push(const webrtc::VideoFrame& frame) {
     ScreenQuality quality;
     {
         std::lock_guard lock(mutex_);
@@ -26,7 +26,7 @@ void PeerScreenSource::push(const webrtc::VideoFrame& frame) {
         const auto timestamp = frame.timestamp_us();
         const int64_t interval = 1000000 / quality.fps;
         if (nextFrameUs_ >= 0 && timestamp + 1000 < nextFrameUs_) {
-            return;
+            return false;
         }
         if (nextFrameUs_ < 0 || timestamp - nextFrameUs_ > interval) {
             nextFrameUs_ = timestamp;
@@ -37,12 +37,12 @@ void PeerScreenSource::push(const webrtc::VideoFrame& frame) {
     int width, height, cropWidth, cropHeight, cropX, cropY;
     if (!AdaptFrame(maximum.width(), maximum.height(), frame.timestamp_us(), &width, &height,
                     &cropWidth, &cropHeight, &cropX, &cropY)) {
-        return;
+        return false;
     }
     // One adapter per sender. No sink wants are aggregated across viewers.
     const auto raw = frame.video_frame_buffer()->ToI420();
     if (!raw) {
-        return;
+        return false;
     }
     const auto adapted = webrtc::I420Buffer::Create(width, height);
     adapted->ScaleFrom(*raw);
@@ -51,6 +51,7 @@ void PeerScreenSource::push(const webrtc::VideoFrame& frame) {
                 .set_timestamp_us(frame.timestamp_us())
                 .set_rotation(webrtc::kVideoRotation_0)
                 .build());
+    return true;
 }
 
 } // namespace tmc
