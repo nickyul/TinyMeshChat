@@ -427,7 +427,7 @@ NativeCodecSupport probeNativeScreenCodec() {
             VTCompressionSessionInvalidate(session);
             CFRelease(session);
         }
-        return NativeCodecSupport{encoder, VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
+        return NativeCodecSupport{encoder, VTIsHardwareDecodeSupported(kCMVideoCodecType_H264) != 0,
                                   encoder};
     }();
     return support;

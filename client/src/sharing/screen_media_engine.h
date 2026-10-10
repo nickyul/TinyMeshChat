@@ -26,6 +26,10 @@ public:
         return signaling_.get();
     }
 
+    webrtc::Thread* worker() const {
+        return worker_.get();
+    }
+
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory() const {
         return factory_;
     }

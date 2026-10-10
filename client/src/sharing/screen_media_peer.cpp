@@ -1,5 +1,7 @@
 #include "screen_media_peer.h"
 
+#include "tmc/core/logger.h"
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMetaObject>
@@ -16,8 +18,10 @@
 #include <api/stats/rtc_stats_collector_callback.h>
 #include <api/stats/rtc_stats_report.h>
 #include <api/stats/rtcstats_objects.h>
+#include <api/video/video_frame.h>
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 #include "peer_screen_source.h"
@@ -117,12 +121,15 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
     QString sendStream;
     std::atomic<bool> closed{false}, receivedFirst{false};
     std::mutex frameMutex;
+    std::optional<webrtc::VideoFrame> pendingFrame;
+    bool frameQueued{false};
     std::mutex receiveMutex;
     QString receiveStream;
     bool receiveVideo{false}, receiveAudio{false};
     ScreenVideoBridge* bridge{};
     QList<QJsonObject> candidates, localCandidates;
     bool localReady{false};
+    bool sentFirst{false};
 
     State(ScreenMediaEngine& engine) : engine(engine) {
     }
@@ -143,7 +150,13 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
     }
 
     void fail(QString error) {
+        log("error=" + error, QtWarningMsg);
         notify([error = std::move(error)](auto& o) { emit o.errorOccurred(error); });
+    }
+
+    void log(const QString& message, QtMsgType level = QtInfoMsg) const {
+        Logger::instance().log(level, "screen_media",
+                               QString("peer=%1 %2").arg(remote.left(8), message));
     }
 
     QJsonObject envelope(const QString& kind) const {
@@ -162,6 +175,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         if (closed || pc) {
             return;
         }
+        log("create_peer_connection");
         auto result = engine.factory()->CreatePeerConnectionOrError(
             engine.configuration(stun, turn), webrtc::PeerConnectionDependencies(this));
         if (!result.ok()) {
@@ -214,8 +228,13 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         if (software) {
             std::erase_if(codecs, [](const auto& codec) { return codec.name == "H264"; });
         }
-        videoTransceiver->SetCodecPreferences(codecs);
+        const auto error = videoTransceiver->SetCodecPreferences(codecs);
+        if (!error.ok()) {
+            fail(QString::fromUtf8(error.message()));
+            return;
+        }
         applySend();
+        log("peer_connection_ready");
     }
 
     void applySend() {
@@ -223,8 +242,14 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
             return;
         }
         source->setQuality(quality);
-        videoTransceiver->sender()->SetTrack(sendVideo ? localVideo.get() : nullptr);
-        audioTransceiver->sender()->SetTrack(sendAudio ? localAudio.get() : nullptr);
+        const bool videoSet =
+            videoTransceiver->sender()->SetTrack(sendVideo ? localVideo.get() : nullptr);
+        const bool audioSet =
+            audioTransceiver->sender()->SetTrack(sendAudio ? localAudio.get() : nullptr);
+        if (!videoSet || !audioSet) {
+            fail("Не удалось подключить исходящие медиатреки.");
+            return;
+        }
         auto parameters = videoTransceiver->sender()->GetParameters();
         if (!parameters.encodings.empty()) {
             parameters.encodings[0].active = sendVideo;
@@ -253,6 +278,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
             pendingRestart |= restart;
             return;
         }
+        log(QString("create_%1 restart=%2").arg(offer ? "offer" : "answer").arg(restart));
         busy = true;
         if (offer) {
             ++negotiation;
@@ -277,6 +303,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
                                         return;
                                     }
                                     auto message = self->envelope(offer ? "offer" : "answer");
+                                    self->log(offer ? "local_offer_ready" : "local_answer_ready");
                                     message["sdp"] = QString::fromStdString(sdp);
                                     self->send(std::move(message));
                                     self->localReady = true;
@@ -313,7 +340,11 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
             m.value("mid").toString().toStdString(), m.value("mline").toInt(),
             m.value("candidate").toString().toStdString(), &parse));
         if (candidate && pc) {
-            pc->AddIceCandidate(candidate.get());
+            if (!pc->AddIceCandidate(candidate.get())) {
+                log("ice_candidate_rejected", QtWarningMsg);
+            }
+        } else if (!candidate) {
+            fail(QString::fromStdString(parse.description));
         }
     }
 
@@ -379,6 +410,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
                         return;
                     }
                     self->remoteReady = true;
+                    self->log("remote_" + kind + "_applied");
                     for (const auto& candidate : self->candidates) {
                         self->addCandidate(candidate);
                     }
@@ -403,7 +435,12 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         channel->Close();
     }
 
-    void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState) override {
+    void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState state) override {
+        log(QString("ice_gathering=%1").arg(static_cast<int>(state)));
+    }
+
+    void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState state) override {
+        log(QString("ice_connection=%1").arg(static_cast<int>(state)));
     }
 
     void OnIceCandidate(const webrtc::IceCandidate* candidate) override {
@@ -433,11 +470,13 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         } else if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
             name = "closed";
         }
+        log("connection=" + name);
         notify([name](auto& owner) { emit owner.stateChanged(name); });
     }
 
     void OnTrack(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) override {
         const auto track = transceiver->receiver()->track();
+        log("remote_track=" + QString::fromStdString(track->kind()));
         if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
             if (remoteVideo) {
                 remoteVideo->RemoveSink(this);
@@ -460,6 +499,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         }
         bridge->OnFrame(frame);
         if (!receivedFirst.exchange(true)) {
+            log("first_decoded_frame");
             notify([](auto& o) { emit o.firstFrame(); });
         }
     }
@@ -473,6 +513,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
     }
 
     void close() {
+        log("close_peer_connection");
         closed = true;
         {
             std::lock_guard lock(receiveMutex);
@@ -497,7 +538,9 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
         audioTransceiver = nullptr;
         pc = nullptr;
         std::lock_guard lock(frameMutex);
+        pendingFrame.reset();
         source = nullptr;
+        log("peer_connection_closed");
     }
 };
 
@@ -565,10 +608,45 @@ void ScreenMediaPeer::setReceiving(QString stream, bool video, bool audio,
 }
 
 void ScreenMediaPeer::pushFrame(const webrtc::VideoFrame& frame) {
-    std::lock_guard lock(state_->frameMutex);
-    if (!state_->closed && state_->source) {
-        state_->source->push(frame);
+    const auto s = state_;
+    {
+        std::lock_guard lock(s->frameMutex);
+        if (s->closed || !s->source) {
+            return;
+        }
+        s->pendingFrame = frame;
+        if (s->frameQueued) {
+            return;
+        }
+        s->frameQueued = true;
     }
+    // The capture thread must not wait for WebRTC while the GUI waits for capture to stop.
+    // Keep only the latest frame for each peer and deliver on WebRTC's worker thread.
+    s->engine.worker()->PostTask([s] {
+        webrtc::scoped_refptr<PeerScreenSource> source;
+        std::optional<webrtc::VideoFrame> frame;
+        {
+            std::lock_guard lock(s->frameMutex);
+            s->frameQueued = false;
+            frame = std::exchange(s->pendingFrame, std::nullopt);
+            if (s->closed || !frame) {
+                return;
+            }
+            source = s->source;
+        }
+        if (!source) {
+            return;
+        }
+        if (!s->sentFirst) {
+            s->log("deliver_first_source_frame");
+        }
+        source->push(*frame);
+        if (!s->sentFirst) {
+            s->sentFirst = true;
+            Logger::instance().log(QtInfoMsg, "screen_media",
+                                   QString("peer=%1 first_source_frame").arg(s->remote.left(8)));
+        }
+    });
 }
 
 void ScreenMediaPeer::updateIce(QStringList stun, QList<RelayServer> turn) {

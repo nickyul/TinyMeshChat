@@ -1,5 +1,7 @@
 #include "screen_media_engine.h"
 
+#include "tmc/core/logger.h"
+
 #include <api/audio/builtin_audio_processing_builder.h>
 #include <api/audio_codecs/builtin_audio_decoder_factory.h>
 #include <api/audio_codecs/builtin_audio_encoder_factory.h>
@@ -57,6 +59,7 @@ Result<void> ScreenMediaEngine::initialize() {
     if (factory_) {
         return Result<void>::success();
     }
+    Logger::instance().log(QtInfoMsg, "screen_media", "initialize_factory");
     static const SslLifetime ssl;
     if (!ssl.ready) {
         return Result<void>::failure("Не удалось подготовить DTLS для демонстрации экрана.");
@@ -104,6 +107,7 @@ Result<void> ScreenMediaEngine::initialize() {
         }
     });
     if (factory_) {
+        Logger::instance().log(QtInfoMsg, "screen_media", "factory_ready");
         return Result<void>::success();
     }
     audioDevice_->Terminate();

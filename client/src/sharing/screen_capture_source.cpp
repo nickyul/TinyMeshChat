@@ -1,5 +1,7 @@
 #include "tmc/sharing/screen_capture_source.h"
 
+#include "tmc/core/logger.h"
+
 #include <QCapturableWindow>
 #include <QGuiApplication>
 #include <QImage>
@@ -140,6 +142,11 @@ Result<void> ScreenCaptureSource::start(int index, ScreenQuality quality, FrameS
                 [this](QWindowCapture::Error, const QString& error) { emit errorOccurred(error); });
     }
     state_->title = source.title;
+    Logger::instance().log(QtInfoMsg, "screen_capture",
+                           QString("start source=%1 height=%2 fps=%3")
+                               .arg(state_->title)
+                               .arg(quality.height)
+                               .arg(quality.fps));
     quint64 generation;
     {
         std::lock_guard lock(state_->mutex);
@@ -199,6 +206,11 @@ Result<void> ScreenCaptureSource::start(int index, ScreenQuality quality, FrameS
             next += interval;
             if (first) {
                 first = false;
+                Logger::instance().log(QtInfoMsg, "screen_capture",
+                                       QString("first_frame generation=%1 size=%2x%3")
+                                           .arg(generation)
+                                           .arg(image.width())
+                                           .arg(image.height()));
                 QMetaObject::invokeMethod(
                     this,
                     [this, generation] {
@@ -238,22 +250,34 @@ void ScreenCaptureSource::setQuality(ScreenQuality quality) {
 }
 
 void ScreenCaptureSource::stop() {
-    if (state_->capture) {
-        state_->capture->screen.stop();
-        state_->capture->window.stop();
-    }
+    bool active;
     {
         std::lock_guard lock(state_->mutex);
+        active = state_->active;
         state_->active = false;
         ++state_->generation;
         state_->pending = {};
+    }
+    if (active) {
+        Logger::instance().log(QtInfoMsg, "screen_capture", "stop_processing");
     }
     if (state_->worker.joinable()) {
         state_->worker.request_stop();
         state_->condition.notify_all();
         state_->worker.join();
     }
+    if (active) {
+        Logger::instance().log(QtInfoMsg, "screen_capture", "stop_backend");
+    }
+    // Finish reading captured GPU buffers before destroying the capture backend.
+    if (state_->capture) {
+        state_->capture->screen.stop();
+        state_->capture->window.stop();
+    }
     state_->output = {};
+    if (active) {
+        Logger::instance().log(QtInfoMsg, "screen_capture", "stopped");
+    }
 }
 
 QString ScreenCaptureSource::title() const {
