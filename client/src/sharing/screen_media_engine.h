@@ -12,6 +12,12 @@
 
 #include "system_audio_device.h"
 
+namespace webrtc {
+
+class LogSink;
+
+}
+
 namespace tmc {
 
 class ScreenMediaEngine final {
@@ -44,6 +50,7 @@ public:
 private:
     std::shared_ptr<SharedAudioOutput> output_;
     std::unique_ptr<webrtc::Thread> network_, worker_, signaling_;
+    std::unique_ptr<webrtc::LogSink> videoLogs_;
     webrtc::scoped_refptr<SystemAudioDevice> audioDevice_;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
     webrtc::scoped_refptr<webrtc::AudioSourceInterface> audioSource_;

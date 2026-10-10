@@ -262,6 +262,7 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
                 fail(QString::fromUtf8(error.message()));
             }
         }
+        logVideoState("apply_send");
         if (!sendStream.isEmpty() && videoTransceiver->mid() && negotiation > 0) {
             auto binding = envelope("binding");
             binding["stream"] = sendStream;
@@ -269,6 +270,25 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
             binding["videoMid"] = QString::fromStdString(*videoTransceiver->mid());
             send(std::move(binding));
         }
+    }
+
+    void logVideoState(const QString& phase) const {
+        if (!videoTransceiver) {
+            return;
+        }
+        const auto sender = videoTransceiver->sender();
+        const auto parameters = sender->GetParameters();
+        const auto direction = videoTransceiver->current_direction();
+        log(QString("%1 video=%2 track=%3 enabled=%4 active=%5 direction=%6 negotiated=%7 "
+                    "encodings=%8")
+                .arg(phase)
+                .arg(sendVideo)
+                .arg(bool(sender->track()))
+                .arg(localVideo && localVideo->enabled())
+                .arg(!parameters.encodings.empty() && parameters.encodings[0].active)
+                .arg(static_cast<int>(videoTransceiver->direction()))
+                .arg(direction ? static_cast<int>(*direction) : -1)
+                .arg(parameters.encodings.size()));
     }
 
     void describe(bool offer, bool restart = false) {
@@ -472,6 +492,9 @@ struct ScreenMediaPeer::State : webrtc::PeerConnectionObserver,
             name = "closed";
         }
         log("connection=" + name);
+        if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kConnected) {
+            logVideoState("connected_video");
+        }
         notify([name](auto& owner) { emit owner.stateChanged(name); });
     }
 
@@ -694,17 +717,19 @@ void ScreenMediaPeer::preferSoftware() {
     });
 }
 
-void ScreenMediaPeer::requestStats() {
+void ScreenMediaPeer::requestStats(quint64 sendEpoch) {
     const auto s = state_;
-    s->engine.signaling()->PostTask([s] {
+    s->engine.signaling()->PostTask([s, sendEpoch] {
         if (!s->pc || s->closed) {
             return;
         }
         const auto weak = s->weak_from_this();
         s->pc->GetStats(
-            webrtc::make_ref_counted<StatsCallback>([weak](QJsonObject stats) {
+            webrtc::make_ref_counted<StatsCallback>([weak, sendEpoch](QJsonObject stats) {
                 if (const auto s = weak.lock()) {
-                    s->notify([stats = std::move(stats)](auto& o) { emit o.statsChanged(stats); });
+                    s->notify([stats = std::move(stats), sendEpoch](auto& o) {
+                        emit o.statsChanged(stats, sendEpoch);
+                    });
                 }
             }).get());
     });

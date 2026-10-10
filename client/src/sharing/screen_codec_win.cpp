@@ -1,6 +1,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "tmc/core/logger.h"
+
 #include <algorithm>
 #include <api/video/i420_buffer.h>
 #include <codecapi.h>
@@ -12,6 +14,7 @@
 #include <mftransform.h>
 #include <modules/video_coding/include/video_error_codes.h>
 #include <optional>
+#include <rtc_base/time_utils.h>
 #include <windows.h>
 #include <wmcodecdsp.h>
 #include <wrl/client.h>
@@ -23,6 +26,12 @@ namespace tmc {
 namespace {
 
 using Microsoft::WRL::ComPtr;
+
+void codecStatus(const char* stage, HRESULT status) {
+    Logger::instance().trace(
+        "screen_codec",
+        QString("%1 hr=0x%2").arg(stage).arg(static_cast<quint32>(status), 8, 16, QChar('0')));
+}
 
 struct ComScope {
     HRESULT result{CoInitializeEx(nullptr, COINIT_MULTITHREADED)};
@@ -68,6 +77,7 @@ struct Transform {
     ComPtr<ICodecAPI> controls;
     bool hardware{}, asynchronous{};
     int inputTokens{}, outputTokens{};
+    HRESULT failure{S_OK};
 
     bool createEncoder(bool tryHardware) {
         if (!mediaFoundation()) {
@@ -117,16 +127,31 @@ struct Transform {
     }
 
     void poll() {
-        if (!events) {
+        if (!events || FAILED(failure)) {
             return;
         }
         for (int i = 0; i < 32; ++i) {
             ComPtr<IMFMediaEvent> event;
-            if (FAILED(events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event))) {
+            const auto result = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
+            if (result == MF_E_NO_EVENTS_AVAILABLE) {
                 break;
             }
+            if (FAILED(result)) {
+                failure = result;
+                codecStatus("transform_get_event", result);
+                return;
+            }
             MediaEventType type{};
-            event->GetType(&type);
+            HRESULT status{};
+            auto hr = event->GetType(&type);
+            if (SUCCEEDED(hr)) {
+                hr = event->GetStatus(&status);
+            }
+            if (FAILED(hr) || FAILED(status) || type == MEError) {
+                failure = FAILED(hr) ? hr : FAILED(status) ? status : E_FAIL;
+                codecStatus("transform_async_event", failure);
+                return;
+            }
             if (type == METransformNeedInput) {
                 ++inputTokens;
             } else if (type == METransformHaveOutput) {
@@ -135,10 +160,19 @@ struct Transform {
         }
     }
 
-    void start() {
-        mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-        mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    bool start() {
+        const auto begin = mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        if (FAILED(begin)) {
+            codecStatus("begin_streaming", begin);
+            return false;
+        }
+        const auto start = mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        if (FAILED(start)) {
+            codecStatus("start_stream", start);
+            return false;
+        }
         poll();
+        return SUCCEEDED(failure);
     }
 
     void close() {
@@ -151,10 +185,14 @@ struct Transform {
         mft.Reset();
         inputTokens = outputTokens = 0;
         hardware = asynchronous = false;
+        failure = S_OK;
     }
 
     HRESULT output(ComPtr<IMFSample>& sample) {
         poll();
+        if (FAILED(failure)) {
+            return failure;
+        }
         if (asynchronous && outputTokens <= 0) {
             return MF_E_TRANSFORM_NEED_MORE_INPUT;
         }
@@ -213,6 +251,8 @@ class WinEncoder final : public webrtc::VideoEncoder {
     int width_{}, height_{}, fps_{30}, bitrate_{};
     bool comInitialized_{};
     std::map<LONGLONG, uint32_t> timestamps_;
+    quint64 submitted_{}, produced_{}, dropped_{};
+    std::optional<int64_t> progressAt_, lastEncodeAt_;
 
     bool open(bool hardware) {
         if (!transform_.createEncoder(hardware)) {
@@ -232,12 +272,17 @@ class WinEncoder final : public webrtc::VideoEncoder {
         output->SetUINT32(MF_MT_AVG_BITRATE, std::max(bitrate_, 100000));
         output->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
         output->SetUINT32(MF_MT_MPEG2_LEVEL, 52);
-        if (FAILED(transform_.mft->SetOutputType(0, output.Get(), 0)) ||
-            FAILED(transform_.mft->SetInputType(0, input.Get(), 0))) {
+        const auto outputStatus = transform_.mft->SetOutputType(0, output.Get(), 0);
+        if (FAILED(outputStatus)) {
+            codecStatus("encoder_output_type", outputStatus);
             return false;
         }
-        transform_.start();
-        return true;
+        const auto inputStatus = transform_.mft->SetInputType(0, input.Get(), 0);
+        if (FAILED(inputStatus)) {
+            codecStatus("encoder_input_type", inputStatus);
+            return false;
+        }
+        return transform_.start();
     }
 
     int drain() {
@@ -248,6 +293,7 @@ class WinEncoder final : public webrtc::VideoEncoder {
                 return WEBRTC_VIDEO_CODEC_OK;
             }
             if (FAILED(hr) || !sample) {
+                codecStatus("encoder_process_output", hr);
                 return WEBRTC_VIDEO_CODEC_ERROR;
             }
             ComPtr<IMFMediaBuffer> buffer;
@@ -260,11 +306,11 @@ class WinEncoder final : public webrtc::VideoEncoder {
                 return WEBRTC_VIDEO_CODEC_ERROR;
             }
             LONGLONG time{};
-            sample->GetSampleTime(&time);
+            const auto timeStatus = sample->GetSampleTime(&time);
             UINT32 key{};
             sample->GetUINT32(MFSampleExtension_CleanPoint, &key);
             const auto found = timestamps_.find(time);
-            if (found != timestamps_.end()) {
+            if (SUCCEEDED(timeStatus) && found != timestamps_.end()) {
                 // Media Foundation H.264 outputs Annex B. Reject foreign formats rather than
                 // sending corrupt RTP.
                 if (h264Nalus({data, size}).empty()) {
@@ -272,7 +318,27 @@ class WinEncoder final : public webrtc::VideoEncoder {
                     return WEBRTC_VIDEO_CODEC_ERROR;
                 }
                 emitH264(callback_, {data, size}, found->second, width_, height_, key != 0);
+                if (++produced_ == 1 || produced_ % 300 == 0) {
+                    Logger::instance().trace(
+                        "screen_codec", QString("encoder_output frames=%1 bytes=%2 callback=%3")
+                                            .arg(produced_)
+                                            .arg(size)
+                                            .arg(callback_ != nullptr));
+                }
                 timestamps_.erase(found);
+                if (timestamps_.empty()) {
+                    progressAt_.reset();
+                } else {
+                    progressAt_ = webrtc::TimeMicros();
+                }
+            } else {
+                Logger::instance().trace(
+                    "screen_codec", QString("encoder_output_timestamp_missing time=%1 pending=%2")
+                                        .arg(time)
+                                        .arg(static_cast<qulonglong>(timestamps_.size())));
+                codecStatus("encoder_output_sample_time", timeStatus);
+                buffer->Unlock();
+                return WEBRTC_VIDEO_CODEC_ERROR;
             }
             buffer->Unlock();
         }
@@ -295,18 +361,30 @@ public:
         height_ = codec->height;
         fps_ = codec->maxFramerate;
         bitrate_ = codec->startBitrate * 1000;
+        submitted_ = produced_ = dropped_ = 0;
+        Logger::instance().trace("screen_codec",
+                                 QString("encoder_init size=%1x%2 fps=%3 bitrate=%4")
+                                     .arg(width_)
+                                     .arg(height_)
+                                     .arg(fps_)
+                                     .arg(bitrate_));
         if (!open(true)) {
             transform_.close();
             if (!open(false)) {
                 transform_.close();
+                Logger::instance().trace("screen_codec", "encoder_init_failed");
                 return WEBRTC_VIDEO_CODEC_ERROR;
             }
         }
+        Logger::instance().trace("screen_codec", QString("encoder_ready hardware=%1 async=%2")
+                                                     .arg(transform_.hardware)
+                                                     .arg(transform_.asynchronous));
         return WEBRTC_VIDEO_CODEC_OK;
     }
 
     int32_t RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* callback) override {
         callback_ = callback;
+        Logger::instance().trace("screen_codec", "encoder_callback_registered");
         return WEBRTC_VIDEO_CODEC_OK;
     }
 
@@ -314,6 +392,8 @@ public:
         ComScope com;
         transform_.close();
         timestamps_.clear();
+        progressAt_.reset();
+        lastEncodeAt_.reset();
         if (comInitialized_) {
             CoUninitialize();
             comInitialized_ = false;
@@ -324,6 +404,13 @@ public:
     int32_t Encode(const webrtc::VideoFrame& frame,
                    const std::vector<webrtc::VideoFrameType>* types) override {
         ComScope com;
+        if (++submitted_ == 1 || submitted_ % 300 == 0) {
+            Logger::instance().trace("screen_codec",
+                                     QString("encoder_input frames=%1 bitrate=%2 pending=%3")
+                                         .arg(submitted_)
+                                         .arg(bitrate_)
+                                         .arg(static_cast<qulonglong>(timestamps_.size())));
+        }
         if (!transform_.mft) {
             return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
         }
@@ -340,6 +427,8 @@ public:
         if (width_ != i420->width() || height_ != i420->height()) {
             transform_.close();
             timestamps_.clear();
+            progressAt_.reset();
+            lastEncodeAt_.reset();
             width_ = i420->width();
             height_ = i420->height();
             if (!open(true)) {
@@ -350,7 +439,43 @@ public:
             }
         }
         transform_.poll();
-        if ((transform_.asynchronous && transform_.inputTokens <= 0) || timestamps_.size() >= 4) {
+        if (FAILED(transform_.failure)) {
+            return WEBRTC_VIDEO_CODEC_ERROR;
+        }
+        const auto now = webrtc::TimeMicros();
+        if (lastEncodeAt_ && now - *lastEncodeAt_ >= 3000000) {
+            // A quiet source can resume without a bitrate pause. Give the MFT time to
+            // produce output from resumed input rather than treating source idle as a stall.
+            progressAt_.reset();
+        }
+        lastEncodeAt_ = now;
+        if (!progressAt_) {
+            progressAt_ = now;
+        }
+        // Input readiness belongs to the MFT. An arbitrary small queue limit can prevent it
+        // from receiving enough frames to produce its first output. Bound a broken encoder by
+        // failing instead, so WebRTC can select VP8 rather than dropping frames forever.
+        if (now - *progressAt_ >= 3000000 || timestamps_.size() >= 180) {
+            Logger::instance().trace("screen_codec",
+                                     QString("encoder_stalled pending=%1 input_tokens=%2 "
+                                             "output_tokens=%3 submitted=%4 produced=%5")
+                                         .arg(static_cast<qulonglong>(timestamps_.size()))
+                                         .arg(transform_.inputTokens)
+                                         .arg(transform_.outputTokens)
+                                         .arg(submitted_)
+                                         .arg(produced_));
+            return WEBRTC_VIDEO_CODEC_ERROR;
+        }
+        if (transform_.asynchronous && transform_.inputTokens <= 0) {
+            if (++dropped_ == 1 || dropped_ % 300 == 0) {
+                Logger::instance().trace("screen_codec",
+                                         QString("encoder_drop frames=%1 input_tokens=%2 "
+                                                 "output_tokens=%3 pending=%4")
+                                             .arg(dropped_)
+                                             .arg(transform_.inputTokens)
+                                             .arg(transform_.outputTokens)
+                                             .arg(static_cast<qulonglong>(timestamps_.size())));
+            }
             if (callback_) {
                 callback_->OnFrameDropped(frame.rtp_timestamp(), 0, true);
             }
@@ -390,6 +515,7 @@ public:
             return drain();
         }
         if (FAILED(hr)) {
+            codecStatus("encoder_process_input", hr);
             return WEBRTC_VIDEO_CODEC_ERROR;
         }
         if (transform_.asynchronous) {
@@ -401,7 +527,18 @@ public:
 
     void SetRates(const RateControlParameters& rates) override {
         ComScope com;
-        bitrate_ = rates.bitrate.get_sum_bps();
+        if (bitrate_ != rates.bitrate.get_sum_bps()) {
+            Logger::instance().trace("screen_codec", QString("encoder_rates bitrate=%1 fps=%2")
+                                                         .arg(rates.bitrate.get_sum_bps())
+                                                         .arg(rates.framerate_fps));
+        }
+        const auto bitrate = rates.bitrate.get_sum_bps();
+        if (!bitrate_ || !bitrate) {
+            // WebRTC stops calling Encode while paused; that time is not an encoder stall.
+            progressAt_.reset();
+            lastEncodeAt_.reset();
+        }
+        bitrate_ = bitrate;
         if (rates.framerate_fps > 0) {
             fps_ = rates.framerate_fps;
         }
@@ -537,8 +674,7 @@ public:
         }
         // Actual dimensions are announced through MF_E_TRANSFORM_STREAM_CHANGE after the first SPS.
         outputType();
-        transform_.start();
-        return true;
+        return transform_.start();
     }
 
     int32_t RegisterDecodeCompleteCallback(webrtc::DecodedImageCallback* callback) override {

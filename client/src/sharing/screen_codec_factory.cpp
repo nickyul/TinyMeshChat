@@ -1,5 +1,7 @@
 #include "screen_codec_factory.h"
 
+#include "tmc/core/logger.h"
+
 #include <algorithm>
 #include <api/video_codecs/builtin_video_decoder_factory.h>
 #include <api/video_codecs/builtin_video_encoder_factory.h>
@@ -45,7 +47,12 @@ public:
 
     std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment& env,
                                                  const webrtc::SdpVideoFormat& format) override {
-        return format.name == "H264" ? createNativeScreenEncoder() : software_->Create(env, format);
+        auto encoder =
+            format.name == "H264" ? createNativeScreenEncoder() : software_->Create(env, format);
+        Logger::instance().trace("screen_codec", QString("create_encoder codec=%1 success=%2")
+                                                     .arg(QString::fromStdString(format.name))
+                                                     .arg(bool(encoder)));
+        return encoder;
     }
 };
 
@@ -87,6 +94,7 @@ public:
     }
 
     std::optional<webrtc::SdpVideoFormat> OnEncoderBroken() override {
+        Logger::instance().trace("screen_codec", "encoder_broken");
         if (software_) {
             return std::nullopt;
         }

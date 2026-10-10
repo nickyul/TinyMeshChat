@@ -9,6 +9,7 @@
 #include <api/environment/environment_factory.h>
 #include <api/make_ref_counted.h>
 #include <media/base/media_config.h>
+#include <rtc_base/logging.h>
 #include <rtc_base/ssl_adapter.h>
 
 #include "screen_audio_factory.h"
@@ -16,6 +17,36 @@
 
 namespace tmc {
 namespace {
+
+class VideoLogSink final : public webrtc::LogSink {
+public:
+    VideoLogSink() {
+        webrtc::LogMessage::AddLogToStream(this, webrtc::LS_INFO);
+    }
+
+    ~VideoLogSink() override {
+        webrtc::LogMessage::RemoveLogToStream(this);
+    }
+
+    void OnLogMessage(const std::string& message) override {
+        forward(QString::fromStdString(message));
+    }
+
+    void OnLogMessage(const webrtc::LogLineRef& line) override {
+        forward(QString::fromStdString(line.DefaultLogLine()));
+    }
+
+private:
+    static void forward(const QString& message) {
+        if (message.contains("video_stream_encoder.cc") ||
+            message.contains("webrtc_video_engine.cc") ||
+            message.contains("video_send_stream_impl.cc") ||
+            message.contains("rtp_video_sender.cc") ||
+            message.contains("video_codec_initializer.cc")) {
+            Logger::instance().trace("screen_webrtc", message.trimmed());
+        }
+    }
+};
 
 struct SslLifetime {
     bool ready{webrtc::InitializeSSL()};
@@ -53,6 +84,7 @@ ScreenMediaEngine::~ScreenMediaEngine() {
     if (network_) {
         network_->Stop();
     }
+    videoLogs_.reset();
 }
 
 Result<void> ScreenMediaEngine::initialize() {
@@ -60,6 +92,9 @@ Result<void> ScreenMediaEngine::initialize() {
         return Result<void>::success();
     }
     Logger::instance().log(QtInfoMsg, "screen_media", "initialize_factory");
+    if (!videoLogs_) {
+        videoLogs_ = std::make_unique<VideoLogSink>();
+    }
     static const SslLifetime ssl;
     if (!ssl.ready) {
         return Result<void>::failure("Не удалось подготовить DTLS для демонстрации экрана.");

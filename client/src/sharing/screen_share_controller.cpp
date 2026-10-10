@@ -56,9 +56,10 @@ struct ScreenShareController::State {
 
     struct Peer {
         bool capable{}, subscribed{}, audio{}, software{}, connected{};
+        bool sendingVideo{}, awaitingEncoded{}, encodedBaselinePending{};
         QString stream, status;
         ScreenQuality requested;
-        quint64 revision{}, generation{};
+        quint64 revision{}, generation{}, sendEpoch{};
         std::unique_ptr<ScreenMediaPeer> media;
         qint64 deadline{}, idleAt{}, statsAt{}, loggedStatsAt{}, retryAt{}, videoAt{},
             framesDecoded{-1}, framesEncoded{-1};
@@ -357,6 +358,8 @@ void ScreenShareController::removeMedia(const QString& id) {
     peer->media->close();
     peer->media.reset();
     peer->connected = false;
+    peer->sendingVideo = peer->awaitingEncoded = false;
+    peer->encodedBaselinePending = false;
 }
 
 void ScreenShareController::ensureMedia(const QString& id, bool reset) {
@@ -413,6 +416,7 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
                 peer->status = status;
                 peer->connected = status == "connected";
                 if (peer->connected) {
+                    peer->loggedStatsAt = 0;
                     peer->retryAt = 0;
                     peer->deadline = state_->clock.elapsed() + 10000;
                 } else if (status == "connecting") {
@@ -433,8 +437,11 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
         if (const auto stream = state_->remoteStream(id); stream && stream->selected) {
             stream->status = "playing";
             stream->error.clear();
-            state_->peers.value(id)->videoAt = state_->clock.elapsed();
-            state_->peers.value(id)->attempts = 0;
+            const auto peer = state_->peers.value(id);
+            peer->videoAt = state_->clock.elapsed();
+            if (!peer->awaitingEncoded) {
+                peer->attempts = 0;
+            }
         }
         emit changed();
     });
@@ -451,7 +458,7 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
             });
     connect(
         peer->media.get(), &ScreenMediaPeer::statsChanged, this,
-        [this, id, current](const QJsonObject& stats) {
+        [this, id, current](const QJsonObject& stats, quint64 sendEpoch) {
             if (!current()) {
                 return;
             }
@@ -460,7 +467,7 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
             const auto stream = state_->remoteStream(id);
             const bool logStats = state_->clock.elapsed() >= peer->loggedStatsAt;
             if (logStats) {
-                peer->loggedStatsAt = state_->clock.elapsed() + 10000;
+                peer->loggedStatsAt = state_->clock.elapsed() + 2000;
             }
             for (const auto& value : stats.value("reports").toArray()) {
                 const auto report = value.toObject();
@@ -472,6 +479,13 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
                 }
                 if (report.value("kind") != "video") {
                     continue;
+                }
+                if (logStats && report.value("type") == "media-source") {
+                    Logger::instance().trace(
+                        "screen_media", QString("peer=%1 source_frames=%2 source_fps=%3")
+                                            .arg(id.left(8))
+                                            .arg(report.value("frames").toInteger(-1))
+                                            .arg(report.value("framesPerSecond").toDouble(-1)));
                 }
                 if (logStats && (report.value("type") == "outbound-rtp" ||
                                  report.value("type") == "inbound-rtp")) {
@@ -487,9 +501,18 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
                             .arg(report.value("codecId").toString()));
                 }
                 if (report.value("type") == "outbound-rtp") {
+                    if (sendEpoch != peer->sendEpoch) {
+                        continue;
+                    }
                     const auto encoded = report.value("framesEncoded").toInteger();
-                    if (encoded > 0 && encoded != peer->framesEncoded) {
+                    if (peer->encodedBaselinePending) {
                         peer->framesEncoded = encoded;
+                        peer->encodedBaselinePending = false;
+                    } else if (encoded > 0 && encoded != peer->framesEncoded) {
+                        peer->framesEncoded = encoded;
+                        if (peer->sendingVideo) {
+                            peer->awaitingEncoded = false;
+                        }
                         // A sender-only pair also needs evidence of live media to reset
                         // retries. Outgoing progress must not hide a stalled selected incoming
                         // stream.
@@ -506,7 +529,9 @@ void ScreenShareController::ensureMedia(const QString& id, bool reset) {
                         if (stream->selected && peer->connected) {
                             stream->status = "playing";
                             stream->error.clear();
-                            peer->attempts = 0;
+                            if (!peer->awaitingEncoded) {
+                                peer->attempts = 0;
+                            }
                         }
                     }
                     stream->qualityText =
@@ -549,6 +574,21 @@ void ScreenShareController::updateSubscription(const QString& id) {
     const auto local = state_->streams.value(state_->localId), remote = state_->remoteStream(id);
     const bool sending =
         local && state_->localReady && peer->subscribed && peer->stream == local->id;
+    if (sending != peer->sendingVideo) {
+        ++peer->sendEpoch;
+    }
+    if (sending && !peer->sendingVideo) {
+        // Stats counters are cumulative for a reused peer connection. Ignore old requests,
+        // take a fresh baseline, and require a change before accepting this period as live.
+        peer->awaitingEncoded = true;
+        peer->encodedBaselinePending = true;
+        peer->retryAt = 0;
+        peer->deadline = state_->clock.elapsed() + 10000;
+    } else if (!sending) {
+        peer->awaitingEncoded = false;
+        peer->encodedBaselinePending = false;
+    }
+    peer->sendingVideo = sending;
     peer->media->setSending(local ? local->id : QString{}, sending,
                             sending && local->audio && peer->audio,
                             local ? peer->requested.boundedBy(local->published) : ScreenQuality{});
@@ -882,12 +922,12 @@ void ScreenShareController::maintain() {
         peer->idleAt = 0;
         if (now >= peer->statsAt) {
             peer->statsAt = now + 2000;
-            peer->media->requestStats();
+            peer->media->requestStats(peer->sendEpoch);
         }
         const auto stream = state_->remoteStream(id);
         const bool stalled = stream && stream->selected && stream->status == "playing" &&
                              now - peer->videoAt > 10000;
-        const bool waiting = !peer->connected ||
+        const bool waiting = !peer->connected || (peer->subscribed && peer->awaitingEncoded) ||
                              (stream && stream->selected && stream->status != "playing") || stalled;
         if (!waiting) {
             peer->retryAt = 0;

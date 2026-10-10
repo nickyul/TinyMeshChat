@@ -37,13 +37,13 @@ public:
     void updateIce(QStringList stun, QList<RelayServer> turn);
     void restartIce();
     void preferSoftware();
-    void requestStats();
+    void requestStats(quint64 sendEpoch);
     void close();
 signals:
     void outgoing(QJsonObject message);
     void stateChanged(QString state);
     void errorOccurred(QString message);
-    void statsChanged(QJsonObject stats);
+    void statsChanged(QJsonObject stats, quint64 sendEpoch);
     void firstFrame();
 
 private:
