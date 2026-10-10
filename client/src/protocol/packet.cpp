@@ -27,6 +27,7 @@ constexpr std::array PacketTypeNames{
     PacketTypeName{PacketType::LinkAnswer, "link.answer"},
     PacketTypeName{PacketType::SessionOffer, "session.offer"},
     PacketTypeName{PacketType::SessionAnswer, "session.answer"},
+    PacketTypeName{PacketType::ScreenControl, "screen.control"},
     PacketTypeName{PacketType::SignalingState, "signaling.state"},
     PacketTypeName{PacketType::SignalingJoinRequest, "signaling.join.request"},
     PacketTypeName{PacketType::SignalingJoinInvitation, "signaling.join.invitation"},

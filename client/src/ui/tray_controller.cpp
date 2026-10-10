@@ -37,6 +37,15 @@ TrayController::TrayController(QWindow& window, AppViewModel& viewModel, QObject
                     restoreWindow();
                 }
             });
+    connect(trayIcon_.get(), &QSystemTrayIcon::messageClicked, this, &TrayController::restoreWindow);
+    connect(&viewModel_, &AppViewModel::desktopNotification, this,
+            [this](const QString& title, const QString& text) {
+                updateTrayState();
+                if (!window_.isActive() && trayIcon_->isVisible())
+                    trayIcon_->showMessage(title, text, QSystemTrayIcon::Information, 10000);
+            });
+    connect(&viewModel_, &AppViewModel::attentionChanged, this, &TrayController::updateTrayState);
+    connect(&viewModel_, &AppViewModel::identityRequiredChanged, this, &TrayController::updateTrayState);
     connect(&viewModel_, &AppViewModel::meshStateChanged, this,
             &TrayController::updateTrayState);
     connect(&viewModel_, &AppViewModel::callStateChanged, this,
@@ -64,7 +73,7 @@ void TrayController::quitApplication() {
 
 bool TrayController::eventFilter(QObject* watched, QEvent* event) {
     if (watched != &window_ || event->type() != QEvent::Close || quitting_ ||
-        !viewModel_.meshVisible() || !QSystemTrayIcon::isSystemTrayAvailable()) {
+        viewModel_.identityRequired() || !QSystemTrayIcon::isSystemTrayAvailable()) {
         return QObject::eventFilter(watched, event);
     }
 
@@ -85,7 +94,7 @@ void TrayController::restoreWindow() {
 
 void TrayController::updateTrayState() {
     const bool meshActive = viewModel_.meshVisible();
-    if (meshActive && QSystemTrayIcon::isSystemTrayAvailable()) {
+    if (!viewModel_.identityRequired() && QSystemTrayIcon::isSystemTrayAvailable()) {
         trayIcon_->show();
     } else {
         if (!window_.isVisible() && !quitting_) {
@@ -93,6 +102,10 @@ void TrayController::updateTrayState() {
         }
         trayIcon_->hide();
     }
+
+    const int unread = viewModel_.unreadCount();
+    trayIcon_->setToolTip(unread > 0 ? tr("TinyMesh Chat — непрочитанных: %1").arg(unread)
+                                   : tr("TinyMesh Chat"));
 
     const bool callActive = viewModel_.callActive();
     muteAction_->setVisible(callActive);

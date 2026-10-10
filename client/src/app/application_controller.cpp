@@ -320,6 +320,19 @@ Result<void> ApplicationController::updateAudioPreferences(const AudioPreference
     return Result<void>::success();
 }
 
+Result<void> ApplicationController::updateScreenQuality(ScreenQuality quality) {
+    if (!quality.isValid()) {
+        return Result<void>::failure("Некорректное качество трансляции.");
+    }
+    auto updated = config_;
+    updated.screenQuality = quality;
+    const auto result = updated.save(dataDir_ + "/config.json");
+    if (result) {
+        config_ = std::move(updated);
+    }
+    return result;
+}
+
 } // namespace tmc
 
 namespace tmc {

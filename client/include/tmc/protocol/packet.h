@@ -3,6 +3,7 @@
 #include "tmc/identity/peer_identity.h"
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
 
@@ -27,6 +28,7 @@ enum class PacketType {
     LinkAnswer,
     SessionOffer,
     SessionAnswer,
+    ScreenControl,
     SignalingState,
     SignalingJoinRequest,
     SignalingJoinInvitation,
@@ -99,6 +101,10 @@ struct HeartbeatPayload {
     QDateTime sentAt;
 };
 
+struct ScreenControlPayload {
+    QJsonObject message;
+};
+
 // Direct control-channel messages. No routing and no endpoint discovery:
 // recovery only uses the signaling server already authorized on this client.
 struct SignalingStatePayload {
@@ -115,10 +121,11 @@ struct SignalingJoinPayload {
 };
 
 using PacketPayload =
-    std::variant<HelloPayload, PeerProofPayload, PeerSnapshotPayload, PeerAnnouncePayload, PeerLeavePayload,
-                 ChatMessagePayload, ChatAckPayload, VoiceStatePayload, VoiceQualityPayload,
-                 RoutePayload, LinkSignalingPayload, SessionSignalingPayload,
-                 HeartbeatPayload, SignalingStatePayload, SignalingJoinPayload>;
+    std::variant<HelloPayload, PeerProofPayload, PeerSnapshotPayload, PeerAnnouncePayload,
+                 PeerLeavePayload, ChatMessagePayload, ChatAckPayload, VoiceStatePayload,
+                 VoiceQualityPayload, RoutePayload, LinkSignalingPayload, SessionSignalingPayload,
+                 HeartbeatPayload, SignalingStatePayload, SignalingJoinPayload,
+                 ScreenControlPayload>;
 
 struct Packet {
     PacketType type{PacketType::PeerHello};

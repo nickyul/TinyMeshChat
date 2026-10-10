@@ -12,6 +12,7 @@
 namespace tmc {
 
 class RtpAudioEngine;
+class SharedAudioOutput;
 class IncomingRtpAudioSink;
 class OutgoingOpusAudioSink;
 
@@ -45,6 +46,7 @@ public:
     AudioPreferences preferences() const;
     std::shared_ptr<IncomingRtpAudioSink> incomingAudioSink() const;
     void setOutgoingAudioSink(std::weak_ptr<OutgoingOpusAudioSink> sink);
+    std::shared_ptr<SharedAudioOutput> audioOutput() const;
 
 signals:
     void stateChanged(bool active, bool muted);

@@ -2,6 +2,7 @@
   <qresource prefix="/">
     <file alias="qml/ConversationFileCard.qml">../qml/ConversationFileCard.qml</file>
     <file alias="qml/NotificationSounds.qml">../qml/NotificationSounds.qml</file>
+    <file alias="sounds/invitation.wav">sounds/invitation.wav</file>
     <file alias="sounds/knock.wav">sounds/knock.wav</file>
     <file alias="sounds/join.wav">sounds/join.wav</file>
     <file alias="sounds/leave.wav">sounds/leave.wav</file>
@@ -13,6 +14,7 @@
     <file alias="qml/AppPalette.qml">../qml/AppPalette.qml</file>
     <file alias="qml/AudioSettingsDialog.qml">../qml/AudioSettingsDialog.qml</file>
     <file alias="qml/DiagnosticsDialog.qml">../qml/DiagnosticsDialog.qml</file>
+    <file alias="qml/ChatMessageInput.qml">../qml/ChatMessageInput.qml</file>
     <file alias="qml/Main.qml">../qml/Main.qml</file>
     <file alias="qml/PrimaryButton.qml">../qml/PrimaryButton.qml</file>
     <file alias="qml/SignalingOutputDialog.qml">../qml/SignalingOutputDialog.qml</file>
@@ -21,6 +23,8 @@
     <file alias="qml/AcquaintancesPanel.qml">../qml/AcquaintancesPanel.qml</file>
     <file alias="qml/TransferCard.qml">../qml/TransferCard.qml</file>
     <file alias="qml/FileTransfersDialog.qml">../qml/FileTransfersDialog.qml</file>
+    <file alias="qml/ScreenStreamTile.qml">../qml/ScreenStreamTile.qml</file>
+    <file alias="qml/ScreenStreamsPane.qml">../qml/ScreenStreamsPane.qml</file>
     <file alias="qml/ScreenShareDialog.qml">../qml/ScreenShareDialog.qml</file>
   </qresource>
 </RCC>

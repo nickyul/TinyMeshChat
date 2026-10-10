@@ -19,6 +19,10 @@ VoiceSession::VoiceSession(AudioPreferences preferences, QObject* parent)
 
 VoiceSession::~VoiceSession() = default;
 
+std::shared_ptr<SharedAudioOutput> VoiceSession::audioOutput() const {
+    return audio_->audioOutput();
+}
+
 bool VoiceSession::active() const {
     return active_;
 }

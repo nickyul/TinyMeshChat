@@ -1,14 +1,15 @@
-#include "tmc/app/network_session.h"
-
 #include "tmc/app/application_controller.h"
-#include "tmc/core/limits.h"
-#include "tmc/protocol/packet_codec.h"
+#include "tmc/app/network_session.h"
 #include "tmc/app/personal_connections.h"
+#include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
-#include "tmc/signaling_client/signaling_client.h"
+#include "tmc/protocol/packet_codec.h"
+#include "tmc/sharing/screen_share_service.h"
 #include "tmc/signaling_client/access_invitation.h"
+#include "tmc/signaling_client/signaling_client.h"
 #include "tmc/signaling_protocol/message_codec.h"
 
+#include <QDateTime>
 #include <QJsonArray>
 
 #include <algorithm>
@@ -43,6 +44,9 @@ void NetworkSession::initializeSignalingClient() {
         for (const auto& url : credentials.urls) {
             servers.append({url, credentials.username, credentials.password});
         }
+        sharing_->setIceServers(app_.config().stunServers, servers,
+                                QDateTime::currentMSecsSinceEpoch() +
+                                    qint64(credentials.expiresInSeconds) * 1000);
         personal_->setTurnServers(servers, credentials.expiresInSeconds);
         connections_->setTurnServers(std::move(servers), credentials.expiresInSeconds);
     });
@@ -71,6 +75,7 @@ void NetworkSession::initializeSignalingClient() {
             this, &NetworkSession::handleServerEvent);
     connect(signaling_.get(), &SignalingClient::connectionLost, this, [this] {
         const bool affected = serverMesh_;
+        sharing_->setIceServers(app_.config().stunServers, {}, 0);
         connections_->setTurnServers({}, 0);
         personal_->setTurnServers({}, 0);
         resetPresence();

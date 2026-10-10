@@ -2,28 +2,30 @@
 
 #include "tmc/app/application_controller.h"
 #include "tmc/app/network_session.h"
-#include "tmc/transfers/file_transfer_service.h"
-#include "tmc/sharing/screen_share_service.h"
-#include "tmc/sharing/system_audio_capture.h"
-#include <QVideoSink>
-#include <QVideoFrame>
-#include "tmc/signaling_client/access_invitation.h"
-#include "tmc/signaling_client/signaling_client.h"
 #include "tmc/app/update_service.h"
 #include "tmc/messaging/chat_message.h"
+#include "tmc/sharing/screen_share_service.h"
+#include "tmc/sharing/screen_streams_model.h"
+#include "tmc/sharing/system_audio_capture.h"
+#include "tmc/signaling_client/access_invitation.h"
+#include "tmc/signaling_client/signaling_client.h"
+#include "tmc/transfers/file_transfer_service.h"
 #include "tmc/ui/global_ptt_monitor.h"
 
 #include <QAbstractListModel>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QDir>
-#include <QStandardPaths>
-#include <QProcess>
 #include <QGuiApplication>
-#include <QVector>
+#include <QJsonDocument>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QUuid>
+#include <QVector>
+#include <QVideoFrame>
+#include <QVideoSink>
 
 #include <cmath>
 #include <utility>
@@ -398,10 +400,11 @@ private:
     QVector<Row> rows_;
 };
 
-AppViewModel::AppViewModel(ApplicationController& controller,
-                           UpdateService& updates, bool identityRequired, QObject* parent)
+AppViewModel::AppViewModel(ApplicationController& controller, UpdateService& updates,
+                           bool identityRequired, QObject* parent)
     : QObject(parent), controller_(controller), updates_(updates),
       messages_(std::make_unique<MessagesModel>()), peers_(std::make_unique<PeersModel>()),
+      screenStreams_(std::make_unique<ScreenStreamsModel>()),
       pttMonitor_(std::make_unique<GlobalPttMonitor>()), identityRequired_(identityRequired) {
 
     connect(&updates_, &UpdateService::stateChanged, this, &AppViewModel::updateStateChanged);
@@ -458,7 +461,16 @@ AppViewModel::AppViewModel(ApplicationController& controller,
     }
 }
 
-AppViewModel::~AppViewModel() = default;
+AppViewModel::~AppViewModel() {
+    if (session_) {
+        // Stop media while the models still exist, without publishing teardown changes to QML.
+        session_->screenShare()->disconnect(this);
+        session_->fileTransfers()->disconnect(this);
+        session_->personalFileTransfers()->disconnect(this);
+        session_->disconnect(this);
+        session_.reset();
+    }
+}
 
 bool AppViewModel::identityRequired() const {
     return identityRequired_;
@@ -551,7 +563,68 @@ void AppViewModel::createAccessInvitation() {
 bool AppViewModel::serverReady() const { return session_ && session_->signalingConnected(); }
 bool AppViewModel::serverBusy() const { return session_ && session_->signalingBusy(); }
 bool AppViewModel::serverMesh() const { return session_ && session_->serverMesh(); }
-QVariantList AppViewModel::acquaintances() const { return session_ ? session_->acquaintances() : QVariantList{}; }
+QVariantList AppViewModel::acquaintances() const {
+    auto rows = session_ ? session_->acquaintances() : QVariantList{};
+    for (auto& item : rows) {
+        auto peer = item.toMap();
+        peer.insert("missedCalls", missedCalls_.value(peer.value("peerId").toString()));
+        item = peer;
+    }
+    return rows;
+}
+
+int AppViewModel::missedCallCount() const {
+    int count = 0;
+    for (const auto value : missedCalls_) count += value;
+    return count;
+}
+
+int AppViewModel::unreadCount() const {
+    return unreadMessages_ + unseenRequests_.size() + missedCallCount();
+}
+
+int AppViewModel::notificationVolume() const {
+    return controller_.config().audio.notificationVolume;
+}
+
+void AppViewModel::setViewingState(bool active, bool chatAtEnd) {
+    windowActive_ = active;
+    chatAtEnd_ = chatAtEnd;
+    if (!active) return;
+    const auto previous = unreadCount();
+    unseenRequests_.clear();
+    if (chatAtEnd && meshVisible()) unreadMessages_ = 0;
+    if (previous != unreadCount()) emit attentionChanged();
+}
+
+void AppViewModel::markMissedCallsViewed(const QString& peerId) {
+    if (!missedCalls_.remove(peerId)) return;
+    emit attentionChanged();
+    emit acquaintancesChanged();
+}
+
+QUrl AppViewModel::clipboardImage() {
+    const auto image = QGuiApplication::clipboard()->image();
+    if (image.isNull()) return {};
+    if (!clipboardImages_.isValid()) {
+        reportError(tr("Не удалось создать папку для изображения из буфера обмена."));
+        return {};
+    }
+    const auto path = clipboardImages_.filePath("screenshot-" +
+        QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png");
+    if (!image.save(path, "PNG")) {
+        QFile::remove(path);
+        reportError(tr("Не удалось сохранить изображение из буфера обмена."));
+        return {};
+    }
+    pendingClipboardImages_.insert(path);
+    return QUrl::fromLocalFile(path);
+}
+
+void AppViewModel::discardClipboardImage(const QUrl& url) {
+    if (url.isLocalFile() && pendingClipboardImages_.remove(url.toLocalFile()))
+        QFile::remove(url.toLocalFile());
+}
 
 void AppViewModel::inviteAcquaintance(const QString& peerId) {
     if (!session_) return;
@@ -572,6 +645,7 @@ void AppViewModel::respondToEntryRequest(const QString& id, bool accept) {
     if (session_) session_->respondToEntryRequest(id, accept);
 }
 void AppViewModel::respondToOnlineInvitation(const QString& invitationId, bool accept) {
+    emit stopInvitationSound();
     if (session_) session_->respondToOnlineInvitation(invitationId, accept);
 }
 
@@ -998,6 +1072,7 @@ void AppViewModel::updateAudioPreferences(const QVariantMap& settings) {
         settings.value("agcCompressionGainDb", current.agcCompressionGainDb).toInt();
     preferences.agcLimiter = settings.value("agcLimiter", current.agcLimiter).toBool();
     preferences.outputVolume = settings.value("outputVolume", current.outputVolume).toInt();
+    preferences.notificationVolume = settings.value("notificationVolume", current.notificationVolume).toInt();
     preferences.qualityKbps = settings.value("qualityKbps", current.qualityKbps).toInt();
     preferences.inputMode = static_cast<AudioInputMode>(
         settings.value("inputMode", static_cast<int>(current.inputMode)).toInt());
@@ -1081,7 +1156,11 @@ void AppViewModel::installUpdate() {
 
 QString AppViewModel::diagnostics() const {
     const auto network = session_ ? session_->diagnostics() : QString("Mesh не активен");
-    return "Сигналинг: " + signalingStatus() + "\n" + network + "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
+    return "Сигналинг: " + signalingStatus() + "\n" + network + "\n\nЭкран WebRTC:\n" +
+           (session_ ? QString::fromUtf8(QJsonDocument(session_->screenShare()->diagnostics())
+                                             .toJson(QJsonDocument::Indented))
+                     : QString{}) +
+           "\n\nЛокальный Peer ID: " + controller_.identity().peerId + "\nSTUN:\n  " +
            controller_.config().stunServers.join("\n  ") + "\n\nКаталог данных:\n" +
            controller_.dataDirectory() + "\nЛог:\n" + controller_.dataDirectory() + "/debug.log";
 }
@@ -1091,11 +1170,11 @@ void AppViewModel::initializeSession() {
         return;
     }
     session_ = std::make_unique<NetworkSession>(controller_, controller_.connectionPolicy());
-    connect(session_->screenShare(), &ScreenShareService::changed, this, &AppViewModel::screenShareChanged);
-    connect(session_->screenShare(), &ScreenShareService::frameReady, this, [this](const QImage& image) {
-        lastStreamFrame_ = image;
-        if (screenVideoSink_) screenVideoSink_->setVideoFrame(image.isNull() ? QVideoFrame{} : QVideoFrame(image));
+    connect(session_->screenShare(), &ScreenShareService::changed, this, [this] {
+        screenStreams_->sync(session_->screenShare()->streams());
+        emit screenShareChanged();
     });
+    session_->screenShare()->setAudioVolume(streamVolume_);
     connect(session_->fileTransfers(), &FileTransferService::changed, this, [this] {
         emit chatLayoutAboutToChange();
         messages_->syncFiles(fileTransfers());
@@ -1121,6 +1200,8 @@ void AppViewModel::initializeSession() {
                 if (state == MeshSessionState::Disconnected) {
                     announcedParticipants_.clear();
                     messages_->clear();
+                    unreadMessages_ = 0;
+                    emit attentionChanged();
                     peers_->resetSelf(controller_.identity());
                     setMeshPeerCounts(0, 0);
                     if (updates_.state() == "ready") {
@@ -1171,7 +1252,16 @@ void AppViewModel::initializeSession() {
                 emit chatLayoutAboutToChange();
                 messages_->add(message, author, local);
                 emit chatLayoutChanged();
-                if (!local) emit notificationSound("message");
+                if (!local) {
+                    if (!windowActive_ || !chatAtEnd_) {
+                        ++unreadMessages_;
+                        emit attentionChanged();
+                    }
+                    if (!windowActive_) {
+                        emit notificationSound("message");
+                        emit desktopNotification(author, message.text.left(240));
+                    }
+                }
             });
     connect(session_.get(), &NetworkSession::deliveryChanged, this,
             [this](const QString& id, int acknowledged, int expected) {
@@ -1207,14 +1297,38 @@ void AppViewModel::initializeSession() {
             this, &AppViewModel::acquaintancesChanged);
     connect(session_.get(), &NetworkSession::entryRequestReceived, this,
             [this](const QString& id, const QString& name) {
+                if (!windowActive_) {
+                    unseenRequests_.insert("entry:" + id);
+                    emit attentionChanged();
+                    emit desktopNotification(tr("Запрос на вход"), tr("%1 просится в беседу").arg(name));
+                }
                 emit entryRequestReceived(id, name);
                 emit notificationSound("knock");
             });
-    connect(session_.get(), &NetworkSession::entryRequestClosed, this, &AppViewModel::entryRequestClosed);
-    connect(session_.get(), &NetworkSession::onlineInvitationReceived,
-            this, &AppViewModel::onlineInvitationReceived);
-    connect(session_.get(), &NetworkSession::onlineInvitationClosed,
-            this, &AppViewModel::onlineInvitationClosed);
+    connect(session_.get(), &NetworkSession::entryRequestClosed, this, [this](const QString& id) {
+        if (unseenRequests_.remove("entry:" + id)) emit attentionChanged();
+        emit entryRequestClosed(id);
+    });
+    connect(session_.get(), &NetworkSession::onlineInvitationReceived, this,
+            [this](const QString& id, const QString& name, const QString& server) {
+                if (!windowActive_) {
+                    unseenRequests_.insert("invitation:" + id);
+                    emit attentionChanged();
+                    emit desktopNotification(tr("Приглашение в беседу"), tr("%1 хочет пообщаться с вами").arg(name));
+                }
+                emit onlineInvitationReceived(id, name, server);
+                emit notificationSound("invitation");
+            });
+    connect(session_.get(), &NetworkSession::onlineInvitationClosed, this, [this](const QString& id) {
+        if (unseenRequests_.remove("invitation:" + id)) emit attentionChanged();
+        emit stopInvitationSound();
+        emit onlineInvitationClosed(id);
+    });
+    connect(session_.get(), &NetworkSession::onlineInvitationMissed, this, [this](const QString& peerId) {
+        ++missedCalls_[peerId];
+        emit attentionChanged();
+        emit acquaintancesChanged();
+    });
     connect(session_.get(), &NetworkSession::serverInvitationReady, this, [this](const QString& link) {
         signalingDocument_.clear();
         QGuiApplication::clipboard()->setText(link);
@@ -1330,6 +1444,7 @@ QVariantList AppViewModel::fileTransfers() const {
 
 void AppViewModel::sendFileToRecipients(const QUrl& file, const QStringList& peerIds) {
     if (!session_ || !file.isLocalFile()) return;
+    pendingClipboardImages_.remove(file.toLocalFile());
     const auto group = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QSet<QString> sent;
     for (const auto& peer : peerIds) {
@@ -1412,17 +1527,98 @@ QString AppViewModel::screenShareTitle() const {
     const auto* share = session_->screenShare();
     return (share->sharing() ? QString("Вы показываете: ") : session_->peerDisplayName(share->owner()) + " показывает: ") + share->title();
 }
-bool AppViewModel::systemAudioSupported() const { return SystemAudioCapture::supported(); }
-QVariantList AppViewModel::screenSources() { return session_ ? session_->screenShare()->sources() : QVariantList{}; }
-void AppViewModel::startScreenShare(int sourceIndex, bool systemAudio) {
+bool AppViewModel::systemAudioSupported() const { return SystemAudioCapture::supported();
+}
+
+QVariantList AppViewModel::screenSources() {
+    return session_ ? session_->screenShare()->sources() : QVariantList{};
+}
+
+QAbstractItemModel* AppViewModel::screenStreams() const {
+    return screenStreams_.get();
+}
+
+int AppViewModel::screenQualityHeight() const {
+    return controller_.config().screenQuality.height;
+}
+
+int AppViewModel::screenQualityFps() const {
+    return controller_.config().screenQuality.fps;
+}
+
+QVariantMap AppViewModel::screenStream(const QString& id) const {
+    if (session_) {
+        for (const auto& value : session_->screenShare()->streams()) {
+            if (value.toMap().value("streamId") == id) {
+                return value.toMap();
+            }
+        }
+    }
+    return {};
+}
+
+QString AppViewModel::screenOwnerName(const QString& peer) const {
+    if (peer == controller_.identity().peerId) {
+        return QStringLiteral("Вы");
+    }
+    return session_ ? session_->peerDisplayName(peer) : peer;
+}
+
+void AppViewModel::startScreenShare(int index, bool systemAudio, int height, int fps) {
     if (!session_) return;
-    const auto result = session_->screenShare()->start(sourceIndex, systemAudio);
+    const ScreenQuality quality{height, fps};
+    const auto saved = controller_.updateScreenQuality(quality);
+    if (!saved) {
+        reportError(saved.error());
+        return;
+    }
+    const auto result = session_->screenShare()->start(index, systemAudio, quality);
     if (!result) reportError(result.error());
 }
-void AppViewModel::stopScreenShare() { if (session_) session_->screenShare()->stop(); }
-void AppViewModel::setScreenVideoSink(QObject* sink) {
-    screenVideoSink_ = qobject_cast<QVideoSink*>(sink);
-    if (screenVideoSink_) screenVideoSink_->setVideoFrame(lastStreamFrame_.isNull() ? QVideoFrame{} : QVideoFrame(lastStreamFrame_));
+
+void AppViewModel::stopScreenShare() {
+    if (session_) {
+        session_->screenShare()->stop();
+    }
+}
+
+void AppViewModel::subscribeScreen(const QString& id, bool selected) {
+    if (session_) {
+        session_->screenShare()->subscribe(id, selected);
+    }
+}
+
+void AppViewModel::selectScreenAudio(const QString& id) {
+    if (session_) {
+        session_->screenShare()->selectAudio(id);
+    }
+}
+
+void AppViewModel::retryScreen(const QString& id) {
+    if (session_) {
+        session_->screenShare()->retry(id);
+    }
+}
+
+void AppViewModel::setScreenQuality(const QString& id, int height, int fps) {
+    if (!session_) {
+        return;
+    }
+    const ScreenQuality quality{height, fps};
+    if (id == session_->screenShare()->localStream()) {
+        const auto saved = controller_.updateScreenQuality(quality);
+        if (!saved) {
+            reportError(saved.error());
+            return;
+        }
+    }
+    session_->screenShare()->setQuality(id, quality);
+}
+
+void AppViewModel::setScreenVideoSink(const QString& id, QObject* sink, bool attach) {
+    if (session_) {
+        session_->screenShare()->setVideoSink(id, qobject_cast<QVideoSink*>(sink), attach);
+    }
 }
 
 } // namespace tmc

@@ -6,6 +6,7 @@ Dialog {
     id: control
 
     required property var viewModel
+    signal previewNotification(string kind, int volume)
     readonly property string defaultDeviceName: qsTr("Системное устройство по умолчанию")
 
     function qualityIndex(value) {
@@ -41,6 +42,7 @@ Dialog {
         agcGainSpin.value = control.viewModel.agcCompressionGainDb;
         agcLimiterSwitch.checked = control.viewModel.agcLimiter;
         volumeSlider.value = control.viewModel.outputVolume;
+        notificationVolumeSlider.value = control.viewModel.notificationVolume;
         qualityCombo.currentIndex = control.qualityIndex(control.viewModel.qualityKbps);
         advancedToggle.checked = false;
     }
@@ -57,6 +59,7 @@ Dialog {
         agcCompressionGainDb: agcGainSpin.value,
         agcLimiter: agcLimiterSwitch.checked,
         outputVolume: Math.round(volumeSlider.value),
+        notificationVolume: Math.round(notificationVolumeSlider.value),
         qualityKbps: qualityCombo.currentValue,
         inputMode: inputModeCombo.currentIndex,
         vadThreshold: vadThresholdSlider.value,
@@ -208,6 +211,37 @@ Dialog {
                 from: 0
                 to: 200
                 stepSize: 5
+            }
+
+            Label {
+                text: qsTr("Громкость уведомлений: %1%").arg(Math.round(notificationVolumeSlider.value))
+            }
+            Slider {
+                id: notificationVolumeSlider
+                Layout.fillWidth: true
+                from: 0
+                to: 100
+                stepSize: 5
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox {
+                    id: notificationKind
+                    Layout.fillWidth: true
+                    textRole: "text"
+                    valueRole: "kind"
+                    model: [
+                        { text: qsTr("Приглашение в беседу"), kind: "invitation" },
+                        { text: qsTr("Запрос на вход"), kind: "knock" },
+                        { text: qsTr("Сообщение"), kind: "message" },
+                        { text: qsTr("Участник вошёл"), kind: "join" },
+                        { text: qsTr("Участник вышел"), kind: "leave" }
+                    ]
+                }
+                Button {
+                    text: qsTr("Прослушать")
+                    onClicked: control.previewNotification(notificationKind.currentValue, Math.round(notificationVolumeSlider.value))
+                }
             }
 
             Label { text: qsTr("Качество Opus") }

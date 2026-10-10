@@ -153,6 +153,7 @@ Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
         std::pair{"agc_compression_gain_db", QJsonValue::Double},
         std::pair{"agc_limiter", QJsonValue::Bool},
         std::pair{"output_volume", QJsonValue::Double},
+        std::pair{"notification_volume", QJsonValue::Double},
         std::pair{"quality_kbps", QJsonValue::Double},
         std::pair{"input_mode", QJsonValue::String},
         std::pair{"vad_threshold", QJsonValue::Double},
@@ -178,6 +179,7 @@ Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
     const auto noiseSuppressionLevel = noiseSuppressionLevelFromName(
         audio.value("noise_suppression_level").toString("moderate"));
     const auto outputVolume = audio.value("output_volume").toDouble(100);
+    const auto notificationVolume = audio.value("notification_volume").toDouble(50);
     const auto qualityKbps = audio.value("quality_kbps").toDouble(48);
     const auto agcTargetLevelDbfs = audio.value("agc_target_level_dbfs").toDouble(3);
     const auto agcCompressionGainDb = audio.value("agc_compression_gain_db").toDouble(9);
@@ -185,7 +187,8 @@ Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
     const auto vadHangoverMs = audio.value("vad_hangover_ms").toDouble(200);
     const bool validQuality = qualityKbps == 24 || qualityKbps == 32 || qualityKbps == 48;
     if (!inputMode || !noiseSuppressionLevel ||
-        !isIntegerInRange(outputVolume, 0, 200) || !validQuality ||
+        !isIntegerInRange(outputVolume, 0, 200) ||
+        !isIntegerInRange(notificationVolume, 0, 100) || !validQuality ||
         !isIntegerInRange(agcTargetLevelDbfs, 0, 31) ||
         !isIntegerInRange(agcCompressionGainDb, 0, 90) || !std::isfinite(vadThreshold) ||
         vadThreshold < 0.0 || vadThreshold > 1.0 ||
@@ -193,6 +196,7 @@ Result<AudioPreferences> parseAudioPreferences(const QJsonObject& root) {
         return Result<AudioPreferences>::failure("Invalid audio settings");
     }
     preferences.outputVolume = static_cast<int>(outputVolume);
+    preferences.notificationVolume = static_cast<int>(notificationVolume);
     preferences.qualityKbps = static_cast<int>(qualityKbps);
     preferences.agcTargetLevelDbfs = static_cast<int>(agcTargetLevelDbfs);
     preferences.agcCompressionGainDb = static_cast<int>(agcCompressionGainDb);
@@ -262,7 +266,8 @@ bool AudioPreferences::isValid() const {
     if (!validInputMode || !validNoiseSuppressionLevel) {
         return false;
     }
-    if (outputVolume < 0 || outputVolume > 200 ||
+    if (notificationVolume < 0 || notificationVolume > 100 ||
+        outputVolume < 0 || outputVolume > 200 ||
         (qualityKbps != 24 && qualityKbps != 32 && qualityKbps != 48)) {
         return false;
     }
@@ -324,10 +329,28 @@ Result<AppConfig> AppConfig::load(const QString& path) {
         return Result<AppConfig>::failure(audio.error());
     }
     c.audio = std::move(audio.value());
+    if (root.contains("screen_quality")) {
+        if (!root.value("screen_quality").isObject()) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+        const auto quality = root.value("screen_quality").toObject();
+        const auto height = quality.value("height").toDouble(-1);
+        const auto fps = quality.value("fps").toDouble(-1);
+        if (!isIntegerInRange(height, 720, 1440) || !isIntegerInRange(fps, 30, 60)) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+        c.screenQuality = {static_cast<int>(height), static_cast<int>(fps)};
+        if (!c.screenQuality.isValid()) {
+            return Result<AppConfig>::failure("Invalid screen quality");
+        }
+    }
     return Result<AppConfig>::success(std::move(c));
 }
 
 Result<void> AppConfig::save(const QString& path) const {
+    if (!screenQuality.isValid()) {
+        return Result<void>::failure("Invalid screen quality");
+    }
     if (!validSignalingUrl(signalingServerUrl)) {
         return Result<void>::failure("Укажите адрес ws:// или wss:// без пароля, query и fragment.");
     }
@@ -359,13 +382,17 @@ Result<void> AppConfig::save(const QString& path) const {
         {"agc_compression_gain_db", audio.agcCompressionGainDb},
         {"agc_limiter", audio.agcLimiter},
         {"output_volume", audio.outputVolume},
+        {"notification_volume", audio.notificationVolume},
         {"quality_kbps", audio.qualityKbps},
         {"input_mode", inputModeName(audio.inputMode)},
         {"vad_threshold", audio.vadThreshold},
         {"vad_hangover_ms", audio.vadHangoverMs},
         {"ptt_binding", pttBinding}};
-    const QJsonObject root{{"stun_servers", servers}, {"audio", audioObject},
-                           {"signaling_server_url", signalingServerUrl}};
+    const QJsonObject root{{"stun_servers", servers},
+                           {"audio", audioObject},
+                           {"signaling_server_url", signalingServerUrl},
+                           {"screen_quality", QJsonObject{{"height", screenQuality.height},
+                                                          {"fps", screenQuality.fps}}}};
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         return Result<void>::failure("Cannot write configuration: " + file.errorString());

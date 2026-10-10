@@ -6,7 +6,34 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
-    NotificationSounds { id: notificationSounds }
+    NotificationSounds {
+        id: notificationSounds
+        volumePercent: appViewModel.notificationVolume
+    }
+    function updateViewingState() {
+        appViewModel.setViewingState(root.active && root.visible,
+            appViewModel.meshVisible && messageList.atYEnd);
+    }
+    onActiveChanged: Qt.callLater(updateViewingState)
+    onVisibleChanged: Qt.callLater(updateViewingState)
+    Component.onCompleted: Qt.callLater(updateViewingState)
+
+    function pasteIntoChat() {
+        if (clipboardPreview.visible) return;
+        const image = appViewModel.clipboardImage();
+        if (!image.toString().length) { messageInput.paste(); return; }
+        const recipients = appViewModel.fileRecipients();
+        if (!recipients.length) {
+            appViewModel.discardClipboardImage(image);
+            errorDialog.text = qsTr("Для отправки изображения нужен подключённый участник беседы.");
+            errorDialog.open();
+            return;
+        }
+        clipboardPreview.imageSource = image;
+        clipboardPreview.recipients = recipients;
+        clipboardPreview.sent = false;
+        clipboardPreview.open();
+    }
 
     function confirmFiles(urls, peerId) {
         const files = Array.from(urls).filter(url => url.toString().startsWith("file:"));
@@ -475,54 +502,16 @@ ApplicationWindow {
                         }
                         Button {
                             text: appViewModel.sharingScreen ? qsTr("Остановить показ") : qsTr("Показать экран…")
-                            enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0 && !appViewModel.viewingScreen)
+                            enabled: appViewModel.sharingScreen || (appViewModel.connectedPeerCount > 0)
                             onClicked: appViewModel.sharingScreen ? appViewModel.stopScreenShare() : screenShareDialog.open()
                         }
                     }
                 }
 
-                Label {
+                ScreenStreamsPane {
                     Layout.fillWidth: true
-                    visible: appViewModel.sharingScreen || appViewModel.viewingScreen
-                    text: visible ? appViewModel.screenShareTitle : ""
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    color: appPalette.textSecondary
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: visible ? Math.min(300, root.height * 0.35) : 0
-                    visible: appViewModel.sharingScreen || appViewModel.viewingScreen
-                    color: "#17232f"
-                    radius: 10
-                    VideoOutput {
-                        id: previewVideo
-                        anchors.fill: parent
-                        fillMode: VideoOutput.PreserveAspectFit
-                        Component.onCompleted: appViewModel.setScreenVideoSink(videoSink)
-                        Component.onDestruction: appViewModel.setScreenVideoSink(null)
-                    }
-                    Button {
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: 8
-                        text: qsTr("Развернуть")
-                        onClicked: expandedStream.open()
-                    }
-                }
-
-                RowLayout {
-                    visible: appViewModel.viewingScreen
-                    Layout.fillWidth: true
-                    Label { text: qsTr("Звук трансляции") }
-                    Slider {
-                        from: 0; to: 100; stepSize: 1
-                        value: appViewModel.streamVolume
-                        onMoved: appViewModel.streamVolume = Math.round(value)
-                        Accessible.name: qsTr("Громкость трансляции")
-                    }
-                    Label { text: appViewModel.streamVolume + "%" }
+                    Layout.preferredHeight: implicitHeight
+                    viewModel: appViewModel
                 }
 
                 SplitView {
@@ -634,7 +623,9 @@ ApplicationWindow {
                                     if (messageList.followTail) messageList.scrollToLatest();
                                 });
                             }
+                            onAtYEndChanged: Qt.callLater(root.updateViewingState)
                             onCountChanged: {
+                                Qt.callLater(root.updateViewingState);
                                 if (count === 0) { followTail = true; readingAnchor = ""; }
                                 keepTailVisible();
                             }
@@ -722,14 +713,34 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        Label {
+                                        TextEdit {
                                             id: messageText
-
                                             Layout.fillWidth: true
                                             text: messageDelegate.text
-                                            textFormat: Text.PlainText
-                                            wrapMode: Text.Wrap
+                                            textFormat: TextEdit.PlainText
+                                            wrapMode: TextEdit.Wrap
                                             color: appPalette.textPrimary
+                                            readOnly: true
+                                            selectByMouse: true
+                                            persistentSelection: true
+                                            selectionColor: appPalette.accent
+                                            selectedTextColor: appPalette.accentText
+                                            TapHandler {
+                                                acceptedButtons: Qt.RightButton
+                                                onTapped: function(point) { messageCopyMenu.popup(point.position.x, point.position.y); }
+                                            }
+                                            Menu {
+                                                id: messageCopyMenu
+                                                MenuItem {
+                                                    text: qsTr("Копировать выделенное")
+                                                    enabled: messageText.selectedText.length > 0
+                                                    onTriggered: messageText.copy()
+                                                }
+                                                MenuItem {
+                                                    text: qsTr("Копировать сообщение")
+                                                    onTriggered: appViewModel.copyText(messageDelegate.text)
+                                                }
+                                            }
                                         }
 
                                         Label {
@@ -900,33 +911,13 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
 
-                    TextField {
+                    ChatMessageInput {
                         id: messageInput
-
                         Layout.fillWidth: true
+                        Layout.preferredHeight: implicitHeight
                         placeholderText: qsTr("Введите сообщение…")
-                        maximumLength: 4096
-                        onAccepted: meshPage.sendMessage()
-                        persistentSelection: true
-                        TapHandler {
-                            acceptedButtons: Qt.RightButton
-                            onTapped: function(eventPoint) {
-                                messageEditMenu.popup(eventPoint.position.x, eventPoint.position.y);
-                            }
-                        }
-                        Menu {
-                            id: messageEditMenu
-                            MenuItem {
-                                text: qsTr("Копировать выделенное")
-                                enabled: messageInput.selectedText.length > 0
-                                onTriggered: messageInput.copy()
-                            }
-                            MenuItem {
-                                text: qsTr("Вставить")
-                                enabled: messageInput.canPaste
-                                onTriggered: { messageInput.paste(); messageInput.forceActiveFocus(); }
-                            }
-                        }
+                        onSubmitted: meshPage.sendMessage()
+                        onPasteRequested: root.pasteIntoChat()
                     }
 
                     ToolButton {
@@ -1059,6 +1050,44 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: clipboardPreview
+        property url imageSource: ""
+        property var recipients: []
+        property bool sent: false
+        title: qsTr("Отправить изображение?")
+        anchors.centerIn: parent
+        width: Math.min(600, root.width - 60)
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: ColumnLayout {
+            Image {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(360, root.height * 0.5)
+                source: clipboardPreview.imageSource
+                fillMode: Image.PreserveAspectFit
+                cache: false
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Получатели: %1").arg(clipboardPreview.recipients.map(peer => peer.displayName).join(", "))
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+            }
+        }
+        onAccepted: {
+            sent = true;
+            appViewModel.sendFileToRecipients(imageSource, recipients.map(peer => peer.peerId));
+            messageList.keepTailVisible();
+        }
+        onClosed: {
+            if (!sent) appViewModel.discardClipboardImage(imageSource);
+            imageSource = "";
+            recipients = [];
+            Qt.callLater(() => messageInput.forceActiveFocus());
+        }
+    }
+
+    Dialog {
         id: imageViewer
         property string imageSource: ""
         property string imageName: ""
@@ -1091,48 +1120,6 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 visible: viewedImage.status === Image.Error
                 text: qsTr("Не удалось открыть изображение")
-            }
-        }
-    }
-
-    Dialog {
-        id: expandedStream
-        parent: Overlay.overlay
-        x: 8; y: 8
-        width: parent.width - 16
-        height: parent.height - 16
-        modal: true
-        title: appViewModel.screenShareTitle
-        onOpened: appViewModel.setScreenVideoSink(expandedVideo.videoSink)
-        onClosed: appViewModel.setScreenVideoSink(previewVideo.videoSink)
-        contentItem: ColumnLayout {
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: "#17232f"
-                VideoOutput {
-                    id: expandedVideo
-                    anchors.fill: parent
-                    fillMode: VideoOutput.PreserveAspectFit
-                }
-            }
-            RowLayout {
-                Label { visible: appViewModel.viewingScreen; text: qsTr("Звук трансляции") }
-                Slider {
-                    visible: appViewModel.viewingScreen
-                    from: 0; to: 100; stepSize: 1
-                    value: appViewModel.streamVolume
-                    onMoved: appViewModel.streamVolume = Math.round(value)
-                    Accessible.name: qsTr("Громкость трансляции")
-                }
-                Label { visible: appViewModel.viewingScreen; text: appViewModel.streamVolume + "%" }
-                Item { Layout.fillWidth: true }
-                Button {
-                    visible: appViewModel.sharingScreen
-                    text: qsTr("Остановить показ")
-                    onClicked: appViewModel.stopScreenShare()
-                }
-                Button { text: qsTr("Свернуть"); onClicked: expandedStream.close() }
             }
         }
     }
@@ -1311,6 +1298,8 @@ ApplicationWindow {
         id: audioSettings
 
         viewModel: appViewModel
+        onPreviewNotification: function(kind, volume) { notificationSounds.preview(kind, volume); }
+        onClosed: notificationSounds.stopPreview()
     }
 
     DiagnosticsDialog {
@@ -1480,7 +1469,12 @@ ApplicationWindow {
     Connections {
         target: appViewModel
         function onChatLayoutAboutToChange() { messageList.rememberReadingPosition(); }
-        function onChatLayoutChanged() { messageList.restoreReadingPosition(); }
+        function onChatLayoutChanged() {
+            messageList.restoreReadingPosition();
+            Qt.callLater(root.updateViewingState);
+        }
+        function onMeshStateChanged() { Qt.callLater(root.updateViewingState); }
+        function onStopInvitationSound() { notificationSounds.stopInvitation(); }
         function onEntryRequestReceived(id, displayName) {
             entryRequestCard.senderName = displayName;
             entryRequestCard.accepting = false;
@@ -1496,9 +1490,6 @@ ApplicationWindow {
             if (appViewModel.fileTransfers.some(item => item.id.startsWith("personal:") && item.canAccept))
                 fileTransfersDialog.open();
             else messageList.keepTailVisible();
-        }
-        function onScreenShareChanged() {
-            if (!appViewModel.sharingScreen && !appViewModel.viewingScreen) expandedStream.close();
         }
         function onErrorRequested(message) {
             if (errorDialog.visible && errorDialog.text === message)

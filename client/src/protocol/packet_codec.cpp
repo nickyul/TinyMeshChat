@@ -3,6 +3,7 @@
 #include "tmc/core/limits.h"
 #include "tmc/core/uuid.h"
 #include "tmc/security/security.h"
+#include "tmc/sharing/screen_control.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -74,6 +75,8 @@ bool payloadMatchesType(PacketType type, const PacketPayload& payload) {
     case PacketType::SessionOffer:
     case PacketType::SessionAnswer:
         return std::holds_alternative<SessionSignalingPayload>(payload);
+    case PacketType::ScreenControl:
+        return std::holds_alternative<ScreenControlPayload>(payload);
     case PacketType::SignalingState:
         return std::holds_alternative<SignalingStatePayload>(payload);
     case PacketType::SignalingJoinRequest:
@@ -128,6 +131,8 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
                 return {{"link", value.connectionId},
                         {"negotiation", static_cast<qint64>(value.negotiation)},
                         {"sdp", value.sdp}};
+            } else if constexpr (std::is_same_v<T, ScreenControlPayload>) {
+                return value.message;
             } else if constexpr (std::is_same_v<T, SignalingStatePayload>) {
                 return {{"server", value.server}, {"session_id", value.sessionId},
                         {"room_id", value.roomId}};
@@ -147,6 +152,13 @@ QJsonObject payloadToJson(const PacketPayload& payload) {
 
 Result<PacketPayload> decodePayload(PacketType type, const QJsonObject& payload) {
     switch (type) {
+    case PacketType::ScreenControl: {
+        const auto result = decodeScreenControl(payload);
+        if (!result) {
+            return Result<PacketPayload>::failure(result.error());
+        }
+        return Result<PacketPayload>::success(ScreenControlPayload{result.value()});
+    }
     case PacketType::PeerHello: {
         const auto displayName = payload.value("display_name").toString();
         if (displayName.trimmed().isEmpty() ||
@@ -328,7 +340,7 @@ Result<QByteArray> PacketCodec::encode(const Packet& packet) {
         return Result<QByteArray>::failure("Packet contains invalid routing fields");
     }
     const auto body = payloadToJson(packet.payload);
-    if (isRecoveryPacket(packet.type) &&
+    if ((isRecoveryPacket(packet.type) || packet.type == PacketType::ScreenControl) &&
         (packet.targetId.isEmpty() || packet.ttl != 0 || !decodePayload(packet.type, body))) {
         return Result<QByteArray>::failure("Invalid direct signaling recovery packet");
     }
@@ -381,8 +393,15 @@ Result<Packet> PacketCodec::decode(const QByteArray& bytes, const QString& expec
     if ((!targetId.isEmpty() && !security::validKey(targetId)) || ttl < 0 || ttl > 16) {
         return Result<Packet>::failure("Packet contains invalid routing fields");
     }
-    if (isRecoveryPacket(*type) && (targetId.isEmpty() || ttl != 0)) {
+    if ((isRecoveryPacket(*type) || *type == PacketType::ScreenControl) &&
+        (targetId.isEmpty() || ttl != 0)) {
         return Result<Packet>::failure("Signaling recovery requires a direct target");
+    }
+    if (*type == PacketType::ScreenControl &&
+        (!object.value("to").isString() ||
+         (object.contains("ttl") &&
+          (!object.value("ttl").isDouble() || object.value("ttl").toDouble(-1) != 0)))) {
+        return Result<Packet>::failure("Screen control requires a direct target and zero TTL");
     }
     if (!expectedMesh.isEmpty() && meshId != expectedMesh) {
         return Result<Packet>::failure("Packet belongs to another mesh");

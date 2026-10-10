@@ -1,19 +1,39 @@
 #include "tmc/sharing/system_audio_capture.h"
+
 #include <QPointer>
+
 #include <atomic>
+#include <mutex>
 
 namespace tmc {
 struct SystemAudioCapture::Delivery {
     std::atomic<bool> active{true};
     std::atomic<int> pending{0};
     QPointer<SystemAudioCapture> owner;
+    std::mutex mutex;
+    SampleSink sink;
 };
+
+void SystemAudioCapture::setSampleSink(SampleSink sink) {
+    sampleSink_ = std::move(sink);
+}
 
 SystemAudioCapture::Sink SystemAudioCapture::makeSink() {
     delivery_ = std::make_shared<Delivery>();
     delivery_->owner = this;
+    delivery_->sink = sampleSink_;
     return [delivery = delivery_](const float* samples, int frames) {
         if (!delivery->active || !samples || frames <= 0 || frames > 8192) return;
+        {
+            std::lock_guard lock(delivery->mutex);
+            if (!delivery->active) {
+                return;
+            }
+            if (delivery->sink) {
+                delivery->sink(samples, frames);
+                return;
+            }
+        }
         if (delivery->pending.fetch_add(1) >= 8) { delivery->pending.fetch_sub(1); return; }
         QByteArray pcm(reinterpret_cast<const char*>(samples), frames * 2 * static_cast<int>(sizeof(float)));
         const auto owner = delivery->owner;
@@ -35,6 +55,9 @@ std::function<void(QString)> SystemAudioCapture::makeErrorSink() {
 }
 
 void SystemAudioCapture::invalidateSink() {
-    if (delivery_) delivery_->active = false;
+    if (delivery_) {
+        std::lock_guard lock(delivery_->mutex);
+        delivery_->active = false;
+    }
 }
 } // namespace tmc
